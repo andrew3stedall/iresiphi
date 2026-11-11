@@ -50,6 +50,11 @@ The package name `iresiphi` returned no package record in direct checks of PyPI,
 
 “Iresiphi” is the isiZulu word for “recipe.” The name reflects the idea of a reusable set of instructions for turning raw data ingredients into a specified result.
 
+## Design and research
+
+- [Initial design notes](DESIGN.md) record the vocabulary and open design questions.
+- [Domain grounding](docs/research/domain-grounding.md) examines related systems, documented tradeoffs, correctness pitfalls, lineage, and execution options. It includes a worked example and distinguishes evidence from hypotheses for Iresiphi.
+
 ## License
 
 Not selected yet.
