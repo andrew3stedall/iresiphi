@@ -2,6 +2,8 @@
 
 Research date and source access date: 11 November 2026. This note grounds the direction in [README.md](../../README.md) and [DESIGN.md](../../DESIGN.md). It is research for further design, not an API specification or an engine selection. Iresiphi is planned, so all proposed behavior below is a hypothesis.
 
+A [focused follow-up on Snowflake semantic views](snowflake-semantic-views.md) adds evidence on bridge deduplication, dimension compatibility, and explicit calculation grain. Read it alongside the differentiation hypotheses below; Snowflake already covers substantial parts of the proposed semantic-planning model.
+
 ## Main finding and evidence limits
 
 Iresiphi sits closest to a grain-aware semantic query planner packaged as a library. Its proposed combination is useful to investigate: preserve source names, describe relationships, request an output grain, and distinguish rollup, broadcast, and allocation. Those individual ideas have substantial precedent. MetricFlow already plans metric queries through entity relationships, Malloy models aggregate locality, and Featuretools computes relational features for a target dataframe. The opportunity is a coherent engineering workflow with explicit grain changes and explanations, rather than a claim to have invented relational feature computation. [MetricFlow overview](https://docs.getdbt.com/docs/build/about-metricflow), [Malloy aggregates](https://docs.malloydata.dev/documentation/language/aggregates), [Featuretools deep feature synthesis](https://docs.featuretools.com/en/stable/getting_started/afe.html).

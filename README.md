@@ -54,6 +54,7 @@ The package name `iresiphi` returned no package record in direct checks of PyPI,
 
 - [Initial design notes](DESIGN.md) record the vocabulary and open design questions.
 - [Domain grounding](docs/research/domain-grounding.md) examines related systems, documented tradeoffs, correctness pitfalls, lineage, and execution options. It includes a worked example and distinguishes evidence from hypotheses for Iresiphi.
+- [Snowflake semantic views](docs/research/snowflake-semantic-views.md) studies reusable source mappings, relationship-aware metrics, level-of-detail calculations, and their implications for Iresiphi.
 
 ## License
 
