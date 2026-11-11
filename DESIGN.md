@@ -10,6 +10,24 @@ Iresiphi aims to let engineers preserve source structures and define reusable in
 
 The shared terminology lives in [CONTEXT.md](CONTEXT.md).
 
+## Rust and performance
+
+Rust is the preferred implementation language for recipe validation, dependency resolution, planning, and local execution. Python and TypeScript should expose thin interfaces to the same core so calculation semantics and planning behavior stay consistent. Use host-language adapters where needed to work with existing dataframe objects, connections, and execution environments.
+
+For local computation, evaluate an existing Rust execution engine before building joins, aggregation, or an optimizer from scratch. The engine and binding technologies remain open decisions. Remote operations should execute in Snowflake, SQL databases, or Spark when the chosen plan calls for them; a Rust core does not require local execution of all work.
+
+Performance requirements should shape the design from the beginning:
+
+- Keep per-record calculation loops out of the Python and JavaScript interfaces. Prefer typed batch operations and explicit batch extension points.
+- Minimize unnecessary copies, serialization, and transfers. Verify specific interchange paths before promising zero-copy behavior.
+- Push filters, projections, and aggregation to an appropriate executor when this preserves meaning and reduces total work or transfer.
+- Reuse shared calculations across requested fields and avoid join expansion when a semantically equivalent plan avoids it.
+- Bound concurrency, buffering, and memory use. Evaluate partitioning and disk spill for work that exceeds available memory.
+- Include required source validation and diagnostics in performance measurements. Make expensive contribution tracing explicit without silently weakening correctness checks.
+- Measure complete recipes, including source access, staging, conversion, planning, execution, and output delivery. Record latency, throughput, transferred bytes, and peak memory against representative baselines.
+
+Rust is an implementation direction, not evidence of a speed advantage. Engine choice and optimization priorities should follow correctness checks and measurements on the user's actual workflow. No benchmarks have been performed yet.
+
 ## Source and execution requirements
 
 Users should be able to relate inputs across formats, locations, and runtimes without first moving everything into a prescribed store or converting everything to one user-facing dataframe format. Required source families include SQL databases, Snowflake, in-memory dataframes, Spark dataframes, NDJSON, XML, Excel, CSV, text, and Parquet.

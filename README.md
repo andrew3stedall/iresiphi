@@ -6,6 +6,8 @@ Instead of repeatedly reshaping every source into a standard schema, define reus
 
 The planned implementation has a Rust core with Python and TypeScript interfaces. This repository captures the initial design; the API and implementation are not available yet.
 
+Rust is preferred for validation, planning, and local execution, with thin language bindings. Performance work will cover complete recipes, including data movement and memory use, while retaining execution in databases or Spark where the plan calls for it. No performance advantage has been measured yet.
+
 ## Design direction
 
 - Keep source datasets in their native structure and field names.
