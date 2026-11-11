@@ -9,11 +9,13 @@ The planned implementation has a Rust core with Python and TypeScript interfaces
 ## Design direction
 
 - Keep source datasets in their native structure and field names.
+- Compose inputs across formats and locations, including databases, dataframes, Spark dataframes, documents, and files, through extensible adapters.
 - Declare how source fields correspond and how records relate.
 - Select raw fields or define transformed features as recipe inputs.
 - State the grain of each source and output.
 - Make aggregation, broadcasting, and allocation explicit when data changes granularity.
 - Track the source fields and operations behind each output for lineage and debugging.
+- Plan execution at sources, through parallel ingestion and transformation, or across both, with explicit control over data movement and output destinations.
 
 The cooking metaphor is a guide to the concepts: datasets and fields are ingredients, a recipe records the steps, and the specified output is the finished dish. Technical terms remain preferred where the metaphor would make behavior less clear.
 
@@ -53,6 +55,8 @@ The package name `iresiphi` returned no package record in direct checks of PyPI,
 ## Design and research
 
 - [Initial design notes](DESIGN.md) record the vocabulary and open design questions.
+- [Shared terminology](CONTEXT.md) defines the domain language.
+- [Sources and execution](docs/design/sources-and-execution.md) captures format/location independence, cross-source composition, and proposed execution strategies.
 - [Domain grounding](docs/research/domain-grounding.md) examines related systems, documented tradeoffs, correctness pitfalls, lineage, and execution options. It includes a worked example and distinguishes evidence from hypotheses for Iresiphi.
 - [Snowflake semantic views](docs/research/snowflake-semantic-views.md) studies reusable source mappings, relationship-aware metrics, level-of-detail calculations, and their implications for Iresiphi.
 

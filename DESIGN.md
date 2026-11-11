@@ -6,15 +6,19 @@ Engineers often receive datasets with unique schemas and different levels of det
 
 Iresiphi aims to let engineers preserve source structures and define reusable instructions for relationships, feature transformations, granularity changes, and requested outputs.
 
-## Initial vocabulary
+## Vocabulary
 
-- **Source:** a dataset and its fields, including a description of what one row represents.
-- **Relationship:** a declared connection between sources, including keys and expected match cardinality.
-- **Feature:** a selected raw field or a named transformation of fields.
-- **Grain:** the entities and dimensions that identify one row, such as customer by month.
-- **Recipe:** a reusable specification of source dependencies, relationships, operations, and requested output.
-- **Output:** the requested fields, structure, and grain produced by applying a recipe.
-- **Lineage:** the record of source fields, relationships, and operations that produced an output field or row.
+The shared terminology lives in [CONTEXT.md](CONTEXT.md).
+
+## Source and execution requirements
+
+Users should be able to relate inputs across formats, locations, and runtimes without first moving everything into a prescribed store or converting everything to one user-facing dataframe format. Required source families include SQL databases, Snowflake, in-memory dataframes, Spark dataframes, NDJSON, XML, Excel, CSV, text, and Parquet.
+
+Any pair of supported sources should be eligible to participate in the same recipe. Source support should be extensible through adapters. Record extraction, relationship meaning, and execution feasibility still need explicit definitions.
+
+Execution should support operations pushed to a source's execution environment, ingestion into an executor, and hybrid plans. Independent reads and transformations should run in parallel where dependencies and resource limits permit. Output destinations should be independent of input locations and execution placement.
+
+These are product requirements, not a claim that connectors or executors already exist. Proposed module responsibilities, constraints, and examples are recorded in [Sources and execution](docs/design/sources-and-execution.md).
 
 ## Granularity operations
 
@@ -36,7 +40,7 @@ The Python distribution, Python import package, npm package, Rust crate, reposit
 ## Open questions
 
 1. What concrete recurring workflow should become the first example?
-2. Which input table formats and execution backends should the first version support?
+2. Which contrasting source adapters and executors should demonstrate cross-source composition first, while preserving the broader source and execution requirements?
 3. Should recipes be declared in Python/TypeScript, serialized as data, or support both?
 4. Which serialization format and schema versioning policy should recipe files use?
 5. How should the engine detect and report unmatched keys, duplicate matches, and unexpected row-count changes?
