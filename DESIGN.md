@@ -57,7 +57,9 @@ These operations should be explicit because they have different meanings and ris
 
 The Python distribution, Python import package, npm package, Rust crate, repository, and extension may have different technical constraints; keep their names aligned where practical. Recheck registry availability before publishing.
 
-## Open questions
+## Initial questions
+
+These questions motivated the [developer-preview decision map](https://github.com/andrew3stedall/iresiphi/issues/2). Consult its linked resolutions for current preview choices; this document records the original design direction.
 
 1. What concrete recurring workflow should become the first example?
 2. Which contrasting source adapters and executors should demonstrate cross-source composition first, while preserving the broader source and execution requirements?

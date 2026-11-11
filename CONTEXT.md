@@ -42,3 +42,25 @@ The constraints on a run's execution locations, data movement, and resource use.
 
 **Lineage**:
 The record of source fields, relationships, and operations that produced an output, extended with execution evidence when available.
+
+
+**Output population**:
+The records eligible to appear in an output before final selection, determined by its declared anchor and eligibility rules.
+
+**Output anchor**:
+The source records that establish an output's population and identity, independently of whether related records match.
+
+**Source record reference**:
+A reference to a particular observation in a bound dataset, distinct from the business identity that may persist across runs.
+
+**Value mapping**:
+An explicit correspondence between source values and another vocabulary, such as a supplier's item description and a contracted item identifier.
+
+**Observed detail**:
+Source-supplied records at a finer grain linked to a parent record; their presence does not imply allocation of the parent's measures.
+
+**Comparable subset**:
+The output records whose required comparisons are resolved, distinct from the full population containing unresolved records.
+
+**Measure ownership**:
+The grain at which a measure has its original meaning; repeating it as context at a finer grain does not make it additive there.
