@@ -1,0 +1,79 @@
+{
+  "spec": "https://github.com/andrew3stedall/iresiphi/issues/16",
+  "tickets": [
+    {
+      "number": 17,
+      "id": 6335691572,
+      "url": "https://github.com/andrew3stedall/iresiphi/issues/17",
+      "title": "Portable recipe validation, exact scalar execution and explain",
+      "blockers": []
+    },
+    {
+      "number": 18,
+      "id": 6335692678,
+      "url": "https://github.com/andrew3stedall/iresiphi/issues/18",
+      "title": "Read and reconcile local JSON/CSV invoice and lookup projections",
+      "blockers": [
+        "https://github.com/andrew3stedall/iresiphi/issues/17"
+      ]
+    },
+    {
+      "number": 19,
+      "id": 6335694068,
+      "url": "https://github.com/andrew3stedall/iresiphi/issues/19",
+      "title": "Read XLSX enrichment with explicit numeric/date/cache policies",
+      "blockers": [
+        "https://github.com/andrew3stedall/iresiphi/issues/17"
+      ]
+    },
+    {
+      "number": 20,
+      "id": 6335695472,
+      "url": "https://github.com/andrew3stedall/iresiphi/issues/20",
+      "title": "Review supplier/date-qualified invoice comparisons with evidence",
+      "blockers": [
+        "https://github.com/andrew3stedall/iresiphi/issues/18",
+        "https://github.com/andrew3stedall/iresiphi/issues/19"
+      ]
+    },
+    {
+      "number": 21,
+      "id": 6335697303,
+      "url": "https://github.com/andrew3stedall/iresiphi/issues/21",
+      "title": "Aggregate and broadcast measures without changing their ownership",
+      "blockers": [
+        "https://github.com/andrew3stedall/iresiphi/issues/20"
+      ]
+    },
+    {
+      "number": 22,
+      "id": 6335698842,
+      "url": "https://github.com/andrew3stedall/iresiphi/issues/22",
+      "title": "Bound runs, cancellation and atomic local bundle delivery",
+      "blockers": [
+        "https://github.com/andrew3stedall/iresiphi/issues/20"
+      ]
+    },
+    {
+      "number": 23,
+      "id": 6335700321,
+      "url": "https://github.com/andrew3stedall/iresiphi/issues/23",
+      "title": "Expose owned Rust recipes and results through exact Python bindings",
+      "blockers": [
+        "https://github.com/andrew3stedall/iresiphi/issues/17",
+        "https://github.com/andrew3stedall/iresiphi/issues/22"
+      ]
+    },
+    {
+      "number": 24,
+      "id": 6335702254,
+      "url": "https://github.com/andrew3stedall/iresiphi/issues/24",
+      "title": "Demonstrate complete preview, workload and audited packaging",
+      "blockers": [
+        "https://github.com/andrew3stedall/iresiphi/issues/21",
+        "https://github.com/andrew3stedall/iresiphi/issues/22",
+        "https://github.com/andrew3stedall/iresiphi/issues/23"
+      ]
+    }
+  ]
+}
