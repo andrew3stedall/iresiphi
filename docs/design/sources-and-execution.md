@@ -39,6 +39,18 @@ Source-local query execution is not a universal solution for cross-source joins.
 
 The Rust core can own shared recipe semantics, validation, and planning while other executors perform remote work. The requirement for a Rust implementation does not require pulling every dataset into the Rust process.
 
+## Plan from requested fields
+
+Placement should follow the dependencies of the requested output fields. For each raw or transformed field, resolve its relationship path, required source fields, transformations, contributing population, and grain changes. Then consider where those operations can execute and what data must move. This makes loading external data into Snowflake a valid choice when it benefits the required calculation, alongside processing outside Snowflake or dividing the work across executors.
+
+The relationship path establishes meaning; the execution plan chooses how to compute that meaning. Choosing between purchase region and current customer region is a semantic choice, not a cost optimization. Once that choice is fixed, moving its computation must preserve it.
+
+Planning should consider the whole requested output. Several fields may share source scans or intermediate calculations. Other dependencies may not appear in the selected fields at all: join keys, filter inputs, and every participant in an allocation denominator still affect the result. Selecting one customer must not accidentally remove the other customers needed to calculate that customer's agreed share.
+
+Compare feasible placements using available statistics, transfer volume, operation support, loading cost, resource budgets, and the execution policy. Estimates should identify uncertainty. A reusable or already loaded intermediate may affect later choices; its identity, freshness, and lifetime need to be explicit. Any Snowflake staging should identify its destination and cleanup policy rather than imply permanent ingestion.
+
+An explainable plan should connect each requested field to its dependencies, calculation grain, execution locations, and transfers. Users can then see why one calculation runs in Snowflake while another runs elsewhere.
+
 ## Parallel work in flight
 
 Independent source reads and transformations should overlap where the plan permits, using bounded batches, backpressure, cancellation, and explicit memory limits. This can improve batch processing without promising support for indefinitely running event streams.
@@ -58,6 +70,8 @@ Saved recipes should retain source names and requirements. Runtime bindings supp
 ## Example plans to explore
 
 An engineer requests customer/month spend from Snowflake transactions, customer-region mappings in an Excel workbook, and weighted targets in NDJSON. One candidate plan filters and aggregates transactions in Snowflake, reads the workbook and NDJSON concurrently, validates their keys, then performs the remaining joins and allocation in a local executor. A policy allowing staging could enable a different plan. Neither should require rewriting the recipe's relationship meaning.
+
+If the requested field instead requires joining the external mappings to detailed transactions before aggregation, loading the mappings into Snowflake may avoid exporting the detailed transaction dataset. If a required transformation is supported only outside Snowflake, another part of the same recipe may execute elsewhere. These are placement candidates whose benefit must be evaluated for the actual workload.
 
 Another engineer relates a Spark dataframe to a CSV lookup. A candidate plan sends the small lookup to the Spark executor and leaves the large dataset there. If transfers to Spark are prohibited, planning should explain the restriction and available alternatives. Output may be delivered through a different supported sink after execution.
 

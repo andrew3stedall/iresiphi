@@ -18,6 +18,8 @@ Any pair of supported sources should be eligible to participate in the same reci
 
 Execution should support operations pushed to a source's execution environment, ingestion into an executor, and hybrid plans. Independent reads and transformations should run in parallel where dependencies and resource limits permit. Output destinations should be independent of input locations and execution placement.
 
+Plan from the requested fields and their relationship and transformation dependencies. Depending on that route, execution may load external data into Snowflake, process Snowflake results elsewhere, or combine both. Preserve semantic path choices and consider shared dependencies across the complete output when choosing placement.
+
 These are product requirements, not a claim that connectors or executors already exist. Proposed module responsibilities, constraints, and examples are recorded in [Sources and execution](docs/design/sources-and-execution.md).
 
 ## Granularity operations

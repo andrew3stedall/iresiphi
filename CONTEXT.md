@@ -19,6 +19,9 @@ The declared interpretation of a source as records and fields used in calculatio
 **Relationship**:
 A declared connection between records from different sources, with a matching rule and expected cardinality.
 
+**Relationship path**:
+The sequence of declared relationships used to interpret a field relative to an output's records. Different paths may give the field different meanings, such as a purchase region versus a customer's current region.
+
 **Feature**:
 A selected raw field or a named transformation of fields.
 
