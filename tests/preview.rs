@@ -170,3 +170,35 @@ fn bundles_carry_a_typed_reconciliation_table() {
         "-14"
     );
 }
+
+#[test]
+fn runs_assert_output_population_and_identity_after_execution() {
+    let f = fixture();
+    let report = run(&f);
+    let checks = report.manifest["check_results"].as_array().unwrap();
+    let population = checks
+        .iter()
+        .find(|c| c["id"] == "output.population")
+        .expect("population invariant check");
+    assert_eq!(population["status"], "passed");
+    assert!(
+        population["coverage"]
+            .as_str()
+            .unwrap()
+            .contains("3 anchor lines"),
+        "{population}"
+    );
+    // The check precedes evidence, so a failed run lists it as not-run.
+    std::fs::write(
+        f.root().join("rates.csv"),
+        "id,code,rate,start,end\nr1,A,x,2026-01-01,\\N\n",
+    )
+    .unwrap();
+    let failed = run(&f);
+    let checks = failed.manifest["check_results"].as_array().unwrap();
+    let population = checks
+        .iter()
+        .find(|c| c["id"] == "output.population")
+        .unwrap();
+    assert_eq!(population["status"], "not-run");
+}

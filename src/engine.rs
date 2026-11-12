@@ -251,7 +251,7 @@ fn qualified(rel: &Relationship, left: &Row, right: &Row) -> Result<bool> {
 }
 /// Checks every actual run performs, in execution order. A failed run reports the
 /// checks it completed, the one that failed and the rest as not-run.
-const RUN_CHECKS: [&str; 10] = [
+const RUN_CHECKS: [&str; 11] = [
     "static",
     "access",
     "data.types",
@@ -261,6 +261,7 @@ const RUN_CHECKS: [&str; 10] = [
     "lookup.cardinality",
     "lookup.coverage",
     "detail.parent",
+    "output.population",
     "evidence",
 ];
 /// What a run has established so far; retained on failure for the manifest.
@@ -840,6 +841,7 @@ fn execute(
     // output that selects them; a line read by several outputs is counted once.
     let mut lines: BTreeMap<(&str, usize), bool> = BTreeMap::new();
     let mut evidence_time = std::time::Duration::ZERO;
+    let mut asserted_lines = 0usize;
     for output in &recipe.outputs {
         progress.nodes.push(format!("output:{}", output.id));
         let parents = output
@@ -866,6 +868,8 @@ fn execute(
             .filter(|(_, amounts)| !amounts.is_empty())
             .collect();
         let mut mixed: BTreeMap<&str, Vec<&SourceReference>> = BTreeMap::new();
+        let evidence_before = evidence.len();
+        let mut selected: Vec<usize> = vec![];
         for (row_index, row) in anchor_rows.iter().enumerate() {
             check(cancel)?;
             let mut reasons: Vec<Outcome> = vec![];
@@ -1129,8 +1133,18 @@ fn execute(
                 table.push(values);
             }
             evidence.push(record);
+            selected.push(row_index);
             evidence_time += recording.elapsed();
         }
+        check_population(
+            output,
+            anchor_rows,
+            &selected,
+            eligible,
+            evidence.len() - evidence_before,
+            if grouped { members.len() } else { table.len() },
+        )?;
+        asserted_lines += selected.len();
         if let Some((column, references)) = mixed.into_iter().next() {
             return Err(Error::new(
                 "MIXED_CURRENCY",
@@ -1176,6 +1190,13 @@ fn execute(
         counts.insert(output.id.clone(), count);
         tables.insert(output.id.clone(), table);
     }
+    progress.pass(
+        "output.population",
+        format!(
+            "full: {asserted_lines} anchor lines across {} outputs each appear once in their output and evidence; no line was added, dropped or repeated by lookups or detail",
+            recipe.outputs.len()
+        ),
+    );
     let resolved = lines.values().filter(|r| **r).count();
     let unresolved = lines.len() - resolved;
     let totals = review_totals(recipe, &tables, &populations)?;
@@ -1548,6 +1569,47 @@ fn finish_failed(
     let mut report = failed(id, error, started);
     report.manifest = manifest;
     report
+}
+
+/// Population and identity invariants of one output, asserted after execution
+/// (decision #11): every selected anchor line appears exactly once, in both the
+/// output (or its group members) and the evidence, and a line-grain output without
+/// a final filter keeps every eligible line.
+fn check_population(
+    output: &Output,
+    anchor_rows: &[Row],
+    selected: &[usize],
+    eligible: usize,
+    evidence_rows: usize,
+    output_lines: usize,
+) -> Result<()> {
+    let mut locations = std::collections::HashSet::with_capacity(selected.len());
+    let repeated = selected
+        .iter()
+        .filter(|&&i| !locations.insert(anchor_rows[i].reference.location.as_str()))
+        .count();
+    let kept_all =
+        output.filter.is_some() || !output.aggregates.is_empty() || selected.len() == eligible;
+    if repeated == 0
+        && evidence_rows == selected.len()
+        && output_lines == selected.len()
+        && eligible <= anchor_rows.len()
+        && kept_all
+    {
+        return Ok(());
+    }
+    Err(Error::new(
+        "POPULATION_INVARIANT",
+        "execution",
+        format!(
+            "output {} broke its population: {} anchor records, {eligible} eligible, {} selected, {output_lines} output lines, {evidence_rows} evidence records, {repeated} repeated",
+            output.id,
+            anchor_rows.len(),
+            selected.len()
+        ),
+    )
+    .with_subject(format!("output:{}", output.id))
+    .with_check("output.population"))
 }
 
 /// Detail records that no one-to-many relationship attaches to any parent are reported

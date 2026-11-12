@@ -4,7 +4,7 @@
 
 Instead of repeatedly reshaping every source into a standard schema, define reusable recipes over the raw fields. A recipe can describe relationships, transformations, changes in granularity, lineage, and the output you need.
 
-The planned implementation has a Rust core with Python and TypeScript interfaces. This repository captures the initial design; the API and implementation are not available yet.
+The planned implementation has a Rust core with Python and TypeScript interfaces. A developer preview, version 0.1.0, implements one workflow in Rust and Python: an auditable invoice review over local JSON, CSV and XLSX files. [docs/preview.md](docs/preview.md) describes what it supports, its limits, and an example you can run. TypeScript and the broader design below are not implemented.
 
 Rust is preferred for validation, planning, and local execution, with thin language bindings. Performance work will cover complete recipes, including data movement and memory use, while retaining execution in databases or Spark where the plan calls for it. No performance advantage has been measured yet.
 
@@ -23,7 +23,7 @@ The cooking metaphor is a guide to the concepts: datasets and fields are ingredi
 
 ## Illustrative API
 
-These examples show the naming direction only; they are not executable yet.
+The preview's real API is in [docs/preview.md](docs/preview.md), [examples/run.rs](examples/run.rs) and [examples/run.py](examples/run.py). The examples below show the longer-term naming direction only and do not run.
 
 Python:
 
@@ -46,7 +46,7 @@ const recipe = new rsp.Recipe("customer_summary");
 
 ## Project status
 
-This is an early design project. There is no published package or implemented API yet. The current implementation intent is a shared Rust core with Python and TypeScript packages; preview decisions are tracked in the [developer-preview map](https://github.com/andrew3stedall/iresiphi/issues/2). Its resolution comments are authoritative for preview scope and contracts; the initial notes below preserve broader product intent.
+This is an early design project. The 0.1.0 developer preview has not been published to crates.io or PyPI. The current implementation intent is a shared Rust core with Python and TypeScript packages; preview decisions are tracked in the [developer-preview map](https://github.com/andrew3stedall/iresiphi/issues/2). Its resolution comments are authoritative for preview scope and contracts; the initial notes below preserve broader product intent.
 
 The package name `iresiphi` returned no package record in direct checks of PyPI, npm, and crates.io on 11 November 2026. Registry availability can change, and this does not reserve the name.
 
@@ -67,4 +67,6 @@ The package name `iresiphi` returned no package record in direct checks of PyPI,
 
 ## License
 
-Not selected yet.
+Iresiphi's code and documentation are licensed under the [Apache License 2.0](LICENSE). The Rust crates it depends on keep their own licenses; [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists them and reproduces their NOTICE files.
+
+The agent skills vendored under `.claude/skills` and `.agents/skills` are third-party material under their own MIT licenses (`MATT-POCOCK-LICENSE`, and `unslop/LICENSE` with `unslop/NOTICE.md`). Apache-2.0 does not apply to them, and they are not part of the crate or the Python distributions.
