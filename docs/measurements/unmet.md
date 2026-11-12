@@ -70,5 +70,5 @@ These gaps from earlier tickets were fixed, with tests in `tests/preview.rs` and
 
 | Node contract clause | Status | Reason |
 | --- | --- | --- |
-| 6: customer/month parity golden | Blocked | The slice-2 customer/month golden does not exist yet. Node tests use the unchanged two-supplier Rust/Python golden. Add the customer/month comparison when tickets #28/#29 provide that shared fixture. |
+| 6: customer/month parity golden | Met | `bindings/node/test/customer_month.test.js` compares against the shared golden and the fixed acceptance numbers. |
 | 7: both hosted architectures pass at the same commit | Unverified | The workflow builds and tests pinned Node 22.16.0 and 24.11.1 on hosted x86_64 and aarch64. This implementation session cannot establish a hosted pass; the coordinator must run CI after pushing. Local Node 24 ARM evidence does not replace any of these four gates. |

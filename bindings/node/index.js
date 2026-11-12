@@ -68,7 +68,7 @@ class Run {
     return this.#table(name).slice(offset, offset + rows).map(row => Object.fromEntries(Object.entries(row).map(([k,v]) => [k, fromTagged(v)])));
   }
   *batches(name, rows = 8192) { let offset = 0; while (true) { const batch = this.batch(name, offset, rows); if (!batch.length) return; yield batch; offset += batch.length; } }
-  evidence(kind = 'primary') { const key = {primary: 'evidence', candidate: 'candidate_evidence', detail: 'detail_evidence'}[kind]; if (!key) throw failure('INVALID_ARGUMENT', 'Unknown evidence kind'); return copy(this.#get()[key]); }
+  evidence(kind = 'primary') { const key = {primary: 'evidence', candidate: 'candidate_evidence', detail: 'detail_evidence', allocation: 'allocation_evidence'}[kind]; if (!key) throw failure('INVALID_ARGUMENT', 'Unknown evidence kind'); return copy(this.#get()[key]); }
   close() { this.#report = null; }
 }
 async function run(recipe, bindings, policy, {signal, destination} = {}) {
