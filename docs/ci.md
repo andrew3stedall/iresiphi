@@ -19,7 +19,7 @@ A change is accepted, and a release gate is met, only when it passes on both arc
 - **ARM (aarch64):** the full Rust suite (`cargo test --locked`), the Python suites on CPython 3.12 and 3.13 against installed wheels, the Rust/Python parity golden, and the 100,000-line workload. These run locally on native ARM.
 - **x86 (x86_64):** the same suites and workload, plus the manylinux_2_28 wheel build, `auditwheel`, and clean-image installs. These run in the GitHub Actions x86 job.
 
-A pass on one architecture does not stand in for the other. Record each pass with its commit; evidence for an earlier commit does not carry forward.
+A pass on one architecture does not stand in for the other. Record each pass with its commit; evidence for an earlier commit does not carry forward. PR workflows check out the PR head SHA explicitly, so local ARM and x86 jobs test the same commit rather than different synthetic merge commits.
 
 The repository includes the Rust/Python invoice-review preview. CI validates
 Terraform and runs the Rust suite, Python packaging checks and workload evidence
