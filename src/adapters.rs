@@ -977,16 +977,38 @@ fn coordinate(text: &str) -> Result<(usize, usize)> {
     }
     Ok((row, col))
 }
+/// Workbook facts established by preflight that calamine does not expose.
+struct XlsxPreflight {
+    /// A workbook part asks consumers to recalculate on load, so stored formula
+    /// results are placeholders whose presence cannot be trusted.
+    full_calc_on_load: bool,
+}
+/// Decoded byte length of an XML entity or character reference.
+fn xlsx_reference_bytes(reference: &quick_xml::events::BytesRef<'_>) -> Result<usize> {
+    if reference.is_char_ref() {
+        return reference
+            .resolve_char_ref()
+            .map_err(|e| err("INVALID_XLSX", e.to_string()))?
+            .map(char::len_utf8)
+            .ok_or_else(|| err("INVALID_XLSX", "invalid XML character reference"));
+    }
+    Ok(1)
+}
 /// Inspect archive actual decompression and sparse-cell extents before calamine allocates a range.
+///
+/// Every entry is fully decompressed and counted against the aggregate budget. Worksheets
+/// are identified by their root element, not by a conventional part name, so relocating a
+/// sheet (calamine follows package relationships) cannot bypass cell/range accounting.
+/// Parts that are not named `.xml` are inspected only when their content is a worksheet.
 fn xlsx_preflight(
     bytes: &[u8],
     limits: &Limits,
     expanded: &mut usize,
     cancel: &AtomicBool,
-) -> Result<bool> {
+) -> Result<XlsxPreflight> {
     let mut archive =
         zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| err("INVALID_XLSX", e.to_string()))?;
-    let mut epoch1904 = false;
+    let mut full_calc_on_load = false;
     for i in 0..archive.len() {
         check_cancel(cancel)?;
         let mut entry = archive
@@ -1004,7 +1026,9 @@ fn xlsx_preflight(
         let mut chunk = [0u8; 65536];
         loop {
             check_cancel(cancel)?;
-            let n = entry.read(&mut chunk).map_err(io_error)?;
+            let n = entry
+                .read(&mut chunk)
+                .map_err(|e| err("INVALID_XLSX", e.to_string()))?;
             if n == 0 {
                 break;
             }
@@ -1015,30 +1039,77 @@ fn xlsx_preflight(
             )?;
             data.extend_from_slice(&chunk[..n]);
         }
-        if !name.ends_with(".xml") {
+        // Malformed `.xml` parts fail; other parts only matter if they hold a worksheet.
+        let strict = name.to_ascii_lowercase().ends_with(".xml");
+        let starts_xml = data
+            .strip_prefix(b"\xEF\xBB\xBF")
+            .unwrap_or(&data)
+            .iter()
+            .find(|b| !b.is_ascii_whitespace())
+            == Some(&b'<');
+        if !strict && !starts_xml {
             continue;
         }
-        let worksheet = name.starts_with("xl/worksheets/");
-        let workbook = name == "xl/workbook.xml";
         let mut reader = quick_xml::Reader::from_reader(data.as_slice());
+        let (mut worksheet, mut workbook, mut root_seen) = (false, false, false);
         let (mut max_row, mut max_col, mut cells) = (0usize, 0usize, 0usize);
         let mut cell_type = String::new();
         let (mut in_cell, mut formula, mut cache, mut cache_text, mut in_value) =
             (false, false, false, false, false);
+        // Bytes of the current text-bearing field. Rich-text runs inside a shared or
+        // inline string (`si`/`is`) form one field; other elements each start a new token.
+        let (mut token, mut rich) = (0usize, false);
         loop {
             check_cancel(cancel)?;
-            match reader
-                .read_event()
-                .map_err(|e| err("INVALID_XLSX", e.to_string()))?
-            {
-                quick_xml::events::Event::Start(e) | quick_xml::events::Event::Empty(e) => {
-                    match e.local_name().as_ref() {
-                        "workbookPr" if workbook => {
-                            epoch1904 =
-                                matches!(xml_attr(&e, "date1904")?.as_deref(), Some("1" | "true"))
+            let event = match reader.read_event() {
+                Ok(event) => event,
+                Err(e) if strict || root_seen => return Err(err("INVALID_XLSX", e.to_string())),
+                Err(_) => break,
+            };
+            use quick_xml::events::Event;
+            let text_bytes = match &event {
+                Event::Text(e) => Some(e.len()),
+                Event::CData(e) => Some(e.len()),
+                Event::GeneralRef(e) => Some(xlsx_reference_bytes(e)?),
+                _ => None,
+            };
+            if let Some(n) = text_bytes {
+                token = token.saturating_add(n);
+                limit(token <= limits.field_bytes, "XLSX field/token bytes")?;
+                if in_value && n > 0 {
+                    cache_text = true;
+                }
+            }
+            match event {
+                Event::Start(ref e) | Event::Empty(ref e) => {
+                    let empty = matches!(event, Event::Empty(_));
+                    let local = e.local_name();
+                    let local = local.as_ref();
+                    if local == "si" || local == "is" {
+                        rich = !empty;
+                        token = 0;
+                    } else if !rich {
+                        token = 0;
+                    }
+                    if !root_seen {
+                        root_seen = true;
+                        worksheet = matches!(local, "worksheet" | "dialogsheet");
+                        workbook = local == "workbook";
+                        if !strict && !worksheet {
+                            break;
+                        }
+                    }
+                    match local {
+                        "calcPr" if workbook => {
+                            if matches!(
+                                xml_attr(e, "fullCalcOnLoad")?.as_deref(),
+                                Some("1" | "true")
+                            ) {
+                                full_calc_on_load = true;
+                            }
                         }
                         "dimension" if worksheet => {
-                            if let Some(reference) = xml_attr(&e, "ref")? {
+                            if let Some(reference) = xml_attr(e, "ref")? {
                                 let end = reference.rsplit(':').next().unwrap_or(&reference);
                                 let (r, c) = coordinate(end)?;
                                 limit(
@@ -1049,14 +1120,14 @@ fn xlsx_preflight(
                             }
                         }
                         "c" if worksheet => {
-                            in_cell = true;
+                            in_cell = !empty;
                             formula = false;
                             cache = false;
                             cache_text = false;
                             in_value = false;
-                            cell_type = xml_attr(&e, "t")?.unwrap_or_default();
+                            cell_type = xml_attr(e, "t")?.unwrap_or_default();
                             cells += 1;
-                            let reference = xml_attr(&e, "r")?.ok_or_else(|| {
+                            let reference = xml_attr(e, "r")?.ok_or_else(|| {
                                 err(
                                     "INVALID_XLSX",
                                     "cell coordinates required for bounded range preflight",
@@ -1074,41 +1145,47 @@ fn xlsx_preflight(
                             )?;
                         }
                         "f" if in_cell => formula = true,
-                        "v" if in_cell => {
+                        // An empty `<v/>` holds no stored value.
+                        "v" if in_cell && !empty => {
                             cache = true;
                             in_value = true;
                         }
                         _ => {}
                     }
                 }
-                quick_xml::events::Event::Text(e) => {
-                    limit(e.len() <= limits.field_bytes, "XLSX XML token bytes")?;
-                    if in_value && !e.is_empty() {
-                        cache_text = true;
+                Event::End(ref e) => {
+                    let local = e.local_name();
+                    match local.as_ref() {
+                        "si" | "is" => {
+                            rich = false;
+                            token = 0;
+                        }
+                        _ if !rich => token = 0,
+                        _ => {}
+                    }
+                    match local.as_ref() {
+                        "v" => in_value = false,
+                        "c" if in_cell => {
+                            if formula && (!cache || (!cache_text && cell_type != "str")) {
+                                return Err(err(
+                                    "FORMULA_CACHE_MISSING",
+                                    "formula requires an unambiguous stored cached value; formulas are not evaluated",
+                                ));
+                            }
+                            in_cell = false;
+                        }
+                        _ => {}
                     }
                 }
-                quick_xml::events::Event::End(e) => match e.local_name().as_ref() {
-                    "v" => in_value = false,
-                    "c" => {
-                        if formula && (!cache || (!cache_text && cell_type != "str")) {
-                            return Err(err(
-                                "FORMULA_CACHE_MISSING",
-                                "formula requires an unambiguous stored cached value; formulas are not evaluated",
-                            ));
-                        }
-                        in_cell = false;
-                    }
-                    _ => {}
-                },
-                quick_xml::events::Event::DocType(_) => {
+                Event::DocType(_) => {
                     return Err(err("INVALID_XLSX", "XML document types are forbidden"));
                 }
-                quick_xml::events::Event::Eof => break,
+                Event::Eof => break,
                 _ => {}
             }
         }
     }
-    Ok(epoch1904)
+    Ok(XlsxPreflight { full_calc_on_load })
 }
 fn cell_label(mut col: u32, row: u32) -> String {
     let mut label = String::new();
@@ -1124,7 +1201,8 @@ fn cell_label(mut col: u32, row: u32) -> String {
 fn excel_date(serial: f64, epoch1904: bool) -> Result<Value> {
     if !serial.is_finite()
         || serial.fract() != 0.0
-        || serial < 0.0
+        // Serial 0 in the 1900 system is the fictitious 1900-01-00.
+        || serial < if epoch1904 { 0.0 } else { 1.0 }
         || serial > 3_000_000.0
         || (!epoch1904 && serial == 60.0)
     {
@@ -1152,20 +1230,12 @@ fn excel_date(serial: f64, epoch1904: bool) -> Result<Value> {
     }
     Ok(Value::Date { value: text })
 }
-fn numeric_decimal(number: f64, field: &Field, rounding: &str) -> Result<Value> {
+/// Convert a finite stored double to its shortest round-trip decimal text, then apply
+/// the declared checked quantization. This does not recover an originally intended decimal.
+fn numeric_decimal(number: f64, field: &Field, mode: Rounding) -> Result<Value> {
     if !number.is_finite() {
         return Err(err("INVALID_DECIMAL", "nonfinite XLSX numeric cell"));
     }
-    let mode = match rounding {
-        "half_even" => Rounding::HalfEven,
-        "toward_zero" => Rounding::TowardZero,
-        _ => {
-            return Err(err(
-                "INVALID_BINDING",
-                "numeric XLSX decimal policy must be half_even or toward_zero",
-            ));
-        }
-    };
     let text = expand_decimal(&number.to_string())?;
     let source_scale = text.split('.').nth(1).map(str::len).unwrap_or(0);
     let Type::Decimal { precision, scale } = field.data_type else {
@@ -1211,6 +1281,99 @@ fn numeric_decimal(number: f64, field: &Field, rounding: &str) -> Result<Value> 
         scale,
     })
 }
+/// Explicit XLSX binding policy, validated before the workbook is opened.
+struct XlsxSettings {
+    sheet: String,
+    /// Zero-based worksheet row holding the declared column names.
+    header_row: u32,
+    /// Declared rounding for numeric cells of decimal fields, keyed by field name.
+    quantization: BTreeMap<String, Rounding>,
+    /// Date fields whose numeric cells are declared to be Excel date serials.
+    excel_dates: BTreeSet<String>,
+}
+fn xlsx_settings(source: &Source, binding: &Binding) -> Result<XlsxSettings> {
+    let invalid = |message: String| err("INVALID_BINDING", message);
+    for key in binding.settings.keys() {
+        if !["sheet", "header_row", "decimal_quantization", "excel_dates"].contains(&key.as_str()) {
+            return Err(invalid(format!("unknown XLSX binding setting {key}")));
+        }
+    }
+    let sheet = binding
+        .settings
+        .get("sheet")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| invalid("XLSX sheet must be explicitly named".into()))?
+        .to_owned();
+    let header_row = binding
+        .settings
+        .get("header_row")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| invalid("XLSX one-based header_row must be declared".into()))?;
+    if header_row == 0 || header_row > u32::MAX as u64 {
+        return Err(invalid("header_row out of range".into()));
+    }
+    let fields = &source.projection.fields;
+    let mut quantization = BTreeMap::new();
+    if let Some(value) = binding.settings.get("decimal_quantization") {
+        let policies = value.as_object().ok_or_else(|| {
+            invalid("decimal_quantization must map decimal field names to a rounding mode".into())
+        })?;
+        for (name, mode) in policies {
+            if !matches!(
+                fields.get(name).map(|f| &f.data_type),
+                Some(Type::Decimal { .. })
+            ) {
+                return Err(invalid(format!(
+                    "decimal_quantization names {name}, which is not a declared decimal field"
+                )));
+            }
+            let mode = match mode.as_str() {
+                Some("half_even") => Rounding::HalfEven,
+                Some("toward_zero") => Rounding::TowardZero,
+                _ => {
+                    return Err(invalid(
+                        "numeric XLSX decimal policy must be half_even or toward_zero".into(),
+                    ));
+                }
+            };
+            quantization.insert(name.clone(), mode);
+        }
+    }
+    let mut excel_dates = BTreeSet::new();
+    if let Some(value) = binding.settings.get("excel_dates") {
+        let names = value
+            .as_array()
+            .ok_or_else(|| invalid("excel_dates must list declared date fields".into()))?;
+        for name in names {
+            let name = name
+                .as_str()
+                .filter(|n| matches!(fields.get(*n).map(|f| &f.data_type), Some(Type::Date)))
+                .ok_or_else(|| invalid("excel_dates must list declared date fields".into()))?;
+            excel_dates.insert(name.to_owned());
+        }
+    }
+    Ok(XlsxSettings {
+        sheet,
+        header_row: header_row as u32 - 1,
+        quantization,
+        excel_dates,
+    })
+}
+/// Stable cell-kind name and observed representation recorded as source evidence.
+/// Numbers use Rust's shortest round-trip formatting of the stored binary value.
+fn xlsx_observed(cell: &Data) -> (&'static str, String) {
+    match cell {
+        Data::Empty => ("blank", String::new()),
+        Data::String(text) => ("string", text.clone()),
+        Data::Float(number) => ("number", format!("{number}")),
+        Data::Int(number) => ("number", number.to_string()),
+        Data::Bool(value) => ("boolean", value.to_string()),
+        Data::Error(error) => ("error", error.to_string()),
+        Data::DateTime(serial) => ("date_serial", format!("{}", serial.as_f64())),
+        Data::DateTimeIso(text) => ("iso_date", text.clone()),
+        Data::DurationIso(text) => ("iso_duration", text.clone()),
+    }
+}
 fn read_xlsx(
     source: &Source,
     binding: &Binding,
@@ -1220,31 +1383,25 @@ fn read_xlsx(
     expanded: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<Vec<Row>> {
-    let epoch1904 = xlsx_preflight(bytes, &policy.limits, expanded, cancel)?;
-    let sheet = binding
-        .settings
-        .get("sheet")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| err("INVALID_BINDING", "XLSX sheet must be explicitly named"))?;
-    let header_row = binding
-        .settings
-        .get("header_row")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| {
-            err(
-                "INVALID_BINDING",
-                "XLSX one-based header_row must be declared",
-            )
-        })?;
-    if header_row == 0 || header_row > u32::MAX as u64 {
-        return Err(err("INVALID_BINDING", "header_row out of range"));
-    }
-    let header_row = header_row as u32 - 1;
+    let settings = xlsx_settings(source, binding)?;
+    let preflight = xlsx_preflight(bytes, &policy.limits, expanded, cancel)?;
+    let sheet = settings.sheet.as_str();
+    let header_row = settings.header_row;
     let mut book: Xlsx<_> = calamine::open_workbook_from_rs(Cursor::new(bytes))
         .map_err(|e: calamine::XlsxError| err("INVALID_XLSX", e.to_string()))?;
+    if !book.sheet_names().iter().any(|name| name == sheet) {
+        return Err(err(
+            "INVALID_BINDING",
+            format!("declared XLSX sheet {sheet} does not exist"),
+        ));
+    }
+    // The date system of the workbook part calamine actually designates and reads.
+    let epoch1904 = book.has_1904_epoch();
+    check_cancel(cancel)?;
     let range = book
         .worksheet_range(sheet)
         .map_err(|e| err("INVALID_XLSX", e.to_string()))?;
+    check_cancel(cancel)?;
     let formulas = book
         .worksheet_formula(sheet)
         .map_err(|e| err("INVALID_XLSX", e.to_string()))?;
@@ -1278,6 +1435,7 @@ fn read_xlsx(
         .collect::<Result<_>>()?;
     let mut rows = RowCollector::new(policy);
     let end_row = range.end().unwrap().0;
+    let date_system = if epoch1904 { "1904" } else { "1900" };
     for row_index in header_row + 1..=end_row {
         check_cancel(cancel)?;
         let mut row = Row {
@@ -1288,11 +1446,43 @@ fn read_xlsx(
         row.reference.location = format!("{sheet}!{}", row_index + 1);
         for (name, field, col) in &columns {
             let cell = range.get_value((row_index, *col)).unwrap_or(&Data::Empty);
-            let policy_value = binding
-                .settings
-                .get("decimal_quantization")
-                .and_then(|v| v.get(*name))
-                .and_then(|v| v.as_str());
+            let formula = formulas
+                .get_value((row_index, *col))
+                .filter(|s| !s.is_empty());
+            if formula.is_some() {
+                if matches!(cell, Data::Empty) {
+                    return Err(err(
+                        "FORMULA_CACHE_MISSING",
+                        "formula requires a stored cached value; formulas are not evaluated",
+                    ));
+                }
+                if preflight.full_calc_on_load {
+                    return Err(err(
+                        "FORMULA_CACHE_UNCERTAIN",
+                        "workbook requests recalculation on load, so stored formula results are not established",
+                    ));
+                }
+            }
+            let rounding = settings.quantization.get(name.as_str()).copied();
+            let quantization = || {
+                rounding.ok_or_else(|| {
+                    err(
+                        "XLSX_QUANTIZATION_REQUIRED",
+                        "numeric decimal cell requires explicit quantization policy",
+                    )
+                })
+            };
+            let declared_date = || {
+                if settings.excel_dates.contains(name.as_str()) {
+                    Ok(())
+                } else {
+                    Err(err(
+                        "INVALID_BINDING",
+                        "numeric date requires excel_dates field declaration",
+                    ))
+                }
+            };
+            let mut conversion = None;
             let value = match cell {
                 Data::Empty => value_from_text(None, field)?,
                 Data::Error(_) => return Err(err("XLSX_CELL_ERROR", "spreadsheet error cell")),
@@ -1307,14 +1497,14 @@ fn read_xlsx(
                     value: value.to_string(),
                 },
                 Data::Float(value) if field.data_type == Type::Int64 => {
+                    // Beyond 2^53 a stored double no longer identifies one integer.
                     if !value.is_finite()
                         || value.fract() != 0.0
-                        || *value < i64::MIN as f64
-                        || *value >= 9223372036854775808.0
+                        || value.abs() >= 9007199254740992.0
                     {
                         return Err(err(
                             "INVALID_VALUE",
-                            "XLSX integer is out of range or fractional",
+                            "XLSX integer is fractional or not exactly representable",
                         ));
                     }
                     Value::Int64 {
@@ -1322,52 +1512,33 @@ fn read_xlsx(
                     }
                 }
                 Data::Int(value) if matches!(field.data_type, Type::Decimal { .. }) => {
+                    quantization()?;
                     value_from_text(Some(&value.to_string()), field)?
                 }
                 Data::Float(value) if matches!(field.data_type, Type::Decimal { .. }) => {
-                    numeric_decimal(
-                        *value,
-                        field,
-                        policy_value.ok_or_else(|| {
-                            err(
-                                "XLSX_QUANTIZATION_REQUIRED",
-                                "numeric decimal cell requires explicit quantization policy",
-                            )
-                        })?,
-                    )?
+                    let mode = quantization()?;
+                    conversion = Some("shortest_roundtrip_decimal");
+                    numeric_decimal(*value, field, mode)?
                 }
                 Data::DateTime(value) if field.data_type == Type::Date => {
+                    declared_date()?;
+                    if value.is_duration() {
+                        return Err(err(
+                            "INVALID_VALUE",
+                            "XLSX duration cell is not a calendar date",
+                        ));
+                    }
                     excel_date(value.as_f64(), epoch1904)?
                 }
                 Data::DateTimeIso(value) if field.data_type == Type::Date => {
                     value_from_text(Some(value), field)?
                 }
                 Data::Int(value) if field.data_type == Type::Date => {
-                    if !binding
-                        .settings
-                        .get("excel_dates")
-                        .and_then(|v| v.as_array())
-                        .is_some_and(|v| v.iter().any(|v| v.as_str() == Some(name.as_str())))
-                    {
-                        return Err(err(
-                            "INVALID_BINDING",
-                            "numeric date requires excel_dates field declaration",
-                        ));
-                    }
+                    declared_date()?;
                     excel_date(*value as f64, epoch1904)?
                 }
                 Data::Float(value) if field.data_type == Type::Date => {
-                    if !binding
-                        .settings
-                        .get("excel_dates")
-                        .and_then(|v| v.as_array())
-                        .is_some_and(|v| v.iter().any(|v| v.as_str() == Some(name.as_str())))
-                    {
-                        return Err(err(
-                            "INVALID_BINDING",
-                            "numeric date requires excel_dates field declaration",
-                        ));
-                    }
+                    declared_date()?;
                     excel_date(*value, epoch1904)?
                 }
                 _ => {
@@ -1377,10 +1548,19 @@ fn read_xlsx(
                     ));
                 }
             };
-            let formula = formulas
-                .get_value((row_index, *col))
-                .filter(|s| !s.is_empty());
-            row.raw.insert((*name).clone(),serde_json::json!({"cell":format!("{sheet}!{}",cell_label(*col,row_index)),"observed":cell.to_string(),"cell_type":format!("{:?}",std::mem::discriminant(cell)),"formula":formula,"quantization":policy_value,"date_system":if epoch1904{"1904"}else{"1900"}}));
+            let (cell_type, observed) = xlsx_observed(cell);
+            row.raw.insert(
+                (*name).clone(),
+                serde_json::json!({
+                    "cell": format!("{sheet}!{}", cell_label(*col, row_index)),
+                    "cell_type": cell_type,
+                    "observed": observed,
+                    "formula": formula,
+                    "quantization": rounding,
+                    "conversion": conversion,
+                    "date_system": date_system,
+                }),
+            );
             row.fields.insert((*name).clone(), value);
         }
         rows.push(row)?;

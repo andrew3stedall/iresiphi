@@ -41,3 +41,59 @@ pub fn enrichment_workbook(path: &std::path::Path) {
     }
     result.finish().unwrap();
 }
+
+/// The parts of a minimal one-sheet workbook ("Review"), keyed by archive path.
+/// Tests replace or add parts to build workbooks with specific packaging.
+#[allow(dead_code)]
+pub fn workbook_parts(sheet_xml: &str, epoch1904: bool) -> Vec<(String, String)> {
+    let bytes = workbook_bytes("", epoch1904);
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut parts = Vec::new();
+    for i in 0..archive.len() {
+        use std::io::Read;
+        let mut entry = archive.by_index(i).unwrap();
+        let name = entry.name().unwrap().into_owned();
+        let mut content = String::new();
+        entry.read_to_string(&mut content).unwrap();
+        if name == "xl/worksheets/sheet1.xml" {
+            content = sheet_xml.to_owned();
+        }
+        parts.push((name, content));
+    }
+    parts
+}
+
+/// A worksheet part from an optional `<dimension>` reference and raw `<row>` XML.
+#[allow(dead_code)]
+pub fn sheet_xml(dimension: Option<&str>, rows: &str) -> String {
+    let dimension = dimension
+        .map(|d| format!(r#"<dimension ref="{d}"/>"#))
+        .unwrap_or_default();
+    format!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">{dimension}<sheetData>{rows}</sheetData></worksheet>"#
+    )
+}
+
+/// Replace (or add) one part by archive path.
+#[allow(dead_code)]
+pub fn set_part(parts: &mut Vec<(String, String)>, name: &str, content: impl Into<String>) {
+    let content = content.into();
+    match parts.iter_mut().find(|(n, _)| n == name) {
+        Some(part) => part.1 = content,
+        None => parts.push((name.to_owned(), content)),
+    }
+}
+
+/// Write parts as a deflate-compressed ZIP package.
+#[allow(dead_code)]
+pub fn package(parts: &[(String, String)]) -> Vec<u8> {
+    use std::io::Write;
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for (name, text) in parts {
+        writer.start_file(name.as_str(), options).unwrap();
+        writer.write_all(text.as_bytes()).unwrap();
+    }
+    writer.finish().unwrap().into_inner()
+}
