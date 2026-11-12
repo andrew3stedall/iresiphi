@@ -6,7 +6,7 @@ use iresiphi::{ExecutionContext, RunReport};
 use run_fixture::*;
 use std::sync::atomic::AtomicBool;
 
-/// Phases every run reports, in microseconds. `delivery` is added only to the
+/// Phases every run reports, in microseconds. `delivery_us` is added only to the
 /// report of a committed bundle run.
 const PHASES: [&str; 8] = [
     "static_validation",
@@ -60,7 +60,7 @@ fn bundle_runs_report_delivery_time_after_commit_only() {
         "{:?}",
         report.diagnostics
     );
-    assert!(report.manifest["phases_us"]["delivery"].is_u64());
+    assert!(report.manifest["delivery_us"].is_u64());
     // The committed manifest cannot time its own publication.
     let committed: serde_json::Value =
         serde_json::from_slice(&std::fs::read(f.destination().join("manifest.json")).unwrap())
@@ -68,7 +68,7 @@ fn bundle_runs_report_delivery_time_after_commit_only() {
     for phase in PHASES {
         assert!(committed["phases_us"][phase].is_u64(), "{phase}");
     }
-    assert!(committed["phases_us"].get("delivery").is_none());
+    assert!(committed.get("delivery_us").is_none());
 }
 
 #[test]

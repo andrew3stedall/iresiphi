@@ -42,7 +42,8 @@ def run(context, recipe, bindings, policy, bundle):
             print(f"  {d['severity']} {d['code']} {d.get('subject') or '-'}: {d.get('affected_count')} records")
         # Values are copied out as exact Python objects (Decimal, date, str, None)
         # and stay valid after the result is closed.
-        first_output = result.outputs[0]
+        # Bundle runs also list their evidence and reconciliation tables (_*).
+        first_output = next(name for name in result.outputs if not name.startswith("_"))
         first_batch = next(iter(result.batches(first_output, rows=2)), [])
         for row in first_batch:
             print(f"  {first_output}: billed={row.get('billed')!r} expected={row.get('expected')!r} "

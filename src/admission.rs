@@ -320,8 +320,9 @@ pub(crate) fn deliver(
         control.cancel(),
     ) {
         Ok(published) => {
-            // Like bytes_written, publication time is known only after commit.
-            report.manifest["phases_us"]["delivery"] = json!(crate::adapters::micros(delivering));
+            // Like bytes_written, publication time is known only after commit,
+            // so it is a separate key of the run report, absent from the bundle.
+            report.manifest["delivery_us"] = json!(crate::adapters::micros(delivering));
             report.manifest["bytes_written"] = json!(published.bytes);
             report.manifest["bundle"] = json!(destination);
             report.manifest["cleanup"] = json!(published.cleanup);
