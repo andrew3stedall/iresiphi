@@ -836,3 +836,43 @@ fn engine_status_columns_are_reserved() {
         assert_eq!(static_code(&clashing), "DUPLICATE_ID", "{name}");
     }
 }
+
+#[test]
+fn detail_records_matched_by_several_parent_lines_are_flagged_not_duplicated() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut recipe, bindings, policy) = fixture(root.path());
+    // Keying components on supplier+invoice only lets every A1 component match both A1 lines.
+    let rel = relationship_mut(&mut recipe, "a_components");
+    rel.from_keys = vec!["supplier".into(), "invoice".into()];
+    rel.to_keys = vec!["supplier".into(), "invoice".into()];
+    with_detail_output(&mut recipe);
+    let report = run(&recipe, &bindings, &policy);
+    assert!(
+        report.status.starts_with("succeeded"),
+        "{:?}",
+        report.diagnostics
+    );
+    let d = diagnostic(&report, "DETAIL_MULTIPLE_PARENTS");
+    assert_eq!(d.severity, "warning");
+    assert_eq!(d.subject.as_deref(), Some("relationship:a_components"));
+    assert_eq!(d.check.as_deref(), Some("detail.parent"));
+    assert_eq!(d.affected_count, Some(2));
+    // Primary rows and billed totals are unchanged; shared detail has no single parent.
+    assert_eq!(report.tables["a_review"].len(), 2);
+    assert_eq!(
+        report.manifest["totals"]["combined"]["AUD"]["columns"]["billed"]["population"],
+        "180.00"
+    );
+    let detail = &report.tables["components_detail"];
+    assert_eq!(detail.len(), 4);
+    let c1 = detail.iter().find(|r| text(&r["id"]) == "c1").unwrap();
+    assert_eq!(text(&c1["_status"]), "ambiguous");
+    assert_eq!(c1["_parent"], Value::Null);
+    relationship_mut(&mut recipe, "a_components").strict = true;
+    let strict = run(&recipe, &bindings, &policy);
+    assert_eq!(strict.status, "failed");
+    assert_eq!(
+        diagnostic(&strict, "CARDINALITY_VIOLATION").affected_count,
+        Some(2)
+    );
+}
