@@ -1,0 +1,3 @@
+id,supplier,item,rate,start,end
+r1,A,shared,50,2026-01-01,2030-01-01
+r2,B,shared,45,2026-01-01,2030-01-01

@@ -160,3 +160,54 @@ jobs:
           path: ci-artifacts
           if-no-files-found: warn
 
+  node:
+    name: Node ${{ matrix.node }} (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.16.0', '24.11.1']
+        include:
+          - arch: x86
+            runner: ubuntu-24.04
+            machine: x86_64
+          - arch: arm
+            runner: ubuntu-24.04-arm
+            machine: aarch64
+        arch: [x86, arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - run: |
+          test "$(uname -m)" = '${{ matrix.machine }}'
+          rustup toolchain install 1.94.0 --profile minimal --component rustfmt
+      - name: Install pinned Node
+        shell: bash
+        run: |
+          arch=x64
+          if [[ '${{ matrix.arch }}' == arm ]]; then arch=arm64; fi
+          version='${{ matrix.node }}'
+          curl --fail --silent --show-error -O "https://nodejs.org/dist/v$version/node-v$version-linux-$arch.tar.xz"
+          curl --fail --silent --show-error -o SHASUMS256.txt "https://nodejs.org/dist/v$version/SHASUMS256.txt"
+          sha256sum --check --ignore-missing SHASUMS256.txt
+          tar -xf "node-v$version-linux-$arch.tar.xz"
+          echo "$PWD/node-v$version-linux-$arch/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            bindings/node/target
+          key: node-${{ matrix.arch }}-${{ matrix.node }}-${{ hashFiles('bindings/node/Cargo.lock', 'src/**', 'bindings/node/src/**') }}
+      - name: Build and test addon and declarations
+        working-directory: bindings/node
+        run: |
+          cargo fmt --manifest-path Cargo.toml -- --check
+          npm ci
+          npm run build
+          npm test
+          npm run typecheck

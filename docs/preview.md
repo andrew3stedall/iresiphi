@@ -62,12 +62,14 @@ The first run reproduces the agreed acceptance values: billed 180 in full, 160 c
 
 The saved recipe holds no paths, data or secrets. Each run takes its bindings (source ID to file, adapter and settings) and its policy (allowed roots and limits) as separate inputs. Rebinding `rates` changes the rate source and nothing else.
 
+Node.js 22/24 source bindings: [build and use the Node package](node.md).
+
 ## Support and deferral matrix
 
 | Area | In this preview | Deferred |
 | --- | --- | --- |
-| Interfaces | Rust crate `iresiphi`; Python package `iresiphi` on ordinary (GIL) CPython 3.12 and 3.13 | TypeScript, Node, browsers; abi3, free-threaded CPython, PyPy |
-| Platforms | Linux x86_64, glibc 2.28 or later, as manylinux_2_28 wheels, subject to the commit's CI evidence. Native Linux ARM development tests may run locally | macOS, Windows and ARM release wheels |
+| Interfaces | Rust crate `iresiphi`; Python package `iresiphi` on ordinary (GIL) CPython 3.12 and 3.13; source-built Node 22/24 addon with TypeScript declarations | Browsers, Deno, Bun; abi3, free-threaded CPython, PyPy |
+| Platforms | Linux x86_64, glibc 2.28 or later, as manylinux_2_28 wheels, subject to the commit's CI evidence. Node addon: Linux glibc x86_64/aarch64, subject to CI evidence | macOS, Windows and ARM Python release wheels |
 | Inputs | Local UTF-8 JSON with one declared array and header fields; local CSV with an explicit dialect; local XLSX with a named sheet, declared header row and typed columns | Dataframes, SQL, Snowflake, Spark, NDJSON, XML, arbitrary text, Parquet, remote stores, network reads |
 | Execution | One local executor; DataFusion 55.2.0 produces lookup candidate pairs | Pushdown, remote staging, hybrid placement, spill to disk |
 | Scalars | Boolean, Int64, UTF-8 string, Decimal128 (precision 1 to 38), calendar date | Floating point, timestamps and time zones |

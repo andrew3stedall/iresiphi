@@ -1,0 +1,24 @@
+[package]
+name = "iresiphi-node"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+iresiphi = { path = "../.." }
+napi = { version = "=2.16.17", default-features = false, features = ["napi6", "async"] }
+napi-derive = "=2.16.13"
+serde = "=1.0.229"
+serde_json = { version = "=1.0.154", features = ["arbitrary_precision"] }
+
+[build-dependencies]
+napi-build = "=2.1.6"
+
+[profile.dev]
+debug = 0
+incremental = false
