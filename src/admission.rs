@@ -94,50 +94,13 @@ impl std::io::Write for Counter {
 }
 
 /// Typed schema shared by memory results and bundle tables.
+/// Typed output columns shared by memory results, the manifest and `schema.json`,
+/// including measure ownership and grain metadata from validation.
 pub(crate) fn output_schema(recipe: &Recipe) -> serde_json::Map<String, serde_json::Value> {
-    let mut schema = serde_json::Map::new();
-    for output in &recipe.outputs {
-        let mut columns: Vec<_> = output
-            .columns
-            .iter()
-            .filter(|c| output.aggregates.is_empty() || output.group_by.contains(&c.name))
-            .map(|c| json!({"name":c.name,"type":column_type(&c.expr, recipe)}))
-            .collect();
-        for aggregate in &output.aggregates {
-            columns.push(
-                json!({"name":aggregate.name,"type":reduced_type(&aggregate.function, &aggregate.expr, recipe)}),
-            );
-        }
-        columns.push(json!({"name":"_status","type":{"kind":"string"}}));
-        if output.aggregates.is_empty() {
-            columns.push(json!({"name":"_reason","type":{"kind":"string"}}));
-        }
-        if output.detail {
-            columns.push(json!({"name":"_parent","type":{"kind":"string"}}));
-        }
-        schema.insert(output.id.clone(), json!({"columns":columns}));
+    match crate::validation::output_schema(recipe) {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
     }
-    schema
-}
-fn reduced_type(function: &str, expr: &Expr, recipe: &Recipe) -> Option<Type> {
-    let ty = crate::validation::expression_type(expr, recipe)
-        .ok()
-        .flatten();
-    if function.starts_with("count_") {
-        Some(Type::Int64)
-    } else if let (true, Some(Type::Decimal { scale, .. })) = (function == "sum", &ty) {
-        Some(Type::Decimal {
-            precision: 38,
-            scale: *scale,
-        })
-    } else {
-        ty
-    }
-}
-fn column_type(expr: &Expr, recipe: &Recipe) -> Option<Type> {
-    crate::validation::expression_type(expr, recipe)
-        .ok()
-        .flatten()
 }
 
 /// Per-run cancellation and resource tracking passed through the executor.
