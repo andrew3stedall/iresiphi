@@ -1,0 +1,30 @@
+{
+  "name": "@iresiphi/node",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.js",
+  "types": "index.d.ts",
+  "engines": {
+    "node": "22.x || 24.x"
+  },
+  "scripts": {
+    "build": "node build.js",
+    "test": "node --test test/*.test.js",
+    "typecheck": "tsc --strict --noEmit --target ES2022 --module node16 --moduleResolution node16 test/types.ts"
+  },
+  "dependencies": {
+    "lossless-json": "4.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3"
+  },
+  "license": "Apache-2.0",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
+}

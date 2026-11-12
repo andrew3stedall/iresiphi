@@ -1,0 +1,1 @@
+{"supplier":"A","invoice":"A1","date":"2026-11-12","currency":"AUD","lines":[{"id":"1","item":"service A","quantity":"2","billed":"110"},{"id":"2","item":"unknown","quantity":"1","billed":"20"}]}

@@ -49,3 +49,10 @@ These gaps from earlier tickets were fixed, with tests in `tests/preview.rs` and
 | #12 PyO3 handles and exact values | `tests/python_handles.py`, `tests/python_cancellation.py`, `tests/python_acceptance.py` |
 | #13 admission, cancellation, commit-only outputs | `tests/limits.rs`, `tests/delivery.rs` (budgets, cancellation at parse, join and write, cleanup failure, existing destination, interruption before and after commit), `tests/bundles.rs` (CSV `\N` escaping) |
 | #14 evidence-gated preview | `examples/run.rs`, `examples/run.py`, [workload-100k.md](workload-100k.md), [packaging.md](packaging.md), `THIRD_PARTY_NOTICES.md` |
+
+## Slice 2 Node bindings (ticket #30)
+
+| Node contract clause | Status | Reason |
+| --- | --- | --- |
+| 6: customer/month parity golden | Blocked | The slice-2 customer/month golden does not exist yet. Node tests use the unchanged two-supplier Rust/Python golden. Add the customer/month comparison when tickets #28/#29 provide that shared fixture. |
+| 7: both hosted architectures pass at the same commit | Unverified | The workflow builds and tests pinned Node 22.16.0 and 24.11.1 on hosted x86_64 and aarch64. This implementation session cannot establish a hosted pass; the coordinator must run CI after pushing. Local Node 24 ARM evidence does not replace any of these four gates. |
