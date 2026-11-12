@@ -163,7 +163,7 @@ A bundle run stages its files in a sibling directory of the destination, named `
 
 - After success, failure or cancellation, the run removes its staging directory. If removal fails, the run report lists each leftover path and its error under `cleanup`.
 - Cancellation before the rename publishes nothing. After the rename the run is committed, and a later cancel request has no effect.
-- If the process dies, staging can remain. `iresiphi::sink::cleanup_staging(directory, &policy)` removes only directories that are named like run staging, owned by the current user with owner-only permissions, not locked by an active run, and holding only regular files. Everything else is reported as skipped, and nothing is deleted recursively. This call is not yet exposed in Python.
+- If the process dies, staging can remain. `iresiphi::sink::cleanup_staging(directory, &policy)` (Rust) or `iresiphi.cleanup_staging(directory, policy)` (Python) removes only directories that are named like run staging, owned by the current user with owner-only permissions, not locked by an active run, and holding only regular files. Everything else is reported as skipped, and nothing is deleted recursively. The report lists `removed`, `skipped` and `leftovers` paths.
 
 ## Packaging
 

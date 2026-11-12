@@ -28,7 +28,6 @@ A clause is blocked when it needs something this machine or this ticket cannot p
 | Measure and report cancellation latency | Met, with a finding | `examples/workload.rs` measured two 100,000-line runs ([workload-100k.md](workload-100k.md)): 0.31 s from request to return during parsing, and 25.2 s during output building. The second delay was not diagnosed; freeing the partly built evidence under swap is the likely cost. No latency bound is promised. |
 | Internal batches are Arrow `RecordBatch` with declared schema, Decimal128/Date32 and validity bits (decision #12) | Partly met | Adapters convert each source to typed Arrow batches of at most `batch_rows` rows. The executor then keeps the observations as rows, and its checked arithmetic, quantization and aggregation run in Rust over those rows. Only lookup candidate pairs go through DataFusion. This is the semantic boundary decision #11 allows, but calculations do not run over Arrow arrays. |
 | Source adapters report schema, identity, capabilities and location (decision #4) | Partly met | Adapters report schema (bound validation), binding identity and fingerprint, and per-record location. There is no capability descriptor per adapter. Capability is the fixed set of three built-in adapters, and an unknown adapter fails with `UNSUPPORTED_CAPABILITY`. |
-| Explicit cleanup command for abandoned staging | Partly met | Rust exposes `iresiphi::sink::cleanup_staging`. The Python package does not expose it yet. |
 
 ## Closed in this ticket
 

@@ -1,5 +1,7 @@
 """Ticket #23: handle ownership, bounded batches, close semantics and error records."""
 import datetime
+import fcntl
+import os
 import tempfile
 import threading
 import unittest
@@ -48,6 +50,33 @@ class Handles(unittest.TestCase):
 
     def run_lines(self, **limits):
         return iresiphi.run(iresiphi.Recipe(lines_recipe()), self.bindings, self.policy(**limits))
+
+    def test_cleanup_removes_only_inactive_run_owned_staging_within_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy = b.policy([root], [root])
+            abandoned = root / (".iresiphi-" + "a" * 32)
+            active = root / (".iresiphi-" + "b" * 32)
+            precious = root / (".iresiphi-" + "c" * 32)
+            for stage in [abandoned, active, precious]:
+                stage.mkdir(mode=0o700)
+            (abandoned / "table-0.csv").write_text("id\n1\n")
+            (precious / "caller-data.txt").write_text("keep")
+            descriptor = os.open(active, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                report = iresiphi.cleanup_staging(root, policy)
+                self.assertEqual(report["removed"], [str(abandoned)])
+                self.assertFalse(abandoned.exists())
+                self.assertTrue(active.is_dir())
+                self.assertEqual((precious / "caller-data.txt").read_text(), "keep")
+                self.assertIn(str(active), [item["path"] for item in report["skipped"]])
+            finally:
+                os.close(descriptor)
+            with tempfile.TemporaryDirectory() as outside:
+                with self.assertRaises(iresiphi.IresiphiError) as raised:
+                    iresiphi.cleanup_staging(Path(outside), policy)
+                self.assertEqual(raised.exception.code, "POLICY_DENIED")
 
     # -- bounded batches ----------------------------------------------------------
 

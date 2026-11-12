@@ -1153,6 +1153,23 @@ impl PyContext {
     }
 }
 
+/// Explicitly clean inactive run-owned staging inside an approved output root.
+#[pyfunction]
+fn cleanup_staging(
+    py: Python<'_>,
+    directory: PathBuf,
+    policy: &Bound<'_, PyAny>,
+) -> PyResult<Py<PyAny>> {
+    let policy: Policy =
+        parse_argument(policy, "INVALID_POLICY", "policy").map_err(|e| iresiphi_error(py, &e))?;
+    let report = py
+        .detach(move || crate::sink::cleanup_staging(&directory, &policy))
+        .map_err(|e| iresiphi_error(py, &e.completed()))?;
+    let json = serde_json::to_value(report)
+        .map_err(|e| iresiphi_error(py, &record("INTERNAL_ERROR", "cleanup", e.to_string())))?;
+    Ok(json_to_py(py, &json)?.unbind())
+}
+
 /// Read a committed directory bundle back into exact Python rows.
 #[pyfunction]
 fn read_bundle(py: Python<'_>, path: PathBuf) -> PyResult<Py<PyAny>> {
@@ -1194,6 +1211,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyRun>()?;
     module.add_class::<PyBatches>()?;
     module.add_function(wrap_pyfunction!(read_bundle, module)?)?;
+    module.add_function(wrap_pyfunction!(cleanup_staging, module)?)?;
     module.add_function(wrap_pyfunction!(from_tagged, module)?)?;
     module.add("FORMAT_VERSION", "0.1")?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;

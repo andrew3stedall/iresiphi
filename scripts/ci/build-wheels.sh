@@ -17,10 +17,12 @@ maturin --version
 auditwheel --version
 ldd --version
 cd /io
-maturin sdist --locked --out ci-artifacts/dist
+cargo metadata --locked --format-version 1 > ci-artifacts/inventory/cargo-metadata.json
+maturin sdist --out ci-artifacts/dist
 tar -tzf ci-artifacts/dist/iresiphi-0.1.0.tar.gz > ci-artifacts/inventory/sdist.txt
 mkdir /tmp/iresiphi-sdist
 tar -xzf ci-artifacts/dist/iresiphi-0.1.0.tar.gz -C /tmp/iresiphi-sdist
+cmp Cargo.lock /tmp/iresiphi-sdist/iresiphi-0.1.0/Cargo.lock
 cd /tmp/iresiphi-sdist/iresiphi-0.1.0
 for abi in cp312-cp312 cp313-cp313; do
   interpreter="/opt/python/$abi/bin/python"

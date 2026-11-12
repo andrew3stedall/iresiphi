@@ -40,6 +40,7 @@ __all__ = [
     "load",
     "save",
     "read_bundle",
+    "cleanup_staging",
     "from_tagged",
     "FORMAT_VERSION",
     "MAX_BATCH_ROWS",
@@ -55,6 +56,7 @@ ExecutionContext = _native.ExecutionContext
 RunResult = _native.RunResult
 CancellationToken = _native.CancellationToken
 read_bundle = _native.read_bundle
+cleanup_staging = _native.cleanup_staging
 from_tagged = _native.from_tagged
 
 
