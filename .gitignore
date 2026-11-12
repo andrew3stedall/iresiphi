@@ -8,3 +8,8 @@
 crash.log
 crash.*.log
 
+/target/
+/.venv/
+__pycache__/
+*.so
+*.whl

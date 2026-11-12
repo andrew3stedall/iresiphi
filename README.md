@@ -46,7 +46,7 @@ const recipe = new rsp.Recipe("customer_summary");
 
 ## Project status
 
-This is an early design project. There is no published package or implemented API yet. The current implementation intent is a shared Rust core with Python and TypeScript packages; binding technology, execution engine, and supported input/output formats remain open decisions.
+This is an early design project. There is no published package or implemented API yet. The current implementation intent is a shared Rust core with Python and TypeScript packages; preview decisions are tracked in the [developer-preview map](https://github.com/andrew3stedall/iresiphi/issues/2). Its resolution comments are authoritative for preview scope and contracts; the initial notes below preserve broader product intent.
 
 The package name `iresiphi` returned no package record in direct checks of PyPI, npm, and crates.io on 11 November 2026. Registry availability can change, and this does not reserve the name.
 
@@ -55,6 +55,9 @@ The package name `iresiphi` returned no package record in direct checks of PyPI,
 “Iresiphi” is the isiZulu word for “recipe.” The name reflects the idea of a reusable set of instructions for turning raw data ingredients into a specified result.
 
 ## Design and research
+
+- [Developer-preview decision map](https://github.com/andrew3stedall/iresiphi/issues/2) indexes the invoice-review workflow and resolved planning decisions.
+- [Engine and bindings evidence](docs/research/preview-engine-bindings.md) records primary-source findings and implementation acceptance gates.
 
 - [Initial design notes](DESIGN.md) record the vocabulary and open design questions.
 - [Shared terminology](CONTEXT.md) defines the domain language.
