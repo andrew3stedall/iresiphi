@@ -1,0 +1,402 @@
+{
+  "canonical_json": "{\"bundled_definitions\":{},\"features\":[],\"format_version\":\"0.1\",\"name\":\"two suppliers\",\"outputs\":[{\"aggregates\":[],\"anchor\":\"a\",\"columns\":[{\"expr\":{\"field\":\"amount\",\"op\":\"field\",\"path\":[\"a_enrichment\"],\"source\":\"enrichment\"},\"name\":\"enriched\"},{\"expr\":{\"field\":\"id\",\"op\":\"field\",\"path\":[],\"source\":\"a\"},\"name\":\"id\"},{\"expr\":{\"field\":\"supplier\",\"op\":\"field\",\"path\":[],\"source\":\"a\"},\"name\":\"supplier\"},{\"expr\":{\"field\":\"billed\",\"op\":\"field\",\"path\":[],\"source\":\"a\"},\"name\":\"billed\"},{\"expr\":{\"expr\":{\"left\":{\"field\":\"quantity\",\"op\":\"field\",\"path\":[],\"source\":\"a\"},\"op\":\"multiply\",\"right\":{\"field\":\"rate\",\"op\":\"field\",\"path\":[\"a_rate\"],\"source\":\"rates\"}},\"op\":\"quantize\",\"precision\":18,\"rounding\":\"half_even\",\"scale\":2},\"name\":\"expected\"},{\"expr\":{\"left\":{\"field\":\"billed\",\"op\":\"field\",\"path\":[],\"source\":\"a\"},\"op\":\"subtract\",\"right\":{\"expr\":{\"left\":{\"field\":\"quantity\",\"op\":\"field\",\"path\":[],\"source\":\"a\"},\"op\":\"multiply\",\"right\":{\"field\":\"rate\",\"op\":\"field\",\"path\":[\"a_rate\"],\"source\":\"rates\"}},\"op\":\"quantize\",\"precision\":18,\"rounding\":\"half_even\",\"scale\":2}},\"name\":\"variance\"}],\"detail\":false,\"eligibility\":null,\"filter\":null,\"group_by\":[],\"id\":\"a_review\"},{\"aggregates\":[],\"anchor\":\"b\",\"columns\":[{\"expr\":{\"field\":\"amount\",\"op\":\"field\",\"path\":[\"b_enrichment\"],\"source\":\"enrichment\"},\"name\":\"enriched\"},{\"expr\":{\"field\":\"id\",\"op\":\"field\",\"path\":[],\"source\":\"b\"},\"name\":\"id\"},{\"expr\":{\"field\":\"supplier\",\"op\":\"field\",\"path\":[],\"source\":\"b\"},\"name\":\"supplier\"},{\"expr\":{\"field\":\"billed\",\"op\":\"field\",\"path\":[],\"source\":\"b\"},\"name\":\"billed\"},{\"expr\":{\"expr\":{\"left\":{\"field\":\"quantity\",\"op\":\"field\",\"path\":[],\"source\":\"b\"},\"op\":\"multiply\",\"right\":{\"field\":\"rate\",\"op\":\"field\",\"path\":[\"b_rate\"],\"source\":\"rates\"}},\"op\":\"quantize\",\"precision\":18,\"rounding\":\"half_even\",\"scale\":2},\"name\":\"expected\"},{\"expr\":{\"left\":{\"field\":\"billed\",\"op\":\"field\",\"path\":[],\"source\":\"b\"},\"op\":\"subtract\",\"right\":{\"expr\":{\"left\":{\"field\":\"quantity\",\"op\":\"field\",\"path\":[],\"source\":\"b\"},\"op\":\"multiply\",\"right\":{\"field\":\"rate\",\"op\":\"field\",\"path\":[\"b_rate\"],\"source\":\"rates\"}},\"op\":\"quantize\",\"precision\":18,\"rounding\":\"half_even\",\"scale\":2}},\"name\":\"variance\"}],\"detail\":false,\"eligibility\":null,\"filter\":null,\"group_by\":[],\"id\":\"b_review\"}],\"relationships\":[{\"cardinality\":\"one_to_many\",\"from\":\"a\",\"from_keys\":[\"supplier\",\"invoice\",\"id\"],\"id\":\"a_components\",\"strict\":false,\"to\":\"components\",\"to_keys\":[\"supplier\",\"invoice\",\"line\"],\"validity\":null},{\"cardinality\":\"many_to_one\",\"from\":\"a\",\"from_keys\":[\"supplier\",\"id\"],\"id\":\"a_enrichment\",\"strict\":false,\"to\":\"enrichment\",\"to_keys\":[\"supplier\",\"id\"],\"validity\":null},{\"cardinality\":\"many_to_one\",\"from\":\"a\",\"from_keys\":[\"supplier\",\"raw\"],\"id\":\"a_mapping\",\"strict\":false,\"to\":\"mapping\",\"to_keys\":[\"supplier\",\"raw\"],\"validity\":null},{\"cardinality\":\"many_to_one\",\"from\":\"a\",\"from_keys\":[\"supplier\",\"a_mapping.item\"],\"id\":\"a_rate\",\"strict\":false,\"to\":\"rates\",\"to_keys\":[\"supplier\",\"item\"],\"validity\":{\"date\":\"date\",\"valid_from\":\"start\",\"valid_to\":\"end\"}},{\"cardinality\":\"one_to_many\",\"from\":\"b\",\"from_keys\":[\"supplier\",\"invoice\",\"id\"],\"id\":\"b_components\",\"strict\":false,\"to\":\"components\",\"to_keys\":[\"supplier\",\"invoice\",\"line\"],\"validity\":null},{\"cardinality\":\"many_to_one\",\"from\":\"b\",\"from_keys\":[\"supplier\",\"id\"],\"id\":\"b_enrichment\",\"strict\":false,\"to\":\"enrichment\",\"to_keys\":[\"supplier\",\"id\"],\"validity\":null},{\"cardinality\":\"many_to_one\",\"from\":\"b\",\"from_keys\":[\"supplier\",\"raw\"],\"id\":\"b_mapping\",\"strict\":false,\"to\":\"mapping\",\"to_keys\":[\"supplier\",\"raw\"],\"validity\":null},{\"cardinality\":\"many_to_one\",\"from\":\"b\",\"from_keys\":[\"supplier\",\"b_mapping.item\"],\"id\":\"b_rate\",\"strict\":false,\"to\":\"rates\",\"to_keys\":[\"supplier\",\"item\"],\"validity\":{\"date\":\"date\",\"valid_from\":\"start\",\"valid_to\":\"end\"}}],\"required_capabilities\":[],\"sources\":[{\"grain\":[\"supplier\",\"invoice\",\"id\"],\"id\":\"a\",\"identity\":[\"supplier\",\"invoice\",\"id\"],\"projection\":{\"array\":\"/lines\",\"fields\":{\"billed\":{\"data_type\":{\"kind\":\"decimal\",\"precision\":18,\"scale\":2},\"header\":false,\"nullable\":false,\"path\":\"/billed\"},\"currency\":{\"data_type\":{\"kind\":\"string\"},\"header\":true,\"nullable\":false,\"path\":\"/currency\"},\"date\":{\"data_type\":{\"kind\":\"date\"},\"header\":true,\"nullable\":false,\"path\":\"/date\"},\"id\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"/id\"},\"invoice\":{\"data_type\":{\"kind\":\"string\"},\"header\":true,\"nullable\":false,\"path\":\"/invoice\"},\"quantity\":{\"data_type\":{\"kind\":\"decimal\",\"precision\":12,\"scale\":4},\"header\":false,\"nullable\":false,\"path\":\"/quantity\"},\"raw\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"/item\"},\"supplier\":{\"data_type\":{\"kind\":\"string\"},\"header\":true,\"nullable\":false,\"path\":\"/supplier\"}}}},{\"grain\":[\"supplier\",\"invoice\",\"id\"],\"id\":\"b\",\"identity\":[\"supplier\",\"invoice\",\"id\"],\"projection\":{\"array\":\"/details\",\"fields\":{\"billed\":{\"data_type\":{\"kind\":\"decimal\",\"precision\":18,\"scale\":2},\"header\":false,\"nullable\":false,\"path\":\"/charge\"},\"currency\":{\"data_type\":{\"kind\":\"string\"},\"header\":true,\"nullable\":false,\"path\":\"/currency\"},\"date\":{\"data_type\":{\"kind\":\"date\"},\"header\":true,\"nullable\":false,\"path\":\"/issued\"},\"id\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"/position\"},\"invoice\":{\"data_type\":{\"kind\":\"string\"},\"header\":true,\"nullable\":false,\"path\":\"/number\"},\"quantity\":{\"data_type\":{\"kind\":\"decimal\",\"precision\":12,\"scale\":4},\"header\":false,\"nullable\":false,\"path\":\"/units\"},\"raw\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"/description\"},\"supplier\":{\"data_type\":{\"kind\":\"string\"},\"header\":true,\"nullable\":false,\"path\":\"/vendor\"}}}},{\"grain\":[\"id\"],\"id\":\"components\",\"identity\":[\"id\"],\"projection\":{\"array\":null,\"fields\":{\"amount\":{\"data_type\":{\"kind\":\"decimal\",\"precision\":18,\"scale\":2},\"header\":false,\"nullable\":false,\"path\":\"amount\"},\"id\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"id\"},\"invoice\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"invoice\"},\"line\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"line\"},\"supplier\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"supplier\"}}}},{\"grain\":[\"supplier\",\"id\"],\"id\":\"enrichment\",\"identity\":[\"supplier\",\"id\"],\"projection\":{\"array\":null,\"fields\":{\"amount\":{\"data_type\":{\"kind\":\"decimal\",\"precision\":18,\"scale\":2},\"header\":false,\"nullable\":false,\"path\":\"amount\"},\"id\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"id\"},\"supplier\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"supplier\"}}}},{\"grain\":[\"id\"],\"id\":\"mapping\",\"identity\":[\"id\"],\"projection\":{\"array\":null,\"fields\":{\"id\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"id\"},\"item\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"item\"},\"raw\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"raw\"},\"supplier\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"supplier\"}}}},{\"grain\":[\"id\"],\"id\":\"rates\",\"identity\":[\"id\"],\"projection\":{\"array\":null,\"fields\":{\"end\":{\"data_type\":{\"kind\":\"date\"},\"header\":false,\"nullable\":true,\"path\":\"end\"},\"id\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"id\"},\"item\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"item\"},\"rate\":{\"data_type\":{\"kind\":\"decimal\",\"precision\":14,\"scale\":6},\"header\":false,\"nullable\":false,\"path\":\"rate\"},\"start\":{\"data_type\":{\"kind\":\"date\"},\"header\":false,\"nullable\":false,\"path\":\"start\"},\"supplier\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"supplier\"}}}}]}",
+  "errors": {
+    "division": {
+      "code": "UNSUPPORTED_OPERATION",
+      "phase": "validation",
+      "stage": "load"
+    },
+    "duplicate_identity": {
+      "check": "data.identity",
+      "code": "DUPLICATE_IDENTITY",
+      "phase": "source",
+      "status": "failed",
+      "subject": "source:mapping"
+    },
+    "missing_binding": {
+      "check": "access",
+      "code": "MISSING_BINDING",
+      "phase": "source",
+      "status": "failed",
+      "subject": null
+    }
+  },
+  "expected": {
+    "diagnostics": [
+      {
+        "affected_count": 1,
+        "code": "LOOKUP_UNMATCHED",
+        "severity": "warning",
+        "subject": "relationship:a_mapping"
+      }
+    ],
+    "evidence_counts": {
+      "candidate": 7,
+      "detail": 4,
+      "primary": 3
+    },
+    "reconciliation": {
+      "resolved_rows": 2,
+      "statement": "Comparable totals cover 2 resolved lines only; 1 unresolved lines keep null expected values and are not reconciled.",
+      "status": "partial",
+      "unresolved_rows": 1
+    },
+    "schema": {
+      "a_review": {
+        "columns": [
+          {
+            "name": "enriched",
+            "type": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2
+            }
+          },
+          {
+            "name": "id",
+            "type": {
+              "kind": "string"
+            }
+          },
+          {
+            "name": "supplier",
+            "type": {
+              "kind": "string"
+            }
+          },
+          {
+            "name": "billed",
+            "type": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2
+            }
+          },
+          {
+            "name": "expected",
+            "type": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2
+            }
+          },
+          {
+            "name": "variance",
+            "type": {
+              "kind": "decimal",
+              "precision": 19,
+              "scale": 2
+            }
+          },
+          {
+            "name": "_status",
+            "type": {
+              "kind": "string"
+            }
+          },
+          {
+            "name": "_reason",
+            "type": {
+              "kind": "string"
+            }
+          }
+        ]
+      },
+      "b_review": {
+        "columns": [
+          {
+            "name": "enriched",
+            "type": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2
+            }
+          },
+          {
+            "name": "id",
+            "type": {
+              "kind": "string"
+            }
+          },
+          {
+            "name": "supplier",
+            "type": {
+              "kind": "string"
+            }
+          },
+          {
+            "name": "billed",
+            "type": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2
+            }
+          },
+          {
+            "name": "expected",
+            "type": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2
+            }
+          },
+          {
+            "name": "variance",
+            "type": {
+              "kind": "decimal",
+              "precision": 19,
+              "scale": 2
+            }
+          },
+          {
+            "name": "_status",
+            "type": {
+              "kind": "string"
+            }
+          },
+          {
+            "name": "_reason",
+            "type": {
+              "kind": "string"
+            }
+          }
+        ]
+      }
+    },
+    "status": "succeeded_with_unresolved",
+    "tables": {
+      "a_review": [
+        {
+          "_reason": {
+            "kind": "null"
+          },
+          "_status": {
+            "kind": "string",
+            "value": "matched"
+          },
+          "billed": {
+            "kind": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "value": "110.00"
+          },
+          "enriched": {
+            "kind": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "value": "7.00"
+          },
+          "expected": {
+            "kind": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "value": "100.00"
+          },
+          "id": {
+            "kind": "string",
+            "value": "1"
+          },
+          "supplier": {
+            "kind": "string",
+            "value": "A"
+          },
+          "variance": {
+            "kind": "decimal",
+            "precision": 19,
+            "scale": 2,
+            "value": "10.00"
+          }
+        },
+        {
+          "_reason": {
+            "kind": "string",
+            "value": "a_rate unmatched: requires a_mapping (a_mapping unmatched: no candidate with an equal key)"
+          },
+          "_status": {
+            "kind": "string",
+            "value": "unmatched"
+          },
+          "billed": {
+            "kind": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "value": "20.00"
+          },
+          "enriched": {
+            "kind": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "value": "9.00"
+          },
+          "expected": {
+            "kind": "null"
+          },
+          "id": {
+            "kind": "string",
+            "value": "2"
+          },
+          "supplier": {
+            "kind": "string",
+            "value": "A"
+          },
+          "variance": {
+            "kind": "null"
+          }
+        }
+      ],
+      "b_review": [
+        {
+          "_reason": {
+            "kind": "null"
+          },
+          "_status": {
+            "kind": "string",
+            "value": "matched"
+          },
+          "billed": {
+            "kind": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "value": "50.00"
+          },
+          "enriched": {
+            "kind": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "value": "8.00"
+          },
+          "expected": {
+            "kind": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "value": "45.00"
+          },
+          "id": {
+            "kind": "string",
+            "value": "1"
+          },
+          "supplier": {
+            "kind": "string",
+            "value": "B"
+          },
+          "variance": {
+            "kind": "decimal",
+            "precision": 19,
+            "scale": 2,
+            "value": "5.00"
+          }
+        }
+      ]
+    },
+    "totals": {
+      "by_output": {
+        "a_review": {
+          "AUD": {
+            "columns": {
+              "billed": {
+                "comparable": "110.00",
+                "null_rows": 0,
+                "population": "130.00",
+                "unresolved": "20.00"
+              },
+              "enriched": {
+                "comparable": "7.00",
+                "null_rows": 0,
+                "population": "16.00",
+                "unresolved": "9.00"
+              },
+              "expected": {
+                "comparable": "100.00",
+                "null_rows": 1,
+                "population": null,
+                "unresolved": null
+              },
+              "variance": {
+                "comparable": "10.00",
+                "null_rows": 1,
+                "population": null,
+                "unresolved": null
+              }
+            },
+            "rows": {
+              "population": 2,
+              "resolved": 1,
+              "unresolved": 1
+            }
+          }
+        },
+        "b_review": {
+          "AUD": {
+            "columns": {
+              "billed": {
+                "comparable": "50.00",
+                "null_rows": 0,
+                "population": "50.00",
+                "unresolved": "0.00"
+              },
+              "enriched": {
+                "comparable": "8.00",
+                "null_rows": 0,
+                "population": "8.00",
+                "unresolved": "0.00"
+              },
+              "expected": {
+                "comparable": "45.00",
+                "null_rows": 0,
+                "population": "45.00",
+                "unresolved": "0.00"
+              },
+              "variance": {
+                "comparable": "5.00",
+                "null_rows": 0,
+                "population": "5.00",
+                "unresolved": "0.00"
+              }
+            },
+            "rows": {
+              "population": 1,
+              "resolved": 1,
+              "unresolved": 0
+            }
+          }
+        }
+      },
+      "combined": {
+        "AUD": {
+          "columns": {
+            "billed": {
+              "comparable": "160.00",
+              "null_rows": 0,
+              "population": "180.00",
+              "unresolved": "20.00"
+            },
+            "enriched": {
+              "comparable": "15.00",
+              "null_rows": 0,
+              "population": "24.00",
+              "unresolved": "9.00"
+            },
+            "expected": {
+              "comparable": "145.00",
+              "null_rows": 1,
+              "population": null,
+              "unresolved": null
+            },
+            "variance": {
+              "comparable": "15.00",
+              "null_rows": 1,
+              "population": null,
+              "unresolved": null
+            }
+          },
+          "rows": {
+            "population": 3,
+            "resolved": 2,
+            "unresolved": 1
+          }
+        }
+      }
+    }
+  },
+  "recipe_hash": "073bd463da90d347f0f6b2ab99f9846a46b0087088b672d2347d1220c1c98fdc"
+}

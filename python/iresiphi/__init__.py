@@ -1,92 +1,86 @@
-"""Local source-preserving recipes backed by the shared Rust implementation."""
-import datetime
-import decimal
-import json
+"""Iresiphi: source-preserving local recipes over the shared Rust core.
+
+Rust owns validation, planning, serialization, execution and diagnostics. This
+package is a thin layer over opaque handles:
+
+* ``Recipe`` — a validated recipe. Load it from a ``.iresiphi`` document or
+  from data built with ``iresiphi.build``; ``to_json``/``save`` write the same
+  document Rust writes, and ``hash`` is the same canonical SHA-256.
+* ``ExecutionContext.run`` (or ``iresiphi.run``) — executes with the interpreter
+  released and returns a ``RunResult``. Failures raise ``IresiphiError``;
+  cancellation raises ``RunCancelled``; Ctrl-C raises ``RunInterrupted`` (a
+  ``KeyboardInterrupt``). Each carries the run report.
+* ``RunResult`` — bounded iteration over copied batches (at most 8192 rows each)
+  of exact Python values: ``int``, ``decimal.Decimal``, ``datetime.date``,
+  ``str``, ``bool`` and ``None``. Use ``close()`` or ``with``; access after close
+  raises ``HandleClosedError`` (code ``HANDLE_CLOSED``), repeated close is
+  harmless, and values already returned stay valid.
+"""
+
+import os
+
+from . import build
 from . import _native
+from .errors import HandleClosedError, IresiphiError, RunCancelled, RunInterrupted
 
+__all__ = [
+    "Recipe",
+    "Catalog",
+    "ExecutionContext",
+    "RunResult",
+    "CancellationToken",
+    "IresiphiError",
+    "HandleClosedError",
+    "RunCancelled",
+    "RunInterrupted",
+    "build",
+    "validate",
+    "explain",
+    "run",
+    "load",
+    "save",
+    "read_bundle",
+    "from_tagged",
+    "FORMAT_VERSION",
+    "MAX_BATCH_ROWS",
+]
+
+__version__ = _native.__version__
+FORMAT_VERSION = _native.FORMAT_VERSION
+MAX_BATCH_ROWS = _native.MAX_BATCH_ROWS
+
+Recipe = _native.Recipe
+Catalog = _native.Catalog
+ExecutionContext = _native.ExecutionContext
+RunResult = _native.RunResult
 CancellationToken = _native.CancellationToken
+read_bundle = _native.read_bundle
+from_tagged = _native.from_tagged
 
-def _value(value):
-    kind = value["kind"]
-    if kind == "null":
-        return None
-    raw = value["value"]
-    if kind == "decimal":
-        return decimal.Decimal(raw)
-    if kind == "int64":
-        return int(raw)
-    if kind == "date":
-        return datetime.date.fromisoformat(raw)
-    return raw
 
-class Recipe:
-    def __init__(self, declaration):
-        self._handle = _native.Recipe(declaration if isinstance(declaration, str) else json.dumps(declaration))
+def load(path):
+    """Open a saved ``.iresiphi`` document. Rust validates it fully before return."""
+    with open(os.fspath(path), "r", encoding="utf-8") as handle:
+        return Recipe.from_json(handle.read())
 
-    @classmethod
-    def from_json(cls, text):
-        return cls(text)
 
-    def to_json(self):
-        return self._handle.to_json()
+def save(recipe, path):
+    """Write ``recipe`` as a ``.iresiphi`` document (exact UTF-8 JSON from Rust)."""
+    text = recipe.to_json()
+    with open(os.fspath(path), "x", encoding="utf-8") as handle:
+        handle.write(text)
 
-    def validate(self, bindings=None, policy=None, data_checks="none"):
-        if bindings is None and policy is None:
-            if data_checks != "none":
-                raise ValueError("full checks require bindings and policy")
-            return json.loads(self._handle.validate())
-        if bindings is None or policy is None:
-            raise ValueError("bindings and policy must be supplied together")
-        return json.loads(self._handle.validate_bound(json.dumps(bindings), json.dumps(policy), data_checks))
-
-    def explain(self, bindings=None, policy=None):
-        if bindings is None and policy is None:
-            return json.loads(self._handle.explain())
-        if bindings is None or policy is None:
-            raise ValueError("bindings and policy must be supplied together")
-        return json.loads(self._handle.explain_bound(json.dumps(bindings), json.dumps(policy)))
-
-    def close(self):
-        self._handle.close()
-
-class Result:
-    def __init__(self, handle):
-        self._handle = handle
-
-    @property
-    def status(self):
-        return self._handle.status
-
-    @property
-    def metadata(self):
-        return json.loads(self._handle.metadata())
-
-    def batch(self, table, offset=0, count=8192):
-        return [{name: _value(value) for name, value in row.items()}
-                for row in json.loads(self._handle.batch(table, offset, count))]
-
-    def close(self):
-        self._handle.close()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        self.close()
-
-class ExecutionContext:
-    def __init__(self):
-        self._handle = _native.ExecutionContext()
-
-    def run(self, recipe, bindings, policy, cancel=None, destination=None):
-        return Result(self._handle.run(recipe._handle, json.dumps(bindings),
-                                      json.dumps(policy), cancel, destination))
 
 def validate(recipe, bindings=None, policy=None, data_checks="none"):
+    """Validation report: static, or bound with ``data_checks`` ``none``/``full``."""
     return recipe.validate(bindings, policy, data_checks)
+
 
 def explain(recipe, bindings=None, policy=None):
     return recipe.explain(bindings, policy)
 
+
 def run(recipe, bindings, policy, cancel=None, destination=None):
-    return ExecutionContext().run(recipe, bindings, policy, cancel, destination)
+    """Run on a fresh ``ExecutionContext``; see ``ExecutionContext.run``."""
+    return ExecutionContext().run(recipe, bindings, policy, cancel=cancel,
+                                  destination=destination)
