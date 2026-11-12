@@ -44,6 +44,17 @@ Two choices take the stricter reading of the contract:
 - A recipe that declares a population or an allocation must list `"population"` or `"allocation"` in `required_capabilities` (`UNDECLARED_CAPABILITY` otherwise). The contract only asks for additive, gated declarations.
 - A null quantity counts as "no source quantity": its recipients get null and become unresolved, the same as a missing quantity record.
 
+## Slice 3: SQLite source and placement
+
+The contract is [docs/spec/slice-3.md](../spec/slice-3.md); [docs/sqlite.md](../sqlite.md) describes the behaviour. Every clause is implemented and covered by `tests/sqlite.rs`, except as listed here.
+
+| Clause | Status | Reason |
+| --- | --- | --- |
+| SQLite source 7: cancellation is checked between records | Unverified | The reader checks before the row count and before each record. No test cancels a run during a SQLite scan. |
+| Placement 4: a database that is not UTF-8 is read locally | Unverified | Implemented from `PRAGMA encoding`. No test builds a UTF-16 database. |
+| Ticket 2: the placement half of the fixture through Python and Node | Unmet | `iresiphi.build.policy` takes `placement`, `binding` takes the `sqlite` adapter, and the Node declarations type both. Neither binding has a test that runs the fixture. |
+| Both hosted architectures pass at the same commit | Unverified | Local ARM results only. The x86 pass needs GitHub Actions. |
+
 ## Closed in this ticket
 
 These gaps from earlier tickets were fixed, with tests in `tests/preview.rs` and `tests/aggregation.rs`:

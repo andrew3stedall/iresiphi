@@ -297,10 +297,13 @@ def binding(path, adapter, **settings):
     return {"path": path, "adapter": adapter, "settings": settings}
 
 
-def policy(read_roots, output_roots=(), limits=None, diagnostic_values=False):
+def policy(read_roots, output_roots=(), limits=None, diagnostic_values=False, placement=None):
+    """`placement` is "local" (the default), "prefer_source" or "require_source"."""
     declared = {"allowed_read_roots": list(read_roots),
                 "allowed_output_roots": list(output_roots),
                 "diagnostic_values": diagnostic_values}
+    if placement:
+        declared["placement"] = placement
     if limits:
         declared["limits"] = dict(limits)
     return declared

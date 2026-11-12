@@ -71,6 +71,7 @@ impl Case {
             allowed_output_roots: vec![dir.path().into()],
             limits: Limits::default(),
             diagnostic_values: false,
+            placement: Default::default(),
         };
         Case {
             _dir: dir,
@@ -189,6 +190,7 @@ fn public_run_enriches_invoice_lines_with_original_cell_evidence() {
         allowed_output_roots: vec![root.path().into()],
         limits: Limits::default(),
         diagnostic_values: false,
+        placement: Default::default(),
     };
     let report =
         ExecutionContext::default().run(&recipe, &bindings, &policy, &AtomicBool::new(false));

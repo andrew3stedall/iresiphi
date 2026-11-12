@@ -64,6 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         allowed_output_roots: vec![work.clone()],
         limits: Limits::default(),
         diagnostic_values: false,
+        placement: Default::default(),
     };
     let recipe = Recipe::from_json(RECIPE)?;
     let report = iresiphi::validate(&recipe);

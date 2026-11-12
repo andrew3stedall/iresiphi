@@ -470,6 +470,26 @@ fn execute(
     progress.reads = reads;
     let validating = Instant::now();
     let rows_read: usize = sources.values().map(Vec::len).sum();
+    // Checks over anchor records cover what was scanned; say so when a source
+    // evaluated an eligibility predicate and kept the other records.
+    let pushed_sources = progress
+        .reads
+        .values()
+        .filter(|read| {
+            read.scanned_rows.is_some()
+                && read
+                    .placement
+                    .as_ref()
+                    .is_some_and(|p| p["scan"] == "source")
+        })
+        .count();
+    let pushed_note = if pushed_sources == 0 {
+        String::new()
+    } else {
+        format!(
+            "; {pushed_sources} sources evaluated an eligibility predicate, so text formats and lookups cover their scanned records only"
+        )
+    };
     progress.pass(
         "access",
         format!(
@@ -479,7 +499,7 @@ fn execute(
     );
     progress.pass(
         "data.types",
-        format!("full: every projected field of every record; {rows_read} source records"),
+        format!("full: every projected field of every record read; {rows_read} source records{pushed_note}"),
     );
     for source in &declared.sources {
         let rows = &sources[&source.id];
@@ -851,7 +871,7 @@ fn execute(
     }
     progress.pass(
         "data.relationships",
-        "full: declared cardinality of every lookup over every anchor record; no strict lookup was violated",
+        format!("full: declared cardinality of every lookup over every anchor record; no strict lookup was violated{pushed_note}"),
     );
     progress.pass(
         "lookup.cardinality",
@@ -859,7 +879,7 @@ fn execute(
     );
     progress.pass(
         "lookup.coverage",
-        format!("full: every anchor record of every lookup; {unmatched_anchors} anchor records unmatched"),
+        format!("full: every anchor record of every lookup; {unmatched_anchors} anchor records unmatched{pushed_note}"),
     );
     diagnostics.extend(orphan_details(recipe, &sources, &matches));
     progress.pass(
@@ -896,6 +916,11 @@ fn execute(
             .detail
             .then(|| detail_parents(recipe, &sources, &matches, &output.anchor));
         let anchor_rows = &sources[&output.anchor];
+        // Under a pushed eligibility the source holds more records than were scanned.
+        let anchor_source_rows = progress
+            .reads
+            .get(&output.anchor)
+            .map_or(anchor_rows.len(), |read| read.rows);
         let grouped = !output.aggregates.is_empty();
         let mut table = vec![];
         let mut population = vec![];
@@ -1229,7 +1254,7 @@ fn execute(
             let grouping = group(recipe, output, &members, policy)?;
             table = grouping.rows;
             serde_json::json!({
-                "source_rows": anchor_rows.len(),
+                "source_rows": anchor_source_rows,
                 "eligible_rows": eligible,
                 "output_rows": table.len(),
                 "group_rows": grouping.groups,
@@ -1239,7 +1264,7 @@ fn execute(
             })
         } else {
             let output_rows = table.len();
-            let mut count = serde_json::json!({"source_rows":anchor_rows.len(),"eligible_rows":eligible,"output_rows":output_rows});
+            let mut count = serde_json::json!({"source_rows":anchor_source_rows,"eligible_rows":eligible,"output_rows":output_rows});
             if output.detail {
                 count["parented_rows"] = tally("matched").into();
                 count["orphan_rows"] = tally("unmatched").into();

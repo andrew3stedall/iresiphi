@@ -165,6 +165,7 @@ fn xlsx_decompressed_and_cell_budgets_fail_the_run() {
         allowed_output_roots: vec![dir.path().into()],
         limits: Limits::default(),
         diagnostic_values: false,
+        placement: Default::default(),
     };
     let ok = ExecutionContext::default().run(&recipe, &bindings, &policy, &go());
     assert_eq!(ok.status, "succeeded", "{:?}", ok.diagnostics);

@@ -14,6 +14,7 @@ pub use engine::{ExecutionContext, RunReport};
 pub mod sink;
 
 pub mod adapters;
+pub mod placement;
 
 #[cfg(feature = "python")]
 mod python;

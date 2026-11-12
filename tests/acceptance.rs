@@ -122,6 +122,7 @@ fn fixture(root: &std::path::Path) -> (Recipe, Bindings, Policy) {
         allowed_output_roots: vec![root.to_owned()],
         limits: Limits::default(),
         diagnostic_values: false,
+        placement: Default::default(),
     };
     (recipe, bindings, policy)
 }

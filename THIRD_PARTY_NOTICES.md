@@ -6,18 +6,18 @@ Iresiphi itself is licensed under Apache-2.0 (see `LICENSE`). The crates below a
 
 `normal` crates are linked into the built library. `build` crates run only at compile time (build scripts and procedural macros) and are not shipped in a wheel, though an sdist build downloads and runs them.
 
-247 crates in total.
+253 crates in total.
 
 ## License expressions
 
 | License expression | Crates |
 | --- | ---: |
-| `MIT OR Apache-2.0` | 108 |
+| `MIT OR Apache-2.0` | 109 |
 | `Apache-2.0` | 47 |
-| `MIT` | 24 |
+| `MIT` | 26 |
 | `Unicode-3.0` | 18 |
 | `Apache-2.0 OR MIT` | 16 |
-| `MIT/Apache-2.0` | 10 |
+| `MIT/Apache-2.0` | 13 |
 | `Unlicense/MIT` | 4 |
 | `BSD-3-Clause` | 3 |
 | `Unlicense OR MIT` | 3 |
@@ -121,6 +121,8 @@ Iresiphi itself is licensed under Apache-2.0 (see `LICENSE`). The crates below a
 | encoding_rs | 0.8.44 | `(Apache-2.0 OR MIT) AND BSD-3-Clause` | normal | both | https://github.com/hsivonen/encoding_rs |
 | equivalent | 1.0.3 | `Apache-2.0 OR MIT` | normal | both | https://github.com/indexmap-rs/equivalent |
 | errno | 0.3.14 | `MIT OR Apache-2.0` | normal | both | https://github.com/lambda-fairy/rust-errno |
+| fallible-iterator | 0.3.0 | `MIT/Apache-2.0` | normal | both | https://github.com/sfackler/rust-fallible-iterator |
+| fallible-streaming-iterator | 0.1.9 | `MIT/Apache-2.0` | normal | both | https://github.com/sfackler/fallible-streaming-iterator |
 | fast-float2 | 0.2.4 | `MIT OR Apache-2.0` | normal | both | https://github.com/Alexhuszagh/fast-float-rust |
 | fastrand | 2.5.0 | `Apache-2.0 OR MIT` | normal | both | https://github.com/smol-rs/fastrand |
 | find-msvc-tools | 0.1.15 | `MIT OR Apache-2.0` | build | both | https://github.com/rust-lang/cc-rs |
@@ -147,6 +149,7 @@ Iresiphi itself is licensed under Apache-2.0 (see `LICENSE`). The crates below a
 | hashbrown | 0.14.5 | `MIT OR Apache-2.0` | normal | both | https://github.com/rust-lang/hashbrown |
 | hashbrown | 0.15.5 | `MIT OR Apache-2.0` | normal | both | https://github.com/rust-lang/hashbrown |
 | hashbrown | 0.17.1 | `MIT OR Apache-2.0` | normal | both | https://github.com/rust-lang/hashbrown |
+| hashlink | 0.12.2 | `MIT OR Apache-2.0` | normal | both | https://github.com/djc/hashlink |
 | heck | 0.5.0 | `MIT OR Apache-2.0` | build | wheel only | https://github.com/withoutboats/heck |
 | hex | 0.4.3 | `MIT OR Apache-2.0` | normal | both | https://github.com/KokaKiwi/rust-hex |
 | http | 1.5.0 | `MIT OR Apache-2.0` | normal | both | https://github.com/hyperium/http |
@@ -175,6 +178,7 @@ Iresiphi itself is licensed under Apache-2.0 (see `LICENSE`). The crates below a
 | lexical-write-integer | 1.0.6 | `MIT/Apache-2.0` | normal | both | https://github.com/Alexhuszagh/rust-lexical |
 | libc | 0.2.191 | `MIT OR Apache-2.0` | normal | both | https://github.com/rust-lang/libc |
 | libm | 0.2.16 | `MIT` | normal | both | https://github.com/rust-lang/compiler-builtins |
+| libsqlite3-sys | 0.40.0 | `MIT` | normal | both | https://github.com/rusqlite/rusqlite |
 | linux-raw-sys | 0.12.1 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | normal | both | https://github.com/sunfishcode/linux-raw-sys |
 | litemap | 0.8.3 | `Unicode-3.0` | normal | both | https://github.com/unicode-org/icu4x |
 | lock_api | 0.4.14 | `MIT OR Apache-2.0` | normal | both | https://github.com/Amanieu/parking_lot |
@@ -215,6 +219,7 @@ Iresiphi itself is licensed under Apache-2.0 (see `LICENSE`). The crates below a
 | regex | 1.13.1 | `MIT OR Apache-2.0` | normal | both | https://github.com/rust-lang/regex |
 | regex-automata | 0.4.18 | `MIT OR Apache-2.0` | normal | both | https://github.com/rust-lang/regex |
 | regex-syntax | 0.8.11 | `MIT OR Apache-2.0` | normal | both | https://github.com/rust-lang/regex |
+| rusqlite | 0.42.0 | `MIT` | normal | both | https://github.com/rusqlite/rusqlite |
 | rustc_version | 0.4.1 | `MIT OR Apache-2.0` | build | both | https://github.com/djc/rustc-version-rs |
 | rustix | 1.1.6 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | normal | both | https://github.com/bytecodealliance/rustix |
 | rustversion | 1.0.23 | `MIT OR Apache-2.0` | build | both | https://github.com/dtolnay/rustversion |
@@ -262,6 +267,7 @@ Iresiphi itself is licensed under Apache-2.0 (see `LICENSE`). The crates below a
 | utf8_iter | 1.1.0 | `Apache-2.0 OR MIT` | normal | both | https://github.com/hsivonen/utf8_iter |
 | utf_types | 1.0.0 | `Apache-2.0 OR MIT` | normal | both | https://github.com/hsivonen/utf_types |
 | uuid | 1.29.2 | `Apache-2.0 OR MIT` | normal | both | https://github.com/uuid-rs/uuid |
+| vcpkg | 0.2.15 | `MIT/Apache-2.0` | build | both | https://github.com/mcgoo/vcpkg-rs |
 | version_check | 0.9.5 | `MIT/Apache-2.0` | build | both | https://github.com/SergioBenitez/version_check |
 | walkdir | 2.5.0 | `Unlicense/MIT` | normal | both | https://github.com/BurntSushi/walkdir |
 | writeable | 0.6.4 | `Unicode-3.0` | normal | both | https://github.com/unicode-org/icu4x |

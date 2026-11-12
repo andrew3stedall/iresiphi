@@ -311,6 +311,21 @@ pub struct Policy {
     pub limits: Limits,
     #[serde(default)]
     pub diagnostic_values: bool,
+    /// Where operations may run (docs/spec/slice-3.md). Local unless stated.
+    #[serde(default)]
+    pub placement: Placement,
+}
+/// Execution placement policy. It is run policy, never recipe meaning.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Placement {
+    /// Every operation runs in the local executor.
+    #[default]
+    Local,
+    /// An operation runs at its source where the contract allows, else locally.
+    PreferSource,
+    /// Eligibility on a source that can filter must run there, or planning fails.
+    RequireSource,
 }
 /// A structured diagnostic record (decision #9). `code`, `phase` and `message`
 /// are always present; the remaining fields locate and bound the problem. Values
