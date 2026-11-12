@@ -63,6 +63,7 @@ The package name `iresiphi` returned no package record in direct checks of PyPI,
 ## Design and research
 
 - [Developer-preview decision map](https://github.com/andrew3stedall/iresiphi/issues/2) indexes the invoice-review workflow and resolved planning decisions.
+- [Implementation status](docs/status.md) records completed work, verification gates and remaining scope.
 - [Engine and bindings evidence](docs/research/preview-engine-bindings.md) records primary-source findings and implementation acceptance gates.
 
 - [Initial design notes](DESIGN.md) record the vocabulary and open design questions.

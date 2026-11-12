@@ -724,6 +724,13 @@ fn bound_validation_distinguishes_none_and_full_coverage() {
     assert_eq!(check(&none, "access").status, "passed");
     assert_eq!(check(&none, "data").status, "not-run");
     assert!(none.checks.iter().all(|c| !c.id.starts_with("data.")));
+    let explanation = iresiphi::validation::explain_bound(&recipe, &bindings, &policy);
+    for read in explanation["bound"]["reads"].as_array().unwrap() {
+        assert_eq!(read["capabilities"]["location"], "local");
+        assert_eq!(read["capabilities"]["typed_read"], true);
+        assert_eq!(read["capabilities"]["pushdown"], false);
+        assert_eq!(read["capabilities"]["streaming"], false);
+    }
     let full = validate_bound(&recipe, &bindings, &policy, "full");
     assert!(full.valid, "{full:?}");
     for id in [
