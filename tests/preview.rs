@@ -125,3 +125,48 @@ fn type_error_samples_are_capped_while_the_count_stays_exact() {
     assert_eq!(d.samples.len(), 20);
     assert!(d.samples_truncated);
 }
+
+#[test]
+fn bundles_carry_a_typed_reconciliation_table() {
+    use iresiphi::model::Value;
+    let f = fixture();
+    let report = ExecutionContext::default().run_bundle(
+        &f.recipe,
+        &f.bindings,
+        &f.policy,
+        &f.destination(),
+        &AtomicBool::new(false),
+    );
+    assert_eq!(report.status, "succeeded_with_unresolved");
+    let tables = iresiphi::sink::read_bundle(&f.destination()).unwrap();
+    let rows = &tables["_reconciliation"];
+    let text = |row: &std::collections::BTreeMap<String, Value>, key: &str| match &row[key] {
+        Value::String { value } | Value::Int64 { value } => value.clone(),
+        Value::Null => "null".into(),
+        other => panic!("{key}: {other:?}"),
+    };
+    // Lines 1 and 2 resolve; line 3 has no rate. Each line's count column is -7.
+    let count = rows
+        .iter()
+        .find(|r| text(r, "scope") == "combined" && text(r, "column") == "count")
+        .expect("combined count row");
+    assert_eq!(text(count, "currency"), "undeclared");
+    assert_eq!(text(count, "population_rows"), "3");
+    assert_eq!(text(count, "resolved_rows"), "2");
+    assert_eq!(text(count, "unresolved_rows"), "1");
+    assert_eq!(text(count, "population_total"), "-21");
+    assert_eq!(text(count, "comparable_total"), "-14");
+    assert_eq!(text(count, "unresolved_total"), "-7");
+    // A column with a null on some line has no complete total.
+    let expected = rows
+        .iter()
+        .find(|r| text(r, "scope") == "review" && text(r, "column") == "expected")
+        .expect("per-output expected row");
+    assert_eq!(text(expected, "population_total"), "null");
+    assert_eq!(text(expected, "null_rows"), "1");
+    // The same totals as the manifest, which stays authoritative.
+    assert_eq!(
+        report.manifest["totals"]["combined"]["undeclared"]["columns"]["count"]["comparable"],
+        "-14"
+    );
+}
