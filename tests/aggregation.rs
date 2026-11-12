@@ -1137,6 +1137,49 @@ fn line_grain_comparison_of_amounts_in_different_currencies_fails() {
 }
 
 #[test]
+fn currency_checks_cover_predicates_and_measure_inputs_without_combining_independent_comparisons() {
+    let setup = || {
+        let mut l = ledger();
+        l.doc["sources"][1]["projection"]["fields"]["currency"] = column("currency", string());
+        l.write("customers", "id,budget,currency\nC1,1000,AUD\nC2,500,USD\n");
+        l
+    };
+    let mixed = json!({"op":"less","left":via("customers","budget",&["customer"]),"right":field("lines","billed")});
+    for slot in ["eligibility", "filter"] {
+        let mut l = setup();
+        l.output()[slot] = mixed.clone();
+        assert_eq!(failure(&l.run()), "MIXED_CURRENCY", "{slot}");
+    }
+    let mut l = setup();
+    l.group(&["currency"], vec![measure("mixed", "sum", json!({"op":"subtract","left":via("customers","budget",&["customer"]),"right":field("lines","billed")}))]);
+    assert!(matches!(
+        failure(&l.run()),
+        "MIXED_CURRENCY" | "GRAIN_VIOLATION"
+    ));
+    let mut l = setup();
+    let mut filtered = measure("filtered", "sum", field("lines", "billed"));
+    filtered["filter"] = mixed;
+    l.group(&["currency"], vec![filtered]);
+    assert_eq!(failure(&l.run()), "MIXED_CURRENCY");
+    let mut l = setup();
+    l.add_column("independent", json!({"op":"and",
+        "left":{"op":"equal","left":field("lines","billed"),"right":field("lines","billed")},
+        "right":{"op":"equal","left":via("customers","budget",&["customer"]),"right":via("customers","budget",&["customer"])}}));
+    let report = l.succeeded();
+    assert!(
+        report.tables["review"]
+            .iter()
+            .all(|r| r["independent"] == Value::Boolean { value: true })
+    );
+    let mut l = setup();
+    l.add_column("selected", json!({"op":"case",
+        "condition":{"op":"literal","value":{"kind":"boolean","value":true}},
+        "then":{"op":"add","left":field("lines","billed"),"right":field("lines","billed")},
+        "otherwise":{"op":"add","left":via("customers","budget",&["customer"]),"right":via("customers","budget",&["customer"])}}));
+    l.succeeded();
+}
+
+#[test]
 fn grouped_amounts_from_a_currency_source_need_an_anchor_currency() {
     let mut l = ledger();
     l.doc["sources"][0]["projection"]["fields"]

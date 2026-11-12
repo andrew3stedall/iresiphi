@@ -773,97 +773,13 @@ fn has_currency(r: &Recipe, source: &str) -> bool {
         .is_some_and(|s| s.projection.fields.contains_key("currency"))
 }
 /// True when `source.field` is a decimal amount of a source that declares a currency.
-fn currency_amount(r: &Recipe, source: &str, field: &str) -> bool {
+pub(crate) fn currency_amount(r: &Recipe, source: &str, field: &str) -> bool {
     has_currency(r, source)
         && r.sources
             .iter()
             .find(|s| s.id == source)
             .and_then(|s| s.projection.fields.get(field))
             .is_some_and(|f| matches!(f.data_type, Type::Decimal { .. }))
-}
-/// Line-grain currency amounts an expression reads, as (source, path). Per-line
-/// detail aggregates are excluded: they check their own currencies.
-fn line_amounts(
-    e: &Expr,
-    r: &Recipe,
-    seen: &mut BTreeSet<String>,
-    found: &mut Vec<(String, Vec<String>)>,
-) {
-    match e {
-        Expr::Field {
-            source,
-            field,
-            path,
-        } => {
-            let amount = (source.clone(), path.clone());
-            if currency_amount(r, source, field) && !found.contains(&amount) {
-                found.push(amount);
-            }
-        }
-        Expr::Aggregate { .. } => {}
-        Expr::Feature { id } => {
-            if seen.insert(id.clone()) {
-                if let Some(f) = r.features.iter().find(|f| f.id == *id) {
-                    line_amounts(&f.expr, r, seen, found);
-                }
-                seen.remove(id);
-            }
-        }
-        _ => {
-            for child in children(e) {
-                line_amounts(child, r, seen, found);
-            }
-        }
-    }
-}
-/// Currency amounts that one line-grain expression adds, subtracts or compares
-/// with each other, as (source, path). A run must find one currency among them
-/// on every line: amounts in different currencies are never combined.
-pub(crate) fn combined_currency_amounts(e: &Expr, r: &Recipe) -> Vec<(String, Vec<String>)> {
-    fn walk(
-        e: &Expr,
-        r: &Recipe,
-        seen: &mut BTreeSet<String>,
-        out: &mut Vec<(String, Vec<String>)>,
-    ) {
-        match e {
-            Expr::Add { left, right }
-            | Expr::Subtract { left, right }
-            | Expr::Equal { left, right }
-            | Expr::Less { left, right }
-            | Expr::LessEqual { left, right } => {
-                let mut found = vec![];
-                line_amounts(left, r, seen, &mut found);
-                line_amounts(right, r, seen, &mut found);
-                if found.len() > 1 {
-                    for amount in found {
-                        if !out.contains(&amount) {
-                            out.push(amount);
-                        }
-                    }
-                }
-                walk(left, r, seen, out);
-                walk(right, r, seen, out);
-            }
-            Expr::Aggregate { .. } => {}
-            Expr::Feature { id } => {
-                if seen.insert(id.clone()) {
-                    if let Some(f) = r.features.iter().find(|f| f.id == *id) {
-                        walk(&f.expr, r, seen, out);
-                    }
-                    seen.remove(id);
-                }
-            }
-            _ => {
-                for child in children(e) {
-                    walk(child, r, seen, out);
-                }
-            }
-        }
-    }
-    let mut out = vec![];
-    walk(e, r, &mut BTreeSet::new(), &mut out);
-    out
 }
 /// A source declaring a currency whose amounts a grouped measure input reads.
 fn measure_currency_source(e: &Expr, r: &Recipe, seen: &mut BTreeSet<String>) -> Option<String> {
@@ -1228,6 +1144,19 @@ fn check_identifiers(r: &Recipe) -> Result<()> {
         }
     }
     for out in &r.outputs {
+        if [
+            "_evidence",
+            "_candidate_evidence",
+            "_detail_evidence",
+            "_reconciliation",
+        ]
+        .contains(&out.id.as_str())
+        {
+            return Err(error(
+                "DUPLICATE_ID",
+                format!("output {} is reserved for bundle metadata", out.id),
+            ));
+        }
         let mut names = BTreeSet::new();
         for name in out
             .columns

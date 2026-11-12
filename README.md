@@ -42,11 +42,17 @@ import * as rsp from "iresiphi";
 const recipe = new rsp.Recipe("customer_summary");
 ```
 
-`rsp` is the preferred shorthand in both languages. `.iresiphi` is an illustrative file extension. The recipe serialization format and versioning are still to be designed.
+`rsp` is the preferred shorthand in both languages. The preview saves `.iresiphi`
+documents using recipe format `0.1`; the TypeScript interface remains deferred.
 
 ## Project status
 
-This is an early design project. The 0.1.0 developer preview has not been published to crates.io or PyPI. The current implementation intent is a shared Rust core with Python and TypeScript packages; preview decisions are tracked in the [developer-preview map](https://github.com/andrew3stedall/iresiphi/issues/2). Its resolution comments are authoritative for preview scope and contracts; the initial notes below preserve broader product intent.
+The 0.1.0 Rust/Python developer preview is implemented but has not been published
+to crates.io or PyPI. Its scope and remaining limitations are described in the
+[preview guide](docs/preview.md). Preview decisions are tracked in the
+[developer-preview map](https://github.com/andrew3stedall/iresiphi/issues/2).
+Its resolution comments govern preview contracts; the design direction above
+preserves broader product intent.
 
 The package name `iresiphi` returned no package record in direct checks of PyPI, npm, and crates.io on 11 November 2026. Registry availability can change, and this does not reserve the name.
 
@@ -69,7 +75,8 @@ The package name `iresiphi` returned no package record in direct checks of PyPI,
 
 [CI and processor architecture](docs/ci.md) describes the GitHub-hosted x86 job,
 Terraform-managed repository settings, and where to add ARM-incompatible workloads
-as implementation begins.
+as implementation proceeds. Work requiring x86 must run through GitHub Actions;
+ARM-compatible builds, tests and processing may run locally on ARM.
 
 ## License
 

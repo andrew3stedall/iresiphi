@@ -115,7 +115,7 @@ jobs:
               -v "$PWD/ci-artifacts/dist:/dist:ro" \
               -v "$PWD/tests:/tests:ro" -v "$PWD/scripts:/scripts:ro" \
               "$MANYLINUX_IMAGE" bash /scripts/ci/test-wheel.sh "$abi" \
-              | tee "ci-artifacts/$abi-clean-install.txt"
+              2>&1 | tee "ci-artifacts/$abi-clean-install.txt"
           done
       - name: Preserve distributions and audit evidence
         if: always()

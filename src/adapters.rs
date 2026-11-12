@@ -427,6 +427,7 @@ pub fn plain_value(value: &Value) -> serde_json::Value {
 #[derive(Default)]
 struct ValueFailures {
     first: Option<Error>,
+    codes: BTreeSet<String>,
     count: usize,
     samples: Vec<SourceReference>,
 }
@@ -445,17 +446,31 @@ impl ValueFailures {
             return Err(error);
         }
         self.count += 1;
+        self.codes.insert(error.code.clone());
         if self.samples.len() < Error::SAMPLE_CAP {
             self.samples.push(reference.clone());
         }
         self.first.get_or_insert(error);
         Ok(())
     }
-    /// The first failure, with the exact count and the first references.
+    /// Preserve a homogeneous failure code; mixed kinds get a source-wide code.
     fn finish(self) -> Result<()> {
         match self.first {
             None => Ok(()),
-            Some(error) => Err(error.with_affected(self.count, self.samples.iter())),
+            Some(error) => {
+                let error = if self.codes.len() > 1 {
+                    err(
+                        "INVALID_VALUE",
+                        format!(
+                            "source records have multiple value error kinds: {}",
+                            self.codes.into_iter().collect::<Vec<_>>().join(", ")
+                        ),
+                    )
+                } else {
+                    error
+                };
+                Err(error.with_affected(self.count, self.samples.iter()))
+            }
         }
     }
 }
@@ -601,6 +616,31 @@ fn expand_decimal(text: &str) -> Result<String> {
 // A validation pass catches duplicate keys even in unprojected subtrees. Parsing into
 // serde_json::Value alone would silently overwrite them.
 struct UniqueJson;
+/// serde_json's reader API lets cancellation interrupt both parsing passes,
+/// including a large unprojected subtree, rather than waiting for a whole tree.
+struct JsonReader<'a> {
+    bytes: &'a [u8],
+    cancel: &'a AtomicBool,
+}
+impl Read for JsonReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(std::io::Error::other("source read cancelled"));
+        }
+        self.bytes.read(buffer)
+    }
+}
+fn parse_json<T: serde::de::DeserializeOwned>(bytes: &[u8], cancel: &AtomicBool) -> Result<T> {
+    serde_json::from_reader(JsonReader { bytes, cancel }).map_err(|error| {
+        if cancel.load(Ordering::Relaxed) {
+            err("CANCELLED", "source read cancelled")
+        } else if error.to_string().contains("duplicate JSON key") {
+            err("DUPLICATE_JSON_KEY", error.to_string())
+        } else {
+            err("INVALID_JSON", error.to_string())
+        }
+    })
+}
 impl<'de> Deserialize<'de> for UniqueJson {
     fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
         struct V;
@@ -779,18 +819,8 @@ fn read_json(
         json_pointer_tokens(path)?;
     }
     json_preflight(bytes, &policy.limits, cancel)?;
-    serde_json::from_slice::<UniqueJson>(bytes).map_err(|e| {
-        err(
-            if e.to_string().contains("duplicate JSON key") {
-                "DUPLICATE_JSON_KEY"
-            } else {
-                "INVALID_JSON"
-            },
-            e.to_string(),
-        )
-    })?;
-    let root: serde_json::Value =
-        serde_json::from_slice(bytes).map_err(|e| err("INVALID_JSON", e.to_string()))?;
+    parse_json::<UniqueJson>(bytes, cancel)?;
+    let root: serde_json::Value = parse_json(bytes, cancel)?;
     let records: Vec<&serde_json::Value> = match &source.projection.array {
         Some(path) => json_lookup(&root, path)?
             .and_then(|v| v.as_array())
@@ -2068,8 +2098,7 @@ fn inspect_schema(
             }
             let bytes = read_bytes(binding, policy, total, cancel)?;
             json_preflight(&bytes, &policy.limits, cancel)?;
-            let root: serde_json::Value =
-                serde_json::from_slice(&bytes).map_err(|e| err("INVALID_JSON", e.to_string()))?;
+            let root: serde_json::Value = parse_json(&bytes, cancel)?;
             if let Some(array) = &source.projection.array {
                 if !json_lookup(&root, array)?.is_some_and(|v| v.is_array()) {
                     return Err(missing("JSON array", array));

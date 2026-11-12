@@ -17,6 +17,10 @@ The repository includes the Rust/Python invoice-review preview. CI validates
 Terraform and runs the Rust suite, Python packaging checks and workload evidence
 on x86. TypeScript and ARM release wheels remain deferred by the preview scope.
 
+The [x86 evidence record](measurements/ci-x86.md) identifies verified runs,
+artifact contents and the immutable manylinux image. Workflow artifacts are
+specific to a commit; a job definition alone does not establish a passing result.
+
 ## Terraform-managed settings
 
 [`infra/github`](../infra/github) manages settings on the existing repository:

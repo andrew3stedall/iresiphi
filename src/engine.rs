@@ -854,20 +854,6 @@ fn execute(
         let mut members: Vec<Member> = vec![];
         let mut eligible = 0usize;
         let mut statuses: BTreeMap<&'static str, usize> = BTreeMap::new();
-        // Columns that add, subtract or compare currency amounts, and the lines on
-        // which those amounts carry more than one currency.
-        let currency_checks: Vec<(&str, Vec<(String, Vec<String>)>)> = output
-            .columns
-            .iter()
-            .map(|c| {
-                (
-                    c.name.as_str(),
-                    crate::validation::combined_currency_amounts(&c.expr, recipe),
-                )
-            })
-            .filter(|(_, amounts)| !amounts.is_empty())
-            .collect();
-        let mut mixed: BTreeMap<&str, Vec<&SourceReference>> = BTreeMap::new();
         let evidence_before = evidence.len();
         let mut selected: Vec<usize> = vec![];
         for (row_index, row) in anchor_rows.iter().enumerate() {
@@ -944,20 +930,21 @@ fn execute(
                         )?,
                         recipe,
                         &mut |s: &str, f: &str, p: &[String]| resolve(&mut reasons, s, f, p),
-                    )?,
+                    )
+                    .map_err(|e| {
+                        if e.code == "MIXED_CURRENCY" {
+                            let mut error = e
+                                .with_subject(format!("expression:{}.{}", output.id, column.name))
+                                .with_affected(1, [&row.reference]);
+                            // Execution stops here; this sample is not a census
+                            // of expressions on records not evaluated yet.
+                            error.count_status = "unknown".into();
+                            error
+                        } else {
+                            e
+                        }
+                    })?,
                 );
-            }
-            for (column, amounts) in &currency_checks {
-                let mut currencies: Vec<Value> = vec![];
-                for (source, path) in amounts {
-                    let currency = resolve(&mut vec![], source, "currency", path)?;
-                    if currency != Value::Null && !currencies.contains(&currency) {
-                        currencies.push(currency);
-                    }
-                }
-                if currencies.len() > 1 {
-                    mixed.entry(column).or_default().push(&row.reference);
-                }
             }
             // Measure inputs at line grain; the lookups they read are part of the
             // line's status.
@@ -1145,21 +1132,7 @@ fn execute(
             if grouped { members.len() } else { table.len() },
         )?;
         asserted_lines += selected.len();
-        if let Some((column, references)) = mixed.into_iter().next() {
-            return Err(Error::new(
-                "MIXED_CURRENCY",
-                "execution",
-                format!(
-                    "{} {} records combine amounts in different currencies in {}.{column}; amounts in different currencies are never summed or compared",
-                    references.len(),
-                    output.anchor,
-                    output.id
-                ),
-            )
-            .with_subject(format!("expression:{}.{column}", output.id))
-            .with_check("expression.currency")
-            .with_affected(references.len(), references.iter().copied()));
-        }
+
         let tally = |s: &str| statuses.get(s).copied().unwrap_or(0);
         let count = if grouped {
             let grouping = group(recipe, output, &members, policy)?;
@@ -1842,9 +1815,14 @@ fn bind_line(
     values: &BTreeMap<String, Value>,
 ) -> Result<Expr> {
     let bound = crate::validation::rewrite_output_refs(expr, &output.id, &mut |name| {
-        Ok(Expr::Literal {
-            value: values.get(name).cloned().unwrap_or(Value::Null),
-        })
+        Ok(output
+            .columns
+            .iter()
+            .find(|column| column.name == name)
+            .map(|column| column.expr.clone())
+            .unwrap_or_else(|| Expr::Literal {
+                value: values.get(name).cloned().unwrap_or(Value::Null),
+            }))
     })?;
     prepare(&bound, recipe, sources, matches, &output.anchor, row_index)
 }

@@ -126,6 +126,20 @@ fn numeric_literals_must_be_tagged_strings() {
 }
 
 #[test]
+fn internal_bundle_table_names_are_rejected_before_execution() {
+    for name in [
+        "_evidence",
+        "_candidate_evidence",
+        "_detail_evidence",
+        "_reconciliation",
+    ] {
+        let mut doc = document();
+        doc["outputs"][0]["id"] = json!(name);
+        assert_eq!(load_code(&doc), "DUPLICATE_ID", "{name}");
+    }
+}
+
+#[test]
 fn duplicate_ids_fail_including_duplicate_object_keys() {
     let mut doc = document();
     doc["sources"][1]["id"] = json!("lines");

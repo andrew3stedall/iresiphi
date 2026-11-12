@@ -188,6 +188,9 @@ where
             if a == Value::Null || b == Value::Null {
                 return Ok(Value::Null);
             }
+            if !matches!(expr, Multiply { .. }) {
+                check_currencies(left, right, r, resolver, depth)?;
+            }
             match (&a, &b) {
                 (Value::Int64 { .. }, Value::Int64 { .. }) => {
                     let a = integer(&a)?;
@@ -222,6 +225,9 @@ where
         Equal { left, right } | Less { left, right } | LessEqual { left, right } => {
             let a = next(left)?;
             let b = next(right)?;
+            if matches!((&a, &b), (Value::Decimal { .. }, Value::Decimal { .. })) {
+                check_currencies(left, right, r, resolver, depth)?;
+            }
             let order = compare(&a, &b)?;
             Ok(bv(order.map(|x| match expr {
                 Equal { .. } => x == Ordering::Equal,
@@ -318,4 +324,106 @@ where
             "aggregate requires executor population context",
         )),
     }
+}
+
+/// Currency follows the selected value of a monetary operand, rather than every
+/// branch or Boolean predicate that appears anywhere in its expression tree.
+fn currencies<F>(expr: &Expr, r: &Recipe, resolver: &mut F, depth: usize) -> Result<Vec<Value>>
+where
+    F: FnMut(&str, &str, &[String]) -> Result<Value>,
+{
+    if depth > 256 {
+        return Err(fail("RESOURCE_LIMIT", "expression depth exceeds 256"));
+    }
+    use Expr::*;
+    let expressions: Vec<&Expr> = match expr {
+        Field {
+            source,
+            field,
+            path,
+        } => {
+            if crate::validation::currency_amount(r, source, field)
+                && resolver(source, field, path)? != Value::Null
+            {
+                let currency = resolver(source, "currency", path)?;
+                return Ok(if currency == Value::Null {
+                    vec![]
+                } else {
+                    vec![currency]
+                });
+            }
+            vec![]
+        }
+        Feature { id } => r
+            .features
+            .iter()
+            .find(|f| f.id == *id)
+            .map(|f| vec![&f.expr])
+            .unwrap_or_default(),
+        Case {
+            condition,
+            then,
+            otherwise,
+        } => {
+            if truth(&evaluate(condition, r, resolver, depth + 1)?)? == Some(true) {
+                vec![then]
+            } else {
+                vec![otherwise]
+            }
+        }
+        Coalesce { values } => {
+            let mut selected = vec![];
+            for value in values {
+                if evaluate(value, r, resolver, depth + 1)? != Value::Null {
+                    selected.push(value);
+                    break;
+                }
+            }
+            selected
+        }
+        Add { left, right } | Subtract { left, right } | Multiply { left, right } => {
+            vec![left, right]
+        }
+        Cast {
+            expr,
+            data_type: Type::Decimal { .. },
+        }
+        | Quantize { expr, .. } => vec![expr],
+        _ => vec![],
+    };
+    let mut result = vec![];
+    for child in expressions {
+        for currency in currencies(child, r, resolver, depth + 1)? {
+            if !result.contains(&currency) {
+                result.push(currency);
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn check_currencies<F>(
+    left: &Expr,
+    right: &Expr,
+    r: &Recipe,
+    resolver: &mut F,
+    depth: usize,
+) -> Result<()>
+where
+    F: FnMut(&str, &str, &[String]) -> Result<Value>,
+{
+    let mut found = currencies(left, r, resolver, depth + 1)?;
+    for currency in currencies(right, r, resolver, depth + 1)? {
+        if !found.contains(&currency) {
+            found.push(currency);
+        }
+    }
+    if found.len() > 1 {
+        return Err(fail(
+            "MIXED_CURRENCY",
+            "amounts in different currencies cannot be added, subtracted or compared",
+        )
+        .with_check("expression.currency"));
+    }
+    Ok(())
 }

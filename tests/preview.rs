@@ -112,6 +112,23 @@ fn json_type_errors_report_the_exact_count_and_pointer_samples() {
 }
 
 #[test]
+fn different_value_error_kinds_are_counted_as_a_source_type_error() {
+    let f = fixture();
+    std::fs::write(
+        f.root().join("rates.csv"),
+        "id,code,rate,start,end\nr1,A,bad,2026-01-01,\\N\nr2,B,\\N,2026-01-01,\\N\n",
+    )
+    .unwrap();
+    let report = run(&f);
+    assert_eq!(report.status, "failed");
+    let diagnostic = &report.diagnostics[0];
+    assert_eq!(diagnostic.code, "INVALID_VALUE");
+    assert_eq!(diagnostic.affected_count, Some(2));
+    assert!(diagnostic.message.contains("INVALID_DECIMAL"));
+    assert!(diagnostic.message.contains("NULL_REQUIRED"));
+}
+
+#[test]
 fn type_error_samples_are_capped_while_the_count_stays_exact() {
     let f = fixture();
     let mut csv = String::from("id,code,rate,start,end\n");
