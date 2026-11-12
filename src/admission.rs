@@ -180,6 +180,7 @@ pub(crate) fn deliver(
     destination: &std::path::Path,
     control: &RunControl<'_>,
 ) {
+    let delivering = std::time::Instant::now();
     let mut schema = output_schema(recipe);
     for (name, records) in [
         ("_evidence", &report.evidence),
@@ -222,6 +223,8 @@ pub(crate) fn deliver(
         control.cancel(),
     ) {
         Ok(published) => {
+            // Like bytes_written, publication time is known only after commit.
+            report.manifest["phases_us"]["delivery"] = json!(crate::adapters::micros(delivering));
             report.manifest["bytes_written"] = json!(published.bytes);
             report.manifest["bundle"] = json!(destination);
             report.manifest["cleanup"] = json!(published.cleanup);
