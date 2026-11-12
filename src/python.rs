@@ -663,7 +663,9 @@ impl PyRun {
                     &record(
                         "INVALID_ARGUMENT",
                         "python",
-                        format!("evidence kind {other:?} is not primary, candidate, detail or allocation"),
+                        format!(
+                            "evidence kind {other:?} is not primary, candidate, detail or allocation"
+                        ),
                     ),
                 ));
             }

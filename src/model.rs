@@ -541,7 +541,9 @@ pub fn default_remediation(code: &str) -> &'static str {
         "ALLOCATION_NULL_WEIGHT" => {
             "Supply the missing weights, or declare null_weight \"zero\" to treat them as weight 0."
         }
-        "ALLOCATION_NEGATIVE_WEIGHT" => "Correct the weights; allocation weights are never negative.",
+        "ALLOCATION_NEGATIVE_WEIGHT" => {
+            "Correct the weights; allocation weights are never negative."
+        }
         "ALLOCATION_ZERO_WEIGHT" | "ALLOCATION_NO_RECIPIENTS" => {
             "Supply recipients with positive weight, or declare unallocated \"report\" to report the whole quantity as residual."
         }

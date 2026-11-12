@@ -14,7 +14,10 @@ use std::{collections::BTreeMap, path::Path, sync::atomic::AtomicBool};
 
 const RECIPE: &str = include_str!("customer_month.iresiphi");
 const INPUTS: [(&str, &str); 3] = [
-    ("customers", "CustNo,SalesArea,Share\nA,North,1\nB,North,3\nC,South,1\n"),
+    (
+        "customers",
+        "CustNo,SalesArea,Share\nA,North,1\nB,North,3\nC,South,1\n",
+    ),
     (
         "transactions",
         "receipt_id,buyer_ref,booked_at,gross\nt1,A,2026-01-05,60\nt2,A,2026-01-20,40\nt3,B,2026-01-11,200\nt4,C,2026-01-17,50\nt5,B,2026-02-08,120\n",
@@ -91,7 +94,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "excluded from totals: {}",
-        totals["excluded"].as_object().map(|e| e.keys().cloned().collect::<Vec<_>>().join(", ")).unwrap_or_default()
+        totals["excluded"]
+            .as_object()
+            .map(|e| e.keys().cloned().collect::<Vec<_>>().join(", "))
+            .unwrap_or_default()
     );
     for partition in &run.allocation_evidence {
         println!(

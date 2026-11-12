@@ -22,13 +22,23 @@ fn six_members_carry_sales_and_counts_with_declared_complete_activity() {
     assert_eq!(report.status, "succeeded");
     let table = &report.tables["customer_sales"];
     assert_eq!(table.len(), 6, "customer by month");
-    for (customer, january, february) in [("A", "100.00", "0.00"), ("B", "200.00", "120.00"), ("C", "50.00", "0.00")] {
+    for (customer, january, february) in [
+        ("A", "100.00", "0.00"),
+        ("B", "200.00", "120.00"),
+        ("C", "50.00", "0.00"),
+    ] {
         assert_eq!(cell(table, customer, "2026-01", "sales"), Some(january));
         assert_eq!(cell(table, customer, "2026-02", "sales"), Some(february));
     }
     for (customer, january, february) in [("A", "2", "0"), ("B", "1", "1"), ("C", "1", "0")] {
-        assert_eq!(cell(table, customer, "2026-01", "transactions"), Some(january));
-        assert_eq!(cell(table, customer, "2026-02", "transactions"), Some(february));
+        assert_eq!(
+            cell(table, customer, "2026-01", "transactions"),
+            Some(january)
+        );
+        assert_eq!(
+            cell(table, customer, "2026-02", "transactions"),
+            Some(february)
+        );
     }
     for row in table {
         assert_eq!(value_text(&row["_status"]), Some("matched"));
@@ -38,7 +48,11 @@ fn six_members_carry_sales_and_counts_with_declared_complete_activity() {
     assert_eq!(totals["columns"]["transactions"]["population"], "5");
     assert_eq!(totals["rows"]["population"], 6);
     assert_eq!(report.evidence.len(), 6, "one evidence record per member");
-    assert_eq!(report.detail_evidence.len(), 5, "every transaction joined a member");
+    assert_eq!(
+        report.detail_evidence.len(),
+        5,
+        "every transaction joined a member"
+    );
     let population = &report.manifest["populations"]["customer_sales"];
     assert_eq!(population["population"], "population:customer_month");
     assert_eq!(population["recipients"], 3);
@@ -54,7 +68,11 @@ fn members_without_activity_are_null_with_zero_count_unless_declared_complete() 
     f.output().as_object_mut().unwrap().remove("complete");
     let report = f.succeeded();
     let table = &report.tables["customer_sales"];
-    assert_eq!(cell(table, "A", "2026-02", "sales"), None, "unobserved is not zero");
+    assert_eq!(
+        cell(table, "A", "2026-02", "sales"),
+        None,
+        "unobserved is not zero"
+    );
     assert_eq!(cell(table, "A", "2026-02", "transactions"), Some("0"));
     assert_eq!(cell(table, "C", "2026-02", "sales"), None);
     assert_eq!(cell(table, "B", "2026-02", "sales"), Some("120.00"));
@@ -104,9 +122,15 @@ fn manifest_and_explain_state_that_completeness_is_declared_not_observed() {
         .expect("population node");
     assert_eq!(population["kind"], "population");
     assert_eq!(population["recipients"], "source:customers");
-    assert_eq!(population["period"]["values"], json!(["2026-01", "2026-02"]));
+    assert_eq!(
+        population["period"]["values"],
+        json!(["2026-01", "2026-02"])
+    );
     assert!(
-        population["inference"].as_str().unwrap().contains("never inferred"),
+        population["inference"]
+            .as_str()
+            .unwrap()
+            .contains("never inferred"),
         "{population}"
     );
     // Finer records reach members by declared keys and the declared derivation.
@@ -117,11 +141,7 @@ fn manifest_and_explain_state_that_completeness_is_declared_not_observed() {
     assert_eq!(sales["period"]["derive"], "calendar_month");
     assert_eq!(sales["period"]["date"], "booked_at");
     // No synthetic scan of the population.
-    assert!(
-        !nodes
-            .iter()
-            .any(|n| n["id"] == "source:customer_month")
-    );
+    assert!(!nodes.iter().any(|n| n["id"] == "source:customer_month"));
 }
 
 #[test]
@@ -129,9 +149,7 @@ fn unmatched_finer_records_are_counted_with_samples_and_never_widen_the_populati
     let f = sales_fixture();
     f.write(
         "transactions",
-        &format!(
-            "{TRANSACTIONS}t6,D,2026-01-09,10\nt7,A,2026-03-02,30\nt8,B,\\N,5\n"
-        ),
+        &format!("{TRANSACTIONS}t6,D,2026-01-09,10\nt7,A,2026-03-02,30\nt8,B,\\N,5\n"),
     );
     let report = f.succeeded();
     let table = &report.tables["customer_sales"];
@@ -147,7 +165,10 @@ fn unmatched_finer_records_are_counted_with_samples_and_never_widen_the_populati
     assert_eq!(diagnostic.count_status, "exact");
     assert_eq!(diagnostic.samples.len(), 3);
     assert_eq!(diagnostic.subject.as_deref(), Some("source:transactions"));
-    assert_eq!(diagnostic.affected_outputs, vec!["customer_sales".to_string()]);
+    assert_eq!(
+        diagnostic.affected_outputs,
+        vec!["customer_sales".to_string()]
+    );
     let activity = &report.manifest["populations"]["customer_sales"]["activity"]["sales"];
     assert_eq!(activity["unmatched_records"], 3);
     assert_eq!(activity["matched_records"], 5);
@@ -281,12 +302,15 @@ fn populations_are_declared_explicitly_and_checked_statically() {
         "DUPLICATE_ID"
     );
     assert_eq!(
-        variant(&|d| d["populations"][0]["period"] = json!({"field":"month","calendar":"month","from":{"source":"transactions","field":"booked_at"}})),
+        variant(
+            &|d| d["populations"][0]["period"] = json!({"field":"month","calendar":"month","from":{"source":"transactions","field":"booked_at"}})
+        ),
         "TYPE_MISMATCH",
         "a sourced period set reads calendar-month text"
     );
     assert_eq!(
-        variant(&|d| d["populations"][0]["filter"] = equal(field("transactions", "buyer_ref"), text("A"))),
+        variant(&|d| d["populations"][0]["filter"] =
+            equal(field("transactions", "buyer_ref"), text("A"))),
         "INVALID_PATH",
         "the recipient filter reads recipient fields only"
     );

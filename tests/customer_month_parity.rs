@@ -145,10 +145,22 @@ fn rust_matches_the_shared_customer_month_golden() {
     let totals = &expected["totals"]["by_output"]["customer_targets"]["AUD"]["columns"];
     assert_eq!(totals["sales"]["population"], "470.00");
     assert_eq!(totals["allocated_target"]["population"], "2400.00");
-    assert_eq!(totals["allocated_target"]["allocation"]["source_total"], "2400.00");
+    assert_eq!(
+        totals["allocated_target"]["allocation"]["source_total"],
+        "2400.00"
+    );
     assert!(totals.get("target_context").is_none());
-    assert_eq!(expected["tables"]["customer_targets"].as_array().unwrap().len(), 6);
-    assert_eq!(actual["errors"]["null_weight"]["code"], "ALLOCATION_NULL_WEIGHT");
+    assert_eq!(
+        expected["tables"]["customer_targets"]
+            .as_array()
+            .unwrap()
+            .len(),
+        6
+    );
+    assert_eq!(
+        actual["errors"]["null_weight"]["code"],
+        "ALLOCATION_NULL_WEIGHT"
+    );
     let text = serde_json::to_string_pretty(&actual).unwrap() + "\n";
     if std::env::var_os("IRESIPHI_BLESS").is_some() {
         std::fs::write(GOLDEN, &text).unwrap();

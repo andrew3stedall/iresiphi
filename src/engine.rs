@@ -307,7 +307,11 @@ impl Progress {
             })
             .collect();
         // Checks only some recipes need (populations, allocations), in run order.
-        for (id, coverage) in self.checks.iter().filter(|(c, _)| !RUN_CHECKS.contains(&c.as_str())) {
+        for (id, coverage) in self
+            .checks
+            .iter()
+            .filter(|(c, _)| !RUN_CHECKS.contains(&c.as_str()))
+        {
             results.push(serde_json::json!({"id":id,"status":"passed","coverage":coverage}));
         }
         if let Some(id) = failed.filter(|id| !RUN_CHECKS.contains(&id.as_str())) {
@@ -918,7 +922,8 @@ fn execute(
             allocation_evidence.extend(outcome.partitions.iter().cloned());
             allocation_summaries
                 .entry(output.id.clone())
-                .or_insert_with(|| serde_json::json!({}))[a.name.as_str()] = outcome.summary.clone();
+                .or_insert_with(|| serde_json::json!({}))[a.name.as_str()] =
+                outcome.summary.clone();
             allocations.push((a, outcome, weight_reasons));
         }
         let member_identity = crate::validation::population_output(recipe, output)
@@ -1279,9 +1284,10 @@ fn execute(
             policy.limits.candidate_pairs
         )));
     }
-    let mut bytes = serde_json::to_vec(&(&tables, &evidence, &candidate_evidence, &detail_evidence))
-        .map_err(engine_error)?
-        .len();
+    let mut bytes =
+        serde_json::to_vec(&(&tables, &evidence, &candidate_evidence, &detail_evidence))
+            .map_err(engine_error)?
+            .len();
     // Allocation evidence counts only when present, so other runs keep their exact size.
     if !allocation_evidence.is_empty() {
         bytes += serde_json::to_vec(&allocation_evidence)
@@ -2243,18 +2249,14 @@ fn prepare(
                 }
                 // Declared-complete activity: a member with no records has
                 // observed nothing, so its sum is zero rather than unknown.
-                let reduced = if values.is_empty()
-                    && function == "sum"
-                    && complete.contains(&relationship)
-                {
-                    zero_sum(recipe, rel, field.as_deref())
-                } else {
-                    reduce(&values, &function)?
-                };
-                *value = serde_json::to_value(Expr::Literal {
-                    value: reduced,
-                })
-                .map_err(engine_error)?;
+                let reduced =
+                    if values.is_empty() && function == "sum" && complete.contains(&relationship) {
+                        zero_sum(recipe, rel, field.as_deref())
+                    } else {
+                        reduce(&values, &function)?
+                    };
+                *value =
+                    serde_json::to_value(Expr::Literal { value: reduced }).map_err(engine_error)?;
                 return Ok(());
             }
         }
@@ -2279,7 +2281,9 @@ fn prepare(
         }
         Ok(())
     }
-    visit(&mut value, recipe, sources, matches, anchor, row_index, complete)?;
+    visit(
+        &mut value, recipe, sources, matches, anchor, row_index, complete,
+    )?;
     serde_json::from_value(value).map_err(engine_error)
 }
 
@@ -2329,7 +2333,11 @@ fn check_partitions(recipe: &Recipe, sources: &BTreeMap<String, Vec<Row>>) -> Re
             }
             for (code, references, what) in [
                 ("NULL_IDENTITY", nulls, "have a null partition key"),
-                ("DUPLICATE_IDENTITY", repeated, "repeat the partition keys of an earlier record"),
+                (
+                    "DUPLICATE_IDENTITY",
+                    repeated,
+                    "repeat the partition keys of an earlier record",
+                ),
             ] {
                 if !references.is_empty() {
                     return Err(Error::new(
@@ -2374,16 +2382,20 @@ fn materialize_populations(
             let keep = match &p.filter {
                 None => true,
                 Some(filter) => matches!(
-                    crate::eval::eval(filter, recipe, &mut |source: &str, field: &str, path: &[String]| {
-                        if source != p.recipients || !path.is_empty() {
-                            return Err(Error::new(
-                                "INVALID_PATH",
-                                "execution",
-                                "a population filter reads recipient fields only",
-                            ));
+                    crate::eval::eval(
+                        filter,
+                        recipe,
+                        &mut |source: &str, field: &str, path: &[String]| {
+                            if source != p.recipients || !path.is_empty() {
+                                return Err(Error::new(
+                                    "INVALID_PATH",
+                                    "execution",
+                                    "a population filter reads recipient fields only",
+                                ));
+                            }
+                            Ok(row.fields.get(field).cloned().unwrap_or(Value::Null))
                         }
-                        Ok(row.fields.get(field).cloned().unwrap_or(Value::Null))
-                    })?,
+                    )?,
                     Value::Boolean { value: true }
                 ),
             };
@@ -2398,7 +2410,9 @@ fn materialize_populations(
                 let mut invalid = vec![];
                 for row in &sources[&from.source] {
                     match row.fields.get(&from.field) {
-                        Some(Value::String { value }) if crate::validation::calendar_month(value) => {
+                        Some(Value::String { value })
+                            if crate::validation::calendar_month(value) =>
+                        {
                             distinct.insert(value.clone());
                         }
                         _ => invalid.push(&row.reference),
@@ -2476,8 +2490,14 @@ fn materialize_populations(
                         ),
                     },
                     raw: BTreeMap::from([
-                        ("recipient".to_string(), serde_json::json!(recipient.reference)),
-                        ("recipient_original".to_string(), serde_json::json!(recipient.raw)),
+                        (
+                            "recipient".to_string(),
+                            serde_json::json!(recipient.reference),
+                        ),
+                        (
+                            "recipient_original".to_string(),
+                            serde_json::json!(recipient.raw),
+                        ),
                         (p.period.field.clone(), serde_json::json!(period)),
                     ]),
                 });
@@ -2608,9 +2628,7 @@ fn allocation_members<'a>(
         // Recipient filter: before normalization; false and unknown exclude.
         let recipient = match &a.recipient_filter {
             None => true,
-            Some(filter) => {
-                evaluate(filter, &mut vec![])? == (Value::Boolean { value: true })
-            }
+            Some(filter) => evaluate(filter, &mut vec![])? == (Value::Boolean { value: true }),
         };
         let mut reasons = vec![];
         let weight = if recipient {

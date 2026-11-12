@@ -2475,13 +2475,20 @@ pub(crate) fn calendar_month(text: &str) -> bool {
         && matches!(text[5..].parse::<u8>(), Ok(1..=12))
 }
 /// A recipient filter reads recipient fields only: no paths, no aggregates.
-fn recipient_predicate(e: &Expr, r: &Recipe, recipients: &str, seen: &mut BTreeSet<String>) -> Result<()> {
+fn recipient_predicate(
+    e: &Expr,
+    r: &Recipe,
+    recipients: &str,
+    seen: &mut BTreeSet<String>,
+) -> Result<()> {
     match e {
         Expr::Field { source, path, .. } => {
             if source != recipients || !path.is_empty() {
                 return Err(error(
                     "INVALID_PATH",
-                    format!("a population filter reads only fields of its recipient source {recipients}"),
+                    format!(
+                        "a population filter reads only fields of its recipient source {recipients}"
+                    ),
                 ));
             }
         }
@@ -2542,7 +2549,10 @@ fn check_populations(r: &Recipe) -> Result<()> {
                     if !calendar_month(value) {
                         return Err(error(
                             "INVALID_PERIOD",
-                            format!("period {value:?} of population {} is not a calendar month YYYY-MM", p.id),
+                            format!(
+                                "period {value:?} of population {} is not a calendar month YYYY-MM",
+                                p.id
+                            ),
                         ));
                     }
                     if !seen.insert(value) {
@@ -2610,7 +2620,10 @@ fn check_period_match(r: &Recipe, rel: &Relationship) -> Result<()> {
     if rel.validity.is_some() {
         return Err(error(
             "INVALID_RELATIONSHIP",
-            format!("relationship {} declares both validity and a period key", rel.id),
+            format!(
+                "relationship {} declares both validity and a period key",
+                rel.id
+            ),
         ));
     }
     if field(r, &rel.to, &pm.date)?.data_type != Type::Date {
@@ -2725,7 +2738,9 @@ fn check_population_output(r: &Recipe, out: &Output) -> Result<()> {
                 a.name, a.partition, coarse.grain, coarse.id, via.id
             )));
         }
-        if let Type::Decimal { scale, .. } = field(r, &a.quantity.source, &a.quantity.field)?.data_type {
+        if let Type::Decimal { scale, .. } =
+            field(r, &a.quantity.source, &a.quantity.field)?.data_type
+        {
             if a.scale < scale {
                 return Err(invalid_allocation(format!(
                     "allocation {} result scale {} is below the quantity scale {scale}; assigned amounts could not conserve the quantity",
@@ -2769,10 +2784,11 @@ fn check_population_output(r: &Recipe, out: &Output) -> Result<()> {
     } else {
         for c in &out.columns {
             if let Some(source) = measure_currency_source(&c.expr, r, &mut BTreeSet::new()) {
-                if r.relationships
-                    .iter()
-                    .any(|rel| rel.from == out.anchor && rel.to == source && rel.cardinality == Cardinality::OneToMany)
-                {
+                if r.relationships.iter().any(|rel| {
+                    rel.from == out.anchor
+                        && rel.to == source
+                        && rel.cardinality == Cardinality::OneToMany
+                }) {
                     return Err(error(
                         "GRAIN_VIOLATION",
                         format!(
@@ -2788,7 +2804,11 @@ fn check_population_output(r: &Recipe, out: &Output) -> Result<()> {
 }
 /// The empty-member rule of one activity relationship of a population output,
 /// and the statement explain and the run manifest give for it.
-pub(crate) fn completeness_rule(r: &Recipe, out: &Output, rel: &Relationship) -> (&'static str, String) {
+pub(crate) fn completeness_rule(
+    r: &Recipe,
+    out: &Output,
+    rel: &Relationship,
+) -> (&'static str, String) {
     if out.complete.contains(&rel.id) {
         (
             "declared_complete",
@@ -2833,7 +2853,9 @@ fn population_node(r: &Recipe, p: &Population, unsupported: &mut Vec<Json>) -> J
     let member = r.sources.iter().find(|s| s.id == p.id);
     let mut depends_on = vec![format!("source:{}", p.recipients)];
     let period = match (&p.period.values, &p.period.from) {
-        (Some(values), _) => json!({"field": p.period.field, "calendar": "month", "values": values, "source": "listed"}),
+        (Some(values), _) => {
+            json!({"field": p.period.field, "calendar": "month", "values": values, "source": "listed"})
+        }
         (_, Some(from)) => {
             depends_on.push(format!("source:{}", from.source));
             json!({"field": p.period.field, "calendar": "month", "from": format!("source:{}/field:{}", from.source, from.field),
@@ -2877,15 +2899,20 @@ fn allocation_node(r: &Recipe, out: &Output, a: &Allocation, unsupported: &mut V
         scale: a.scale
     });
     node["weight_type"] = weight_type;
-    node["quantity"] = json!(format!("source:{}/field:{}", a.quantity.source, a.quantity.field));
+    node["quantity"] = json!(format!(
+        "source:{}/field:{}",
+        a.quantity.source, a.quantity.field
+    ));
     node["partition"] = json!(a.partition);
     node["partition_source"] = json!(format!("source:{}", a.quantity.source));
     node["via"] = json!(format!("relationship:{}", a.via));
     node["recipients"] = json!(format!("population:{}", out.anchor));
     node["residual"] = json!(a.residual);
     node["rounding"] = json!(match a.residual {
-        ResidualPolicy::LargestRemainder => "quantize toward zero, then give the remaining last-place units one each to recipients in descending fractional remainder, ties by ascending recipient identity; assigned amounts sum exactly to the quantity",
-        ResidualPolicy::Report => "quantize half-even; the residual (quantity minus assigned sum, possibly negative) is reported per partition",
+        ResidualPolicy::LargestRemainder =>
+            "quantize toward zero, then give the remaining last-place units one each to recipients in descending fractional remainder, ties by ascending recipient identity; assigned amounts sum exactly to the quantity",
+        ResidualPolicy::Report =>
+            "quantize half-even; the residual (quantity minus assigned sum, possibly negative) is reported per partition",
     });
     node["null_weight"] = json!(a.null_weight.unwrap_or(NullWeight::Error));
     node["unallocated"] = json!(a.unallocated.unwrap_or(Unallocated::Error));

@@ -9,7 +9,11 @@ use iresiphi::{CancellationToken, ExecutionContext, explain};
 use serde_json::{Value as Json, json};
 use std::sync::atomic::AtomicBool;
 
-fn allocated<'a>(table: &'a iresiphi::engine::Table, customer: &str, month: &str) -> Option<&'a str> {
+fn allocated<'a>(
+    table: &'a iresiphi::engine::Table,
+    customer: &str,
+    month: &str,
+) -> Option<&'a str> {
     cell(table, customer, month, "allocated_target")
 }
 
@@ -17,9 +21,7 @@ fn partition<'a>(report: &'a iresiphi::RunReport, territory: &str, period: &str)
     report
         .allocation_evidence
         .iter()
-        .find(|p| {
-            p["partition"]["Territory"] == territory && p["partition"]["Period"] == period
-        })
+        .find(|p| p["partition"]["Territory"] == territory && p["partition"]["Period"] == period)
         .unwrap_or_else(|| panic!("no partition {territory}/{period}"))
 }
 
@@ -28,9 +30,7 @@ fn recipient<'a>(report: &'a iresiphi::RunReport, customer: &str, month: &str) -
     let record = report
         .evidence
         .iter()
-        .find(|r| {
-            r["member"]["CustNo"] == customer && r["member"]["month"] == month
-        })
+        .find(|r| r["member"]["CustNo"] == customer && r["member"]["month"] == month)
         .unwrap_or_else(|| panic!("no evidence for {customer}/{month}"));
     &record["allocations"]["allocated_target"]
 }
@@ -61,8 +61,14 @@ fn the_customer_month_fixture_allocates_regional_targets_by_share() {
         ("B", "900.00", "800.00"),
         ("C", "300.00", "400.00"),
     ] {
-        assert_eq!(cell(table, customer, "2026-01", "target_context"), Some(january));
-        assert_eq!(cell(table, customer, "2026-02", "target_context"), Some(february));
+        assert_eq!(
+            cell(table, customer, "2026-01", "target_context"),
+            Some(january)
+        );
+        assert_eq!(
+            cell(table, customer, "2026-02", "target_context"),
+            Some(february)
+        );
     }
 
     let totals = &report.manifest["totals"]["by_output"]["customer_targets"]["AUD"];
@@ -170,12 +176,19 @@ fn a_recipient_filter_runs_before_normalization_and_changes_shares() {
     );
     let report = f.succeeded();
     let table = &report.tables["customer_targets"];
-    assert_eq!(table.len(), 6, "the filter changes recipients, not the population");
+    assert_eq!(
+        table.len(),
+        6,
+        "the filter changes recipients, not the population"
+    );
     assert_eq!(allocated(table, "A", "2026-01"), Some("900.00"));
     assert_eq!(allocated(table, "A", "2026-02"), Some("800.00"));
     assert_eq!(allocated(table, "B", "2026-01"), None);
     assert_eq!(allocated(table, "C", "2026-01"), Some("300.00"));
-    assert_eq!(recipient(&report, "B", "2026-01")["status"], "not_recipient");
+    assert_eq!(
+        recipient(&report, "B", "2026-01")["status"],
+        "not_recipient"
+    );
     assert_eq!(partition(&report, "North", "2026-01")["recipient_count"], 1);
     let column = &report.manifest["totals"]["by_output"]["customer_targets"]["AUD"]["columns"]["allocated_target"];
     assert_eq!(column["allocation"]["assigned_total"], "2400.00");
@@ -200,7 +213,11 @@ fn explain_names_each_filter_stage_and_the_denominator() {
     f.allocation()["unallocated"] = json!("report");
     f.output()["filter"] = equal(field("customer_targets", "CustNo"), text("A"));
     let explanation = explain(&f.recipe());
-    assert_eq!(explanation["validation"]["valid"], true, "{}", explanation["validation"]);
+    assert_eq!(
+        explanation["validation"]["valid"], true,
+        "{}",
+        explanation["validation"]
+    );
     let nodes = explanation["nodes"].as_array().unwrap();
     let node = |id: &str| {
         nodes
@@ -230,14 +247,16 @@ fn explain_names_each_filter_stage_and_the_denominator() {
     );
     let filter = node("output:customer_targets/filter");
     assert_eq!(filter["applies"], "after_allocation");
-    assert!(filter["retains"].as_str().unwrap().contains("never changes shares"));
-    let output = node("output:customer_targets");
     assert!(
-        output["columns"]
-            .as_array()
+        filter["retains"]
+            .as_str()
             .unwrap()
-            .contains(&json!("output:customer_targets/allocation:allocated_target"))
+            .contains("never changes shares")
     );
+    let output = node("output:customer_targets");
+    assert!(output["columns"].as_array().unwrap().contains(&json!(
+        "output:customer_targets/allocation:allocated_target"
+    )));
 }
 
 /// Three North customers of equal weight sharing one 2.00 target.
@@ -247,7 +266,10 @@ fn thirds(residual: &str) -> Fixture {
         "customers",
         "CustNo,SalesArea,Share\nA,North,1\nB,North,1\nD,North,1\n",
     );
-    f.write("targets", "Territory,Period,Goal\nNorth,2026-01,2\nNorth,2026-02,1\n");
+    f.write(
+        "targets",
+        "Territory,Period,Goal\nNorth,2026-01,2\nNorth,2026-02,1\n",
+    );
     f.allocation()["residual"] = json!(residual);
     f
 }
@@ -281,7 +303,10 @@ fn largest_remainder_prefers_the_largest_fractional_remainder() {
         "customers",
         "CustNo,SalesArea,Share\nA,North,1\nB,North,2\nD,North,4\n",
     );
-    f.write("targets", "Territory,Period,Goal\nNorth,2026-01,1\nNorth,2026-02,1\n");
+    f.write(
+        "targets",
+        "Territory,Period,Goal\nNorth,2026-01,1\nNorth,2026-02,1\n",
+    );
     let table = &f.succeeded().tables["customer_targets"];
     // 1.00 × 1/7, 2/7, 4/7 = 0.1428…, 0.2857…, 0.5714…: floors 0.14, 0.28, 0.57
     // leave one unit, which goes to B (remainder 0.57…) ahead of A (0.28…).
@@ -350,7 +375,10 @@ fn decimal_weights_and_negative_quantities_allocate_exactly() {
     assert_eq!(allocated(table, "A", "2026-02"), Some("0.00"));
     assert_eq!(allocated(table, "C", "2026-02"), Some("0.01"));
     assert_eq!(recipient(&report, "B", "2026-01")["exact_share"], "-7.5");
-    assert_eq!(partition(&report, "North", "2026-01")["weight_sum"], "2.000");
+    assert_eq!(
+        partition(&report, "North", "2026-01")["weight_sum"],
+        "2.000"
+    );
 }
 
 // --- Edge cases (contract clause 6) ---------------------------------------------
@@ -359,12 +387,18 @@ fn decimal_weights_and_negative_quantities_allocate_exactly() {
 fn a_null_weight_is_an_error_unless_declared_zero() {
     let mut f = fixture();
     f.doc["sources"][0]["projection"]["fields"]["Share"]["nullable"] = json!(true);
-    f.write("customers", "CustNo,SalesArea,Share\nA,North,1\nB,North,\\N\nC,South,1\n");
+    f.write(
+        "customers",
+        "CustNo,SalesArea,Share\nA,North,1\nB,North,\\N\nC,South,1\n",
+    );
     let report = f.run();
     let error = failure(&report);
     assert_eq!(error.code, "ALLOCATION_NULL_WEIGHT");
     assert_eq!(error.affected_count, Some(2));
-    assert_eq!(error.subject.as_deref(), Some("output:customer_targets/allocation:allocated_target"));
+    assert_eq!(
+        error.subject.as_deref(),
+        Some("output:customer_targets/allocation:allocated_target")
+    );
 
     f.allocation()["null_weight"] = json!("zero");
     let report = f.succeeded();
@@ -372,14 +406,20 @@ fn a_null_weight_is_an_error_unless_declared_zero() {
     assert_eq!(allocated(table, "A", "2026-01"), Some("900.00"));
     assert_eq!(allocated(table, "B", "2026-01"), Some("0.00"));
     assert_eq!(recipient(&report, "B", "2026-01")["weight"], Json::Null);
-    assert_eq!(recipient(&report, "B", "2026-01")["weight_rule"], "declared_zero");
+    assert_eq!(
+        recipient(&report, "B", "2026-01")["weight_rule"],
+        "declared_zero"
+    );
     assert_eq!(partition(&report, "North", "2026-01")["recipient_count"], 2);
 }
 
 #[test]
 fn a_negative_weight_is_always_an_error() {
     let mut f = fixture();
-    f.write("customers", "CustNo,SalesArea,Share\nA,North,1\nB,North,-3\nC,South,1\n");
+    f.write(
+        "customers",
+        "CustNo,SalesArea,Share\nA,North,1\nB,North,-3\nC,South,1\n",
+    );
     assert_eq!(failure(&f.run()).code, "ALLOCATION_NEGATIVE_WEIGHT");
     f.allocation()["null_weight"] = json!("zero");
     f.allocation()["unallocated"] = json!("report");
@@ -389,7 +429,10 @@ fn a_negative_weight_is_always_an_error() {
 #[test]
 fn a_zero_weight_partition_is_an_error_unless_declared_unallocated() {
     let mut f = fixture();
-    f.write("customers", "CustNo,SalesArea,Share\nA,North,0\nB,North,0\nC,South,1\n");
+    f.write(
+        "customers",
+        "CustNo,SalesArea,Share\nA,North,0\nB,North,0\nC,South,1\n",
+    );
     let report = f.run();
     let error = failure(&report);
     assert_eq!(error.code, "ALLOCATION_ZERO_WEIGHT");
@@ -452,7 +495,10 @@ fn a_missing_target_leaves_the_recipient_null_and_unresolved_never_zero() {
     assert_eq!(allocated(table, "C", "2026-02"), None);
     assert_eq!(cell(table, "C", "2026-02", "_status"), Some("unmatched"));
     assert_eq!(cell(table, "A", "2026-02", "_status"), Some("matched"));
-    assert_eq!(recipient(&report, "C", "2026-02")["status"], "missing_quantity");
+    assert_eq!(
+        recipient(&report, "C", "2026-02")["status"],
+        "missing_quantity"
+    );
     let diagnostic = report
         .diagnostics
         .iter()
@@ -472,12 +518,22 @@ fn a_missing_target_leaves_the_recipient_null_and_unresolved_never_zero() {
     assert_eq!(allocated(table, "C", "2026-02"), None);
     assert_eq!(cell(table, "C", "2026-02", "_status"), Some("unmatched"));
     assert!(
-        value_text(&table.iter().find(|r| value_text(&r["CustNo"]) == Some("C") && value_text(&r["month"]) == Some("2026-02")).unwrap()["_reason"])
-            .unwrap()
-            .contains("allocated_target")
+        value_text(
+            &table
+                .iter()
+                .find(|r| value_text(&r["CustNo"]) == Some("C")
+                    && value_text(&r["month"]) == Some("2026-02"))
+                .unwrap()["_reason"]
+        )
+        .unwrap()
+        .contains("allocated_target")
     );
     let column = &report.manifest["totals"]["by_output"]["customer_targets"]["AUD"]["columns"]["allocated_target"];
-    assert_eq!(column["population"], Json::Null, "a null member leaves no complete total");
+    assert_eq!(
+        column["population"],
+        Json::Null,
+        "a null member leaves no complete total"
+    );
     assert_eq!(column["allocation"]["source_total"], "2000.00");
     assert_eq!(column["allocation"]["assigned_total"], "2000.00");
 }
@@ -582,11 +638,14 @@ fn allocation_is_declared_explicitly_and_checked_statically() {
         "a result scale below the quantity's cannot conserve it"
     );
     assert_eq!(
-        variant(&|d| d["outputs"][0]["allocations"][0]["weight"] = field("customer_month", "SalesArea")),
+        variant(
+            &|d| d["outputs"][0]["allocations"][0]["weight"] = field("customer_month", "SalesArea")
+        ),
         "TYPE_MISMATCH"
     );
     assert_eq!(
-        variant(&|d| d["outputs"][0]["allocations"][0]["recipient_filter"] = field("customer_month", "Share")),
+        variant(&|d| d["outputs"][0]["allocations"][0]["recipient_filter"] =
+            field("customer_month", "Share")),
         "TYPE_MISMATCH"
     );
     assert_eq!(
@@ -594,8 +653,9 @@ fn allocation_is_declared_explicitly_and_checked_statically() {
         "DUPLICATE_ID"
     );
     assert_eq!(
-        variant(&|d| d["outputs"][0]["allocations"][0]["weight"] =
-            json!({"op":"divide","left":field("customer_month","Share"),"right":field("customer_month","Share")})),
+        variant(
+            &|d| d["outputs"][0]["allocations"][0]["weight"] = json!({"op":"divide","left":field("customer_month","Share"),"right":field("customer_month","Share")})
+        ),
         "UNSUPPORTED_OPERATION",
         "general division stays rejected"
     );
@@ -613,8 +673,7 @@ fn allocation_is_declared_explicitly_and_checked_statically() {
     assert_eq!(
         variant(&|d| {
             d["outputs"][0]["group_by"] = json!(["currency"]);
-            d["outputs"][0]["aggregates"] =
-                json!([{"name":"goal","function":"sum","expr":via("targets","Goal",&["region_target"])}]);
+            d["outputs"][0]["aggregates"] = json!([{"name":"goal","function":"sum","expr":via("targets","Goal",&["region_target"])}]);
         }),
         "INVALID_POPULATION"
     );
@@ -638,8 +697,7 @@ fn bundles_carry_allocation_evidence_and_cancellation_applies_unchanged() {
     assert_eq!(tables["customer_targets"].len(), 6);
     assert_eq!(tables["_allocation_evidence"].len(), 4);
     let manifest: Json =
-        serde_json::from_slice(&std::fs::read(destination.join("manifest.json")).unwrap())
-            .unwrap();
+        serde_json::from_slice(&std::fs::read(destination.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(
         manifest["allocations"]["customer_targets"]["allocated_target"]["check"]["status"],
         "passed"

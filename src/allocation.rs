@@ -51,7 +51,12 @@ pub(crate) struct Split {
 
 /// Split `units` (the quantity at the result scale) by non-negative `weights`
 /// whose sum is positive. `rank[i]` orders recipient `i` by ascending identity.
-pub(crate) fn split(units: &BigInt, weights: &[BigInt], policy: ResidualPolicy, rank: &[usize]) -> Split {
+pub(crate) fn split(
+    units: &BigInt,
+    weights: &[BigInt],
+    policy: ResidualPolicy,
+    rank: &[usize],
+) -> Split {
     let total: BigInt = weights.iter().sum();
     let negative = units.is_negative();
     let magnitude = units.abs();
@@ -116,7 +121,12 @@ fn gcd(mut a: BigInt, mut b: BigInt) -> BigInt {
 
 /// The exact share `units × weight ÷ (total × 10^scale)` as decimal text when it
 /// terminates within 38 digits; otherwise `None` and the reason.
-pub(crate) fn exact_share(units: &BigInt, weight: &BigInt, total: &BigInt, scale: u8) -> (Option<String>, &'static str) {
+pub(crate) fn exact_share(
+    units: &BigInt,
+    weight: &BigInt,
+    total: &BigInt,
+    scale: u8,
+) -> (Option<String>, &'static str) {
     let numerator = units * weight;
     if numerator.is_zero() {
         return (Some("0".into()), "terminates");
@@ -315,7 +325,13 @@ pub(crate) fn allocate(
     let mut shares: Vec<Option<(Option<String>, &'static str)>> = vec![None; members.len()];
     let mut member_status: Vec<&'static str> = members
         .iter()
-        .map(|m| if m.recipient { "allocated" } else { "not_recipient" })
+        .map(|m| {
+            if m.recipient {
+                "allocated"
+            } else {
+                "not_recipient"
+            }
+        })
         .collect();
     let mut partitions = vec![];
     let (mut zero_weight, mut no_recipients) = (vec![], vec![]);
@@ -377,7 +393,11 @@ pub(crate) fn allocate(
             record["assigned_sum"] = json!(render(&BigInt::zero(), scale));
             record["residual"] = json!(render(&units, scale));
             record["status"] = json!("unallocated");
-            record["reason"] = json!(if recipients.is_empty() { "no_recipients" } else { "zero_weight" });
+            record["reason"] = json!(if recipients.is_empty() {
+                "no_recipients"
+            } else {
+                "zero_weight"
+            });
             record["conserved"] = json!(true);
             partitions.push(record);
             continue;
@@ -388,7 +408,10 @@ pub(crate) fn allocate(
             .collect();
         let mut by_identity: Vec<usize> = (0..recipients.len()).collect();
         by_identity.sort_by(|&a, &b| {
-            compare_identity(&members[recipients[a]].identity, &members[recipients[b]].identity)
+            compare_identity(
+                &members[recipients[a]].identity,
+                &members[recipients[b]].identity,
+            )
         });
         let mut rank = vec![0; recipients.len()];
         for (position, &i) in by_identity.iter().enumerate() {
@@ -428,7 +451,12 @@ pub(crate) fn allocate(
                 .with_affected(1, [members[i].reference]));
             }
             assigned[i] = Some(result.assigned[k].clone());
-            shares[i] = Some(exact_share(&units, &partition_weights[k], &weight_sum, scale));
+            shares[i] = Some(exact_share(
+                &units,
+                &partition_weights[k],
+                &weight_sum,
+                scale,
+            ));
         }
         assigned_total += &sum;
         residual_total += &result.residual;
@@ -441,8 +469,16 @@ pub(crate) fn allocate(
         partitions.push(record);
     }
     for (code, references, what) in [
-        ("ALLOCATION_NO_RECIPIENTS", no_recipients, "have no recipients"),
-        ("ALLOCATION_ZERO_WEIGHT", zero_weight, "have weights that sum to zero"),
+        (
+            "ALLOCATION_NO_RECIPIENTS",
+            no_recipients,
+            "have no recipients",
+        ),
+        (
+            "ALLOCATION_ZERO_WEIGHT",
+            zero_weight,
+            "have weights that sum to zero",
+        ),
     ] {
         if !references.is_empty() && !report_unallocated {
             return Err(fail(
@@ -583,7 +619,10 @@ pub(crate) fn allocate(
         return Err(Error::new(
             "ARITHMETIC_OVERFLOW",
             "allocation",
-            format!("totals of allocation {} exceed decimal precision 38", allocation.name),
+            format!(
+                "totals of allocation {} exceed decimal precision 38",
+                allocation.name
+            ),
         )
         .with_subject(subject));
     }
