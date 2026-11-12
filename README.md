@@ -49,6 +49,8 @@ documents using recipe format `0.1`; the Node package provides a lower-level por
 
 Node.js 22/24 source bindings: [build and use the Node package](docs/node.md).
 
+SQLite tables as sources, and running an eligibility filter at the source: [SQLite sources and source placement](docs/sqlite.md).
+
 The 0.1.0 Rust/Python developer preview is implemented but has not been published
 to crates.io or PyPI. Its scope and remaining limitations are described in the
 [preview guide](docs/preview.md). Preview decisions are tracked in the

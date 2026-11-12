@@ -1,0 +1,391 @@
+//! SQLite source reader (docs/spec/slice-3.md, "Contract: SQLite source").
+//!
+//! The database file is read once under the read policy and byte limits, like
+//! every other source, and the copy is queried read-only in memory. The
+//! fingerprint therefore identifies exactly the data the queries saw.
+//!
+//! Values are converted by their own storage class and never through a float.
+//! A pushed eligibility predicate (`crate::placement`) is evaluated by SQLite
+//! during the scan, after source-side checks over every record of the table.
+use super::*;
+use crate::placement::{Pushed, SqlValue, column, quoted};
+use rusqlite::{Connection, config::DbConfig, types::ValueRef};
+
+/// What one scan of a SQLite table produced.
+pub(super) struct Scan {
+    pub rows: Vec<Row>,
+    /// Records in the table, whether or not they were scanned.
+    pub total_rows: usize,
+    /// Placement record for the manifest, when a predicate was planned for this source.
+    pub placement: Option<serde_json::Value>,
+}
+
+fn sql_error(e: rusqlite::Error) -> Error {
+    err("INVALID_SQLITE", e.to_string())
+}
+
+/// Open the bytes read as a read-only in-memory database.
+fn open(bytes: &[u8]) -> Result<Connection> {
+    if bytes.is_empty() {
+        return Err(err("INVALID_SQLITE", "the database file is empty"));
+    }
+    let mut conn = Connection::open_in_memory().map_err(sql_error)?;
+    conn.deserialize_read_exact(rusqlite::MAIN_DB, bytes, bytes.len(), true)
+        .map_err(sql_error)?;
+    // The file is untrusted input: its schema may not run functions or virtual
+    // tables with side effects.
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
+        .map_err(sql_error)?;
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)
+        .map_err(sql_error)?;
+    Ok(conn)
+}
+
+/// The bound table, its rowid alias and the column of each declared field.
+struct Table<'a> {
+    name: String,
+    rowid: &'static str,
+    columns: Vec<(&'a String, &'a Field, &'a str)>,
+}
+
+fn table<'a>(conn: &Connection, source: &'a Source, binding: &Binding) -> Result<Table<'a>> {
+    let name = match binding.settings.get("table") {
+        Some(serde_json::Value::String(name)) if !name.is_empty() => name.clone(),
+        _ => {
+            return Err(err(
+                "INVALID_BINDING",
+                "a sqlite binding names one table in settings.table",
+            ));
+        }
+    };
+    if source.projection.array.is_some() || source.projection.fields.values().any(|f| f.header) {
+        return Err(err(
+            "INVALID_PROJECTION",
+            "a sqlite projection reads table columns; it declares no array and no header fields",
+        ));
+    }
+    let mut found = conn
+        .prepare("SELECT type, wr FROM pragma_table_list WHERE schema = 'main' AND name = ?1")
+        .map_err(sql_error)?;
+    let kind: Option<(String, i64)> = found
+        .query_map([&name], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(sql_error)?
+        .next()
+        .transpose()
+        .map_err(sql_error)?;
+    match kind {
+        None => {
+            return Err(err(
+                "INVALID_BINDING",
+                format!("declared SQLite table {name} does not exist"),
+            ));
+        }
+        Some((kind, without_rowid)) if kind != "table" || without_rowid != 0 => {
+            return Err(err(
+                "INVALID_BINDING",
+                format!(
+                    "{name} is not an ordinary rowid table; views, virtual tables and WITHOUT ROWID tables are not supported"
+                ),
+            ));
+        }
+        Some(_) => {}
+    }
+    let mut info = conn
+        .prepare("SELECT name FROM pragma_table_info(?1)")
+        .map_err(sql_error)?;
+    let present: BTreeSet<String> = info
+        .query_map([&name], |r| r.get(0))
+        .map_err(sql_error)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(sql_error)?;
+    let columns = source
+        .projection
+        .fields
+        .iter()
+        .map(|(field, declared)| {
+            let column = column(declared);
+            if present.contains(column) {
+                Ok((field, declared, column))
+            } else {
+                Err(err(
+                    "INVALID_PROJECTION",
+                    format!("declared SQLite column {column} is not present in the source"),
+                ))
+            }
+        })
+        .collect::<Result<_>>()?;
+    let rowid = ["rowid", "_rowid_", "oid"]
+        .into_iter()
+        .find(|alias| !present.iter().any(|c| c.eq_ignore_ascii_case(alias)))
+        .ok_or_else(|| {
+            err(
+                "INVALID_BINDING",
+                format!("{name} hides every rowid alias behind a column"),
+            )
+        })?;
+    Ok(Table {
+        name,
+        rowid,
+        columns,
+    })
+}
+
+/// Bound validation's schema inspection: the table and each declared column
+/// exist. No record is read.
+pub(super) fn inspect(source: &Source, binding: &Binding, bytes: &[u8]) -> Result<()> {
+    table(&open(bytes)?, source, binding).map(|_| ())
+}
+
+/// The SQL storage classes a declared type accepts, as `typeof` names them.
+fn storage_classes(field: &Field) -> Vec<&'static str> {
+    let mut classes = match field.data_type {
+        Type::Int64 | Type::Boolean => vec!["integer"],
+        Type::String | Type::Date => vec!["text"],
+        Type::Decimal { .. } => vec!["text", "integer"],
+    };
+    if field.nullable {
+        classes.push("null");
+    }
+    classes
+}
+
+/// Checks a pushed scan would otherwise skip for the records it does not read:
+/// identity presence and uniqueness, nullability and storage classes, over
+/// every record of the table. Returns why the scan must stay local, if it must.
+fn source_checks(conn: &Connection, source: &Source, table: &Table<'_>) -> Result<Option<String>> {
+    let encoding: String = conn
+        .query_row("PRAGMA encoding", [], |r| r.get(0))
+        .map_err(sql_error)?;
+    if encoding != "UTF-8" {
+        return Ok(Some(format!(
+            "the database stores text as {encoding}; bytewise text comparison at the source would not match the local executor's"
+        )));
+    }
+    let name = quoted(&table.name);
+    let mut violations = vec![];
+    let mut identity = vec![];
+    for (field, declared, column) in &table.columns {
+        let column = quoted(column);
+        let classes = storage_classes(declared)
+            .iter()
+            .map(|c| format!("'{c}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        violations.push(format!("typeof({column}) NOT IN ({classes})"));
+        if declared.data_type == Type::Boolean {
+            violations.push(format!(
+                "({column} IS NOT NULL AND +{column} NOT IN (0, 1))"
+            ));
+        }
+        if source.identity.contains(*field) {
+            violations.push(format!("{column} IS NULL"));
+            identity.push(format!("+{column} COLLATE BINARY"));
+        }
+    }
+    let violating: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT count(*) FROM {name} WHERE {}",
+                violations.join(" OR ")
+            ),
+            [],
+            |r| r.get(0),
+        )
+        .map_err(sql_error)?;
+    if violating > 0 {
+        return Ok(Some(format!(
+            "{violating} records fail a source-side identity, nullability or storage-class check; the whole table is read locally to diagnose them"
+        )));
+    }
+    if !identity.is_empty() {
+        let mut duplicated = conn
+            .prepare(&format!(
+                "SELECT 1 FROM {name} GROUP BY {} HAVING count(*) > 1 LIMIT 1",
+                identity.join(", ")
+            ))
+            .map_err(sql_error)?;
+        if duplicated.exists([]).map_err(sql_error)? {
+            return Ok(Some(
+                "records share an identity; the whole table is read locally to diagnose them"
+                    .into(),
+            ));
+        }
+    }
+    Ok(None)
+}
+
+/// Convert one stored value by its own storage class. The outer error is
+/// structural (a budget); the inner one is a value failure of this record.
+fn convert(
+    value: ValueRef<'_>,
+    field: &Field,
+    limits: &Limits,
+) -> Result<(Result<Value>, serde_json::Value)> {
+    let bad = || {
+        err(
+            "INVALID_VALUE",
+            "source value does not satisfy declared type",
+        )
+    };
+    Ok(match value {
+        ValueRef::Null => (value_from_text(None, field), serde_json::Value::Null),
+        ValueRef::Integer(n) => {
+            let converted = match field.data_type {
+                Type::Int64 | Type::Decimal { .. } => value_from_text(Some(&n.to_string()), field),
+                Type::Boolean if n == 0 || n == 1 => Ok(Value::Boolean { value: n == 1 }),
+                _ => Err(bad()),
+            };
+            (converted, serde_json::Value::Number(n.into()))
+        }
+        ValueRef::Text(bytes) => {
+            limit(
+                bytes.len() <= limits.field_bytes,
+                "single SQLite text value bytes",
+            )?;
+            match std::str::from_utf8(bytes) {
+                Ok(text) => {
+                    let converted = match field.data_type {
+                        Type::String | Type::Date | Type::Decimal { .. } => {
+                            value_from_text(Some(text), field)
+                        }
+                        _ => Err(bad()),
+                    };
+                    (converted, serde_json::Value::String(text.into()))
+                }
+                Err(_) => (
+                    Err(bad()),
+                    serde_json::Value::String("<invalid text>".into()),
+                ),
+            }
+        }
+        // REAL has no exact decimal value, so it is never converted.
+        ValueRef::Real(_) => (Err(bad()), serde_json::Value::String("<real>".into())),
+        ValueRef::Blob(_) => (Err(bad()), serde_json::Value::String("<blob>".into())),
+    })
+}
+
+/// Read the bound table as typed, referenced records in ascending rowid order.
+/// With `pushed`, SQLite evaluates the predicate and only passing records cross
+/// into the executor, provided the source-side checks pass over every record.
+pub(super) fn read(
+    source: &Source,
+    binding: &Binding,
+    bytes: &[u8],
+    reference: &SourceReference,
+    policy: &Policy,
+    cancel: &AtomicBool,
+    pushed: Option<&Pushed>,
+) -> Result<Scan> {
+    let conn = open(bytes)?;
+    let table = table(&conn, source, binding)?;
+    let name = quoted(&table.name);
+    let fallback = match pushed {
+        Some(_) => source_checks(&conn, source, &table)?,
+        None => None,
+    };
+    if let (Some(reason), Placement::RequireSource, Some(pushed)) =
+        (&fallback, policy.placement, pushed)
+    {
+        // Check failures are diagnosed by the local read below; an encoding the
+        // source cannot compare in is a placement the policy forbids.
+        if reason.starts_with("the database stores text") {
+            return Err(Error::new(
+                "PLACEMENT_INFEASIBLE",
+                "source",
+                format!(
+                    "policy placement require_source cannot be met for {}: {reason}",
+                    pushed.stage
+                ),
+            )
+            .with_subject(pushed.stage.clone())
+            .with_remediation(
+                "Use placement prefer_source or local; the policy is not overridden.",
+            ));
+        }
+    }
+    let filter = pushed.filter(|_| fallback.is_none());
+    check_cancel(cancel)?;
+    let total_rows: i64 = conn
+        .query_row(&format!("SELECT count(*) FROM {name}"), [], |r| r.get(0))
+        .map_err(sql_error)?;
+    let selected = table
+        .columns
+        .iter()
+        .map(|(_, _, column)| quoted(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let condition = filter
+        .map(|p| format!(" WHERE {}", p.sql))
+        .unwrap_or_default();
+    let rowid = table.rowid;
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT {rowid}, {selected} FROM {name}{condition} ORDER BY {rowid}"
+        ))
+        .map_err(sql_error)?;
+    let parameters = filter
+        .map(|p| p.parameters.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .map(|p| match p {
+            SqlValue::Integer(n) => rusqlite::types::Value::Integer(*n),
+            SqlValue::Text(text) => rusqlite::types::Value::Text(text.clone()),
+        });
+    let mut records = statement
+        .query(rusqlite::params_from_iter(parameters))
+        .map_err(sql_error)?;
+    let mut rows = RowCollector::new(policy);
+    let mut failures = ValueFailures::default();
+    while let Some(record) = records.next().map_err(sql_error)? {
+        check_cancel(cancel)?;
+        let id: i64 = record.get(0).map_err(sql_error)?;
+        let mut row = Row {
+            fields: BTreeMap::new(),
+            raw: BTreeMap::new(),
+            reference: reference.clone(),
+        };
+        row.reference.location = format!("rowid:{id}");
+        let mut failure = None;
+        for (i, (field, declared, _)) in table.columns.iter().enumerate() {
+            let stored = record.get_ref(i + 1).map_err(sql_error)?;
+            let (converted, raw) = convert(stored, declared, &policy.limits)?;
+            row.raw.insert((*field).clone(), raw);
+            match converted {
+                Ok(value) => {
+                    row.fields.insert((*field).clone(), value);
+                }
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
+            }
+        }
+        match failure {
+            None => rows.push(row)?,
+            Some(error) => failures.record(error, &row.reference)?,
+        }
+    }
+    failures.finish()?;
+    let placement = pushed.map(|p| match &fallback {
+        None => serde_json::json!({
+            "scan": "source",
+            "operation": p.stage,
+            "checks": {
+                "identity": "full: every record, at the source",
+                "nullability": "full: every record, at the source",
+                "storage_classes": "full: every record, at the source",
+                "text_formats": "scanned records only",
+                "lookups": "scanned records only",
+            },
+        }),
+        Some(reason) => serde_json::json!({
+            "scan": "local",
+            "operation": p.stage,
+            "reason": reason,
+        }),
+    });
+    Ok(Scan {
+        rows: rows.rows,
+        total_rows: usize::try_from(total_rows).unwrap_or(usize::MAX),
+        placement,
+    })
+}

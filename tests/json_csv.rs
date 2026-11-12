@@ -54,6 +54,7 @@ fn policy(root: &Path) -> Policy {
         allowed_output_roots: vec![root.into()],
         limits: Limits::default(),
         diagnostic_values: false,
+        placement: Default::default(),
     }
 }
 

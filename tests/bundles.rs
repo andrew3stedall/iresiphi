@@ -27,6 +27,7 @@ fn fixture() -> (tempfile::TempDir, Recipe, Bindings, Policy) {
         allowed_output_roots: vec![dir.path().into()],
         limits: Limits::default(),
         diagnostic_values: false,
+        placement: Default::default(),
     };
     (dir, recipe, bindings, policy)
 }

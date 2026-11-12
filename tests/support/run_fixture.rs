@@ -110,6 +110,7 @@ pub fn fixture() -> Fixture {
         allowed_output_roots: vec![root.to_owned()],
         limits: Limits::default(),
         diagnostic_values: false,
+        placement: Default::default(),
     };
     Fixture {
         dir,

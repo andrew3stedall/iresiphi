@@ -139,6 +139,7 @@ fn new(doc: Json) -> Fixture {
         allowed_output_roots: vec![dir.path().into()],
         limits: Limits::default(),
         diagnostic_values: false,
+        placement: Default::default(),
     };
     Fixture {
         dir,

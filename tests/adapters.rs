@@ -18,6 +18,7 @@ fn fixture(adapter: &str, contents: &[u8]) -> (tempfile::TempDir, Recipe, Bindin
         allowed_output_roots: vec![dir.path().into()],
         limits: Limits::default(),
         diagnostic_values: false,
+        placement: Default::default(),
     };
     (dir, recipe, bindings, policy)
 }

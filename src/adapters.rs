@@ -18,6 +18,9 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+#[path = "sqlite.rs"]
+mod sqlite;
+
 fn err(code: &str, message: impl Into<String>) -> Error {
     Error::new(code, "source", message)
 }
@@ -178,6 +181,7 @@ fn check_text_settings(binding: &Binding) -> Result<()> {
     let allowed: &[&str] = match binding.adapter.as_str() {
         "json" => &[],
         "csv" => &["delimiter", "quote", "null_tokens"],
+        "sqlite" => &["table"],
         _ => return Ok(()),
     };
     match binding
@@ -206,6 +210,8 @@ fn materialize_sources(
     let mut total = 0;
     let mut expanded = 0;
     let mut retained = 0usize;
+    // Placement is decided from declarations and policy before any source opens.
+    let plan = crate::placement::plan(recipe, bindings, policy)?;
     for source in &recipe.sources {
         check_cancel(cancel)?;
         let binding = bindings
@@ -242,7 +248,21 @@ fn materialize_sources(
         let mut admission = policy.clone();
         admission.limits.lookup_rows = max;
         admission.limits.retained_bytes = policy.limits.retained_bytes.saturating_sub(retained);
+        let mut scan = None;
         let mut rows = match binding.adapter.as_str() {
+            "sqlite" => sqlite::read(
+                source,
+                binding,
+                &bytes,
+                &reference,
+                &admission,
+                cancel,
+                plan.pushed.get(&source.id),
+            )
+            .map(|read| {
+                scan = Some((read.total_rows, read.placement));
+                read.rows
+            }),
             "json" => read_json(source, &bytes, &reference, &admission, cancel),
             "csv" => read_csv(source, binding, &bytes, &reference, &admission, cancel),
             "xlsx" => read_xlsx(
@@ -351,7 +371,12 @@ fn materialize_sources(
                     binding: reference.binding.clone(),
                     fingerprint: reference.fingerprint.clone(),
                     bytes_read: bytes.len(),
-                    rows: rows.len(),
+                    rows: scan.as_ref().map_or(rows.len(), |(total, _)| *total),
+                    scanned_rows: scan
+                        .as_ref()
+                        .filter(|(_, placement)| placement.is_some())
+                        .map(|_| rows.len()),
+                    placement: scan.and_then(|(_, placement)| placement),
                     access_us,
                     parse_us: micros(parsed),
                     conversion_us: 0,
@@ -373,7 +398,16 @@ pub struct SourceRead {
     pub binding: String,
     pub fingerprint: String,
     pub bytes_read: usize,
+    /// Records in the source. Under a pushed predicate this still counts every
+    /// record of the table; `scanned_rows` counts those that were read.
     pub rows: usize,
+    /// Records that crossed into the executor, when a predicate was planned
+    /// for this source's scan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scanned_rows: Option<usize>,
+    /// Where the planned predicate ran, and what the source-side checks covered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<serde_json::Value>,
     /// Opening, reading and fingerprinting the bytes, in microseconds.
     #[serde(default)]
     pub access_us: u64,
@@ -393,6 +427,16 @@ pub(crate) fn adapter_capabilities(adapter: &str) -> serde_json::Value {
             "location": "local", "typed_read": true,
             "pushdown": false, "streaming": false,
             "materialization": "bounded", "snapshot": "none",
+            "source_identity": "fingerprint_bytes_read",
+        })
+    } else if adapter == "sqlite" {
+        serde_json::json!({
+            "location": "local", "typed_read": true,
+            "pushdown": true,
+            "pushdown_operations": ["anchor_eligibility_filter"],
+            "pushdown_types": ["int64", "string", "date", "boolean"],
+            "streaming": false,
+            "materialization": "bounded", "snapshot": "bytes_read",
             "source_identity": "fingerprint_bytes_read",
         })
     } else {
@@ -2083,6 +2127,10 @@ fn inspect_schema(
         )
     };
     match binding.adapter.as_str() {
+        "sqlite" => {
+            let bytes = read_bytes(binding, policy, total, cancel)?;
+            sqlite::inspect(source, binding, &bytes)?;
+        }
         "csv" => {
             let dialect = CsvDialect::from_binding(binding)?;
             let bytes = read_bytes(binding, policy, total, cancel)?;

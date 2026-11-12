@@ -70,8 +70,8 @@ Node.js 22/24 source bindings: [build and use the Node package](node.md).
 | --- | --- | --- |
 | Interfaces | Rust crate `iresiphi`; Python package `iresiphi` on ordinary (GIL) CPython 3.12 and 3.13; source-built Node 22/24 addon with TypeScript declarations | Browsers, Deno, Bun; abi3, free-threaded CPython, PyPy |
 | Platforms | Linux x86_64, glibc 2.28 or later, as manylinux_2_28 wheels, subject to the commit's CI evidence. Node addon: Linux glibc x86_64/aarch64, subject to CI evidence | macOS, Windows and ARM Python release wheels |
-| Inputs | Local UTF-8 JSON with one declared array and header fields; local CSV with an explicit dialect; local XLSX with a named sheet, declared header row and typed columns | Dataframes, SQL, Snowflake, Spark, NDJSON, XML, arbitrary text, Parquet, remote stores, network reads |
-| Execution | One local executor; DataFusion 55.2.0 produces lookup candidate pairs | Pushdown, remote staging, hybrid placement, spill to disk |
+| Inputs | Local UTF-8 JSON with one declared array and header fields; local CSV with an explicit dialect; local XLSX with a named sheet, declared header row and typed columns; one table of a local SQLite database file ([sqlite.md](sqlite.md)) | Dataframes, SQL text, database servers, Snowflake, Spark, NDJSON, XML, arbitrary text, Parquet, remote stores, network reads |
+| Execution | One local executor; DataFusion 55.2.0 produces lookup candidate pairs; an output's anchor eligibility can run inside a SQLite source under an explicit placement policy ([sqlite.md](sqlite.md)) | Other pushdown, remote staging, transfers, spill to disk |
 | Scalars | Boolean, Int64, UTF-8 string, Decimal128 (precision 1 to 38), calendar date | Floating point, timestamps and time zones |
 | Expressions | Literals, field and path references, casts, add, subtract, multiply, comparisons, AND/OR/NOT, is-null, coalesce, case, quantize (`half_even`, `toward_zero`), rate validity | Division, regex, user-defined functions, Python callbacks |
 | Relationships | Typed equality on composite keys; one-to-one, many-to-one, one-to-many; invoice-date validity (`valid_from <= date < valid_to`, null `valid_to` open) | Many-to-many, fuzzy or normalized matching, automatic as-of selection, general temporal joins |
@@ -82,9 +82,10 @@ Node.js 22/24 source bindings: [build and use the Node package](node.md).
 
 Unsupported bindings and operations fail with a diagnostic (`UNSUPPORTED_OPERATION`, `UNSUPPORTED_CAPABILITY`, `INVALID_BINDING`). The library never switches to another executor and never collects data some other way.
 
-Bound explanations and run source-read records report each adapter's capabilities:
-local typed reads with bounded materialization, no pushdown, no streaming and no
-shared snapshot. Run fingerprints identify the bytes actually read. Schema-only
+Bound explanations and run source-read records report each adapter's capabilities.
+File adapters give local typed reads with bounded materialization, no pushdown, no
+streaming and no shared snapshot. The SQLite adapter adds a snapshot of the bytes
+read and one pushdown operation, the anchor eligibility filter. Run fingerprints identify the bytes actually read. Schema-only
 JSON validation scans borrowed document spans to locate headers and the declared
 array without decoding its records; it still reads the encoded document.
 

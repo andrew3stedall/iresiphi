@@ -120,6 +120,7 @@ fn ledger() -> Ledger {
         allowed_output_roots: vec![root.path().into()],
         limits: Limits::default(),
         diagnostic_values: false,
+        placement: Default::default(),
     };
     Ledger {
         _root: root,

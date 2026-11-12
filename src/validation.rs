@@ -1120,7 +1120,8 @@ fn check_format(r: &Recipe) -> Result<()> {
     )
 }
 fn check_capabilities(r: &Recipe) -> Result<()> {
-    const SUPPORTED: [&str; 13] = [
+    const SUPPORTED: [&str; 14] = [
+        "sqlite",
         "population",
         "allocation",
         "local",
@@ -2201,11 +2202,14 @@ fn bound_feasibility(
     if policy.allowed_read_roots.is_empty() {
         return Err(error("POLICY_DENIED", "no allowed read roots"));
     }
+    // A placement the policy requires but the plan cannot give is infeasible
+    // before any source is opened.
+    crate::placement::plan(recipe, bindings, policy)?;
     for source in &recipe.sources {
         let binding = bindings
             .get(&source.id)
             .ok_or_else(|| error("MISSING_BINDING", &source.id))?;
-        if !["json", "csv", "xlsx"].contains(&binding.adapter.as_str()) {
+        if !["json", "csv", "xlsx", "sqlite"].contains(&binding.adapter.as_str()) {
             return Err(error("UNSUPPORTED_ADAPTER", &binding.adapter));
         }
         if !binding.path.is_absolute()
@@ -2265,6 +2269,7 @@ const DATA_CHECKS: [(&str, &[&str]); 4] = [
             "DUPLICATE_JSON_KEY",
             "INVALID_CSV",
             "INVALID_XLSX",
+            "INVALID_SQLITE",
             "XLSX_QUANTIZATION_REQUIRED",
             "XLSX_CELL_ERROR",
             "FORMULA_CACHE_MISSING",
@@ -2395,6 +2400,13 @@ pub fn validate_bound(
 pub fn explain_bound(recipe: &Recipe, bindings: &Bindings, policy: &Policy) -> Json {
     let mut explanation = explain(recipe);
     let feasibility = bound_feasibility(recipe, bindings, policy, false);
+    // With a lenient copy of the policy the plan always resolves, so explain can
+    // still show each placement and reason when the real policy is infeasible.
+    let mut lenient = policy.clone();
+    if lenient.placement == Placement::RequireSource {
+        lenient.placement = Placement::PreferSource;
+    }
+    let plan = crate::placement::plan(recipe, bindings, &lenient).unwrap_or_default();
     explanation["bound"] = json!({
         "feasible": feasibility.is_ok(),
         "diagnostic": feasibility.err(),
@@ -2404,11 +2416,13 @@ pub fn explain_bound(recipe: &Recipe, bindings: &Bindings, policy: &Policy) -> J
             "adapter": bindings.get(&source.id).map(|b| &b.adapter),
             "capabilities": bindings.get(&source.id).map(|b| crate::adapters::adapter_capabilities(&b.adapter)),
             "location": "local",
+            "scan": if plan.pushed.contains_key(&source.id) { "filtered at the source" } else { "every record" },
             "rows": null,
             "bytes": null,
             "estimate_status": "unknown",
         })).collect::<Vec<_>>(),
         "transfers": [],
+        "placement": {"policy": policy.placement, "operations": plan.decisions},
         "source_access": "not-run",
         "data_checks": "not-run",
     });

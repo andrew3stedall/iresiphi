@@ -19,6 +19,7 @@ include = [
     "/python/**",
     "/docs/preview.md",
     "/docs/allocation.md",
+    "/docs/sqlite.md",
     "/docs/measurements/**",
     "/Cargo.toml",
     "/Cargo.lock",
@@ -51,6 +52,7 @@ tokio = { version = "=1.54.1", features = ["rt-multi-thread", "time", "macros"] 
 zip = { version = "=9.5.1", default-features = false, features = ["deflate"] }
 quick-xml = "=0.42.0"
 libc = "=0.2.191"
+rusqlite = { version = "=0.42.0", features = ["bundled", "serialize"] }
 
 [dev-dependencies]
 tempfile = "=3.27.0"

@@ -42,12 +42,22 @@ provides the full workload verification when a local run cannot finish; local
 ARM development remains available. Neither interrupted local workload attempt
 at `72ffd6c` is counted as a pass.
 
+## Slice 3: SQLite source and source placement
+
+[docs/spec/slice-3.md](spec/slice-3.md) adds a SQLite table as a source and lets an
+output's anchor eligibility run at that source under `policy.placement`
+([sqlite.md](sqlite.md)). It is implemented with tests in `tests/sqlite.rs`. The
+Python builder and the Node type declarations accept the new adapter and policy
+field; neither binding has its own SQLite test yet. Hosted ARM and x86 passes at
+the same commit are required before this counts as passing.
+
 ## Remaining scope
 
 The broad product specification
 [#1](https://github.com/andrew3stedall/iresiphi/issues/1) remains a roadmap
-umbrella. The resolved preview scope explicitly defers TypeScript, additional
-connectors, pushdown/hybrid execution, allocation and other platforms. These
+umbrella. Later slices added Node bindings, allocation and a SQLite source with one
+pushdown operation. Still deferred: remote and dataframe connectors, other
+pushdown, transfers and hybrid execution, and other platforms. These
 require their own bounded delivery specifications; they are not claims of this
 preview.
 
