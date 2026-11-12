@@ -131,7 +131,18 @@ fn run(
         m["unresolved_rows"],
         m["reconciliation"]["status"]
     );
-    println!("  totals: {}", m["totals"]);
+    // Combined totals per currency and column: the full population, the
+    // comparable (resolved) lines and the unresolved remainder.
+    if let Some(currencies) = m["totals"]["combined"].as_object() {
+        for (currency, totals) in currencies {
+            for (column, t) in totals["columns"].as_object().into_iter().flatten() {
+                println!(
+                    "  {currency} {column}: full {}, comparable {}, unresolved {}",
+                    t["population"], t["comparable"], t["unresolved"]
+                );
+            }
+        }
+    }
     for d in &report.diagnostics {
         println!(
             "  {} {} {}: {} records",

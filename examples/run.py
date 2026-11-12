@@ -32,7 +32,12 @@ def run(context, recipe, bindings, policy, bundle):
         print(f"run {result.run_id}: {result.status} into {bundle}; "
               f"{manifest['resolved_rows']} resolved and {manifest['unresolved_rows']} unresolved lines; "
               f"reconciliation {manifest['reconciliation']['status']}")
-        print(f"  totals: {json.dumps(manifest['totals'])}")
+        # Combined totals per currency and column: the full population, the
+        # comparable (resolved) lines and the unresolved remainder.
+        for currency, totals in manifest["totals"]["combined"].items():
+            for column, t in totals["columns"].items():
+                print(f"  {currency} {column}: full {json.dumps(t['population'])}, "
+                      f"comparable {json.dumps(t['comparable'])}, unresolved {json.dumps(t['unresolved'])}")
         for d in result.diagnostics:
             print(f"  {d['severity']} {d['code']} {d.get('subject') or '-'}: {d.get('affected_count')} records")
         # Values are copied out as exact Python objects (Decimal, date, str, None)
