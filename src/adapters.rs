@@ -347,6 +347,7 @@ fn materialize_sources(
                 source.id.clone(),
                 SourceRead {
                     adapter: binding.adapter.clone(),
+                    capabilities: adapter_capabilities(&binding.adapter),
                     binding: reference.binding.clone(),
                     fingerprint: reference.fingerprint.clone(),
                     bytes_read: bytes.len(),
@@ -367,6 +368,8 @@ fn materialize_sources(
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SourceRead {
     pub adapter: String,
+    #[serde(default)]
+    pub capabilities: serde_json::Value,
     pub binding: String,
     pub fingerprint: String,
     pub bytes_read: usize,
@@ -380,6 +383,21 @@ pub struct SourceRead {
     /// Converting the observations to typed Arrow batches and back.
     #[serde(default)]
     pub conversion_us: u64,
+}
+
+/// Concrete capabilities of the built-in source readers. Describing a reader
+/// never opens its binding or implies that it supports executor pushdown.
+pub(crate) fn adapter_capabilities(adapter: &str) -> serde_json::Value {
+    if ["json", "csv", "xlsx"].contains(&adapter) {
+        serde_json::json!({
+            "location": "local", "typed_read": true,
+            "pushdown": false, "streaming": false,
+            "materialization": "bounded", "snapshot": "none",
+            "source_identity": "fingerprint_bytes_read",
+        })
+    } else {
+        serde_json::Value::Null
+    }
 }
 
 /// Microseconds elapsed since `started`, saturating.
@@ -793,6 +811,55 @@ fn json_lookup<'v>(
                 }
             }
             serde_json::Value::Null => return Ok(None),
+            _ => {
+                return Err(err(
+                    "INVALID_VALUE",
+                    format!("{pointer} descends into a JSON scalar"),
+                ));
+            }
+        };
+    }
+    Ok(Some(current))
+}
+
+/// Inspect pointers using borrowed JSON spans. Array records remain raw spans;
+/// schema-only validation never allocates their objects or decodes their values.
+fn raw_json_lookup<'a>(
+    root: &'a serde_json::value::RawValue,
+    pointer: &str,
+) -> Result<Option<&'a serde_json::value::RawValue>> {
+    let mut current = root;
+    for token in json_pointer_tokens(pointer)? {
+        current = match current.get().trim_start().as_bytes().first() {
+            Some(b'{') => {
+                let fields: BTreeMap<String, &serde_json::value::RawValue> =
+                    serde_json::from_str(current.get())
+                        .map_err(|e| err("INVALID_JSON", e.to_string()))?;
+                match fields.get(&token).copied() {
+                    Some(value) => value,
+                    None => return Ok(None),
+                }
+            }
+            Some(b'[') => {
+                let index = (!token.is_empty()
+                    && token.bytes().all(|b| b.is_ascii_digit())
+                    && (token == "0" || !token.starts_with('0')))
+                .then(|| token.parse::<usize>().ok())
+                .flatten()
+                .ok_or_else(|| {
+                    err(
+                        "INVALID_VALUE",
+                        format!("{pointer} indexes an array with {token:?}"),
+                    )
+                })?;
+                let values: Vec<&serde_json::value::RawValue> = serde_json::from_str(current.get())
+                    .map_err(|e| err("INVALID_JSON", e.to_string()))?;
+                match values.get(index).copied() {
+                    Some(value) => value,
+                    None => return Ok(None),
+                }
+            }
+            Some(b'n') => return Ok(None),
             _ => {
                 return Err(err(
                     "INVALID_VALUE",
@@ -2098,9 +2165,12 @@ fn inspect_schema(
             }
             let bytes = read_bytes(binding, policy, total, cancel)?;
             json_preflight(&bytes, &policy.limits, cancel)?;
-            let root: serde_json::Value = parse_json(&bytes, cancel)?;
+            let root: &serde_json::value::RawValue =
+                serde_json::from_slice(&bytes).map_err(|e| err("INVALID_JSON", e.to_string()))?;
             if let Some(array) = &source.projection.array {
-                if !json_lookup(&root, array)?.is_some_and(|v| v.is_array()) {
+                if !raw_json_lookup(root, array)?
+                    .is_some_and(|v| v.get().trim_start().starts_with('['))
+                {
                     return Err(missing("JSON array", array));
                 }
             }
@@ -2109,7 +2179,7 @@ fn inspect_schema(
             for field in source.projection.fields.values() {
                 if (field.header || source.projection.array.is_none())
                     && !field.nullable
-                    && json_lookup(&root, &field.path)?.is_none_or(|v| v.is_null())
+                    && raw_json_lookup(root, &field.path)?.is_none_or(|v| v.get().trim() == "null")
                 {
                     return Err(missing("JSON field", &field.path));
                 }

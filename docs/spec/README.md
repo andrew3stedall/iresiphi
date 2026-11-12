@@ -2,6 +2,10 @@
 
 Specification: https://github.com/andrew3stedall/iresiphi/issues/16
 
+Current implementation, verification gates and remaining scope:
+[preview status](../status.md). The dependency list below preserves the original
+implementation order.
+
 - [Portable recipe validation, exact scalar execution and explain](https://github.com/andrew3stedall/iresiphi/issues/17) — blocked by none
 - [Read and reconcile local JSON/CSV invoice and lookup projections](https://github.com/andrew3stedall/iresiphi/issues/18) — blocked by https://github.com/andrew3stedall/iresiphi/issues/17
 - [Read XLSX enrichment with explicit numeric/date/cache policies](https://github.com/andrew3stedall/iresiphi/issues/19) — blocked by https://github.com/andrew3stedall/iresiphi/issues/17

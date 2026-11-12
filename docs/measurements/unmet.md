@@ -6,27 +6,26 @@ A clause is blocked when it needs something this machine or this ticket cannot p
 
 ## Packaging and release (decisions #4, #12, #14)
 
+The initial x86 wheel build, audits and fresh glibc 2.28 installs are now verified
+by [GitHub Actions](ci-x86.md). The workflow reruns these gates for later commits.
+Standards/spec reviews identified output-name, currency-scope and diagnostic-count
+errors; regression fixes are on main. Latest source-capability/schema changes await
+their own final workflow result before release certification.
+
 | Clause | Status | Reason |
 | --- | --- | --- |
-| Separate cp312/cp313 wheels for Linux x86_64 manylinux_2_28 (glibc 2.28 or later), built with a pinned build-image digest and maturin 1.16.0 | Blocked | This machine is aarch64 under PRoot, with no Docker, Podman, qemu-x86_64 or x86_64 cross compiler. The wheels built here are `linux_aarch64`. Their native module needs symbol versions up to `GLIBC_2.43` (for example `acosf`, `pthread_create@GLIBC_2.34`, `hypot@GLIBC_2.35`), so a wheel built on this host could not be relabelled manylinux_2_28. No build-image digest exists to record. See [packaging.md](packaging.md). |
-| Audit native wheel dependencies (auditwheel) and test minimum-glibc installation and import on clean images | Blocked | Same reason. The aarch64 module was inspected with `readelf` and `ldd` only: it needs `libgcc_s.so.1`, `libm.so.6`, `libc.so.6` and the dynamic loader, and has no RPATH or RUNPATH. |
-| Clean-wheel installation as a release gate (decision #12) | Partly met | The cp312 and cp313 wheels install offline into fresh `uv` virtual environments, and the Python suites pass against them. These are fresh environments on the build host, not clean images. |
-| Linux x86_64 as the initial platform (decision #4) | Blocked | Nothing was built or run on x86_64. |
 | Before publication, recheck crate and PyPI names and account ownership | Unmet | Publication is outside this ticket. Nothing was published, and the names were not rechecked. |
-| Parallel standards and spec reviews completed and findings fixed (ticket acceptance) | Unmet | Not done by the implementation agent. The coordinator runs reviews. |
 
 ## Execution, cancellation and resources (decisions #11, #12, #13)
 
 | Clause | Status | Reason |
 | --- | --- | --- |
 | The generated 100,000-line fixture is designed within the declared profile, and complete-recipe measurements gate release (decision #13) | Unmet | The fixture's inputs (13.5 MB, 350,004 records) are well inside the input limits, but the run's results and evidence serialize to 757,303,499 bytes, about 2.8 times the 256 MiB `output_bytes` and `retained_bytes` defaults. Under the default profile the run fails with `RESOURCE_LIMIT` before publishing. It succeeds only with both limits raised explicitly to 1 GiB, and then peaks at 5.14 GB of process RSS. Each primary evidence record repeats the full candidate observations that the candidate evidence table also holds; slimming that is a format change for earlier tickets' evidence contract, so it was left for a decision. See [workload-100k.md](workload-100k.md). |
-| Bound validation with `data_checks = "none"` inspects schemas without decoding records | Partly met | CSV reads only the header and XLSX only up to the header row, but the JSON check parses the whole document to resolve the array and header pointers. No records are decoded or type-checked, but the full document is read and parsed. |
 | XLSX preflight and decompression accounting before range allocation | Met, with a limitation | The preflight decompresses and counts every part, including sheets the binding does not name. A large unrelated sheet can exceed `xlsx_bytes` or `worksheet_cells` and fail the run. This is stricter than the clause, not weaker. |
 | Reject cross-device or unsupported publication | Unverified | `renameat2(RENAME_NOREPLACE)` failing with `EXDEV` maps to `CROSS_DEVICE`, and `ENOSYS`, `EINVAL` or `EOPNOTSUPP` to `PUBLICATION_UNSUPPORTED`. Staging is a sibling of the destination, so `EXDEV` needs a mount point between them. Every path here is on one device (`stat` reports device 65105 for `/tmp` and the repository), and creating a mount needs privileges this machine does not grant. |
 | Manifest separates tracked reservations from measured peak RSS | Met, with a limitation | `peak_rss` is the process's `VmHWM`, a lifetime high-water mark for the whole process. It is not per run, and it includes earlier runs and anything else in the process. A per-run figure would need a separate process or cgroup, which decision #13 rules out as a hidden mechanism. |
 | Measure and report cancellation latency | Met, with a finding | `examples/workload.rs` measured two 100,000-line runs ([workload-100k.md](workload-100k.md)): 0.31 s from request to return during parsing, and 25.2 s during output building. The second delay was not diagnosed; freeing the partly built evidence under swap is the likely cost. No latency bound is promised. |
 | Internal batches are Arrow `RecordBatch` with declared schema, Decimal128/Date32 and validity bits (decision #12) | Partly met | Adapters convert each source to typed Arrow batches of at most `batch_rows` rows. The executor then keeps the observations as rows, and its checked arithmetic, quantization and aggregation run in Rust over those rows. Only lookup candidate pairs go through DataFusion. This is the semantic boundary decision #11 allows, but calculations do not run over Arrow arrays. |
-| Source adapters report schema, identity, capabilities and location (decision #4) | Partly met | Adapters report schema (bound validation), binding identity and fingerprint, and per-record location. There is no capability descriptor per adapter. Capability is the fixed set of three built-in adapters, and an unknown adapter fails with `UNSUPPORTED_CAPABILITY`. |
 
 ## Closed in this ticket
 

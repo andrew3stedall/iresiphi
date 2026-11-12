@@ -717,6 +717,58 @@ fn check<'a>(report: &'a Report, id: &str) -> &'a iresiphi::validation::Check {
 }
 
 #[test]
+fn schema_only_json_checks_escaped_headers_and_nested_array_pointers() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nested.json");
+    let mut doc = json!({
+        "format_version":"0.1", "name":"nested-schema",
+        "sources":[{"id":"lines", "identity":["supplier","id"],
+            "grain":["supplier","id"], "projection":{
+                "array":"/payload/0/a~1b", "fields":{
+                    "supplier":{"path":"/head~1er/~0name", "header":true, "data_type":{"kind":"string"}},
+                    "id":{"path":"/id", "data_type":{"kind":"string"}}
+                }}}],
+        "outputs":[{"id":"review", "anchor":"lines", "columns":[
+            {"name":"id", "expr":{"op":"field", "source":"lines", "field":"id"}}
+        ]}]
+    });
+    let bindings: Bindings =
+        serde_json::from_value(json!({"lines":{"path":path, "adapter":"json"}})).unwrap();
+    let policy = Policy {
+        allowed_read_roots: vec![dir.path().into()],
+        allowed_output_roots: vec![dir.path().into()],
+        limits: Limits::default(),
+        diagnostic_values: false,
+    };
+    std::fs::write(
+        &path,
+        r#"{"head/er":{"~name":"A"},"payload":[{"a/b":[{"id":"1"},{"id":"2"}]}]}"#,
+    )
+    .unwrap();
+    let recipe = load(&doc).unwrap();
+    assert!(validate_bound(&recipe, &bindings, &policy, "none").valid);
+    assert!(validate_bound(&recipe, &bindings, &policy, "full").valid);
+    doc["sources"][0]["projection"]["array"] = json!("/payload/00/a~1b");
+    assert_eq!(
+        first_error(&validate_bound(
+            &load(&doc).unwrap(),
+            &bindings,
+            &policy,
+            "none"
+        ))
+        .as_deref(),
+        Some("INVALID_VALUE")
+    );
+    std::fs::write(&path, r#"{"head/er":null,"payload":[{"a/b":[]}]}"#).unwrap();
+    assert!(!validate_bound(&recipe, &bindings, &policy, "none").valid);
+    std::fs::write(&path, r#"{"head/er":"scalar","payload":[{"a/b":[]}]}"#).unwrap();
+    assert_eq!(
+        first_error(&validate_bound(&recipe, &bindings, &policy, "none")).as_deref(),
+        Some("INVALID_VALUE")
+    );
+}
+
+#[test]
 fn bound_validation_distinguishes_none_and_full_coverage() {
     let (dir, recipe, bindings, policy) = bound_fixture();
     let none = validate_bound(&recipe, &bindings, &policy, "none");
@@ -724,6 +776,13 @@ fn bound_validation_distinguishes_none_and_full_coverage() {
     assert_eq!(check(&none, "access").status, "passed");
     assert_eq!(check(&none, "data").status, "not-run");
     assert!(none.checks.iter().all(|c| !c.id.starts_with("data.")));
+    let explanation = iresiphi::validation::explain_bound(&recipe, &bindings, &policy);
+    for read in explanation["bound"]["reads"].as_array().unwrap() {
+        assert_eq!(read["capabilities"]["location"], "local");
+        assert_eq!(read["capabilities"]["typed_read"], true);
+        assert_eq!(read["capabilities"]["pushdown"], false);
+        assert_eq!(read["capabilities"]["streaming"], false);
+    }
     let full = validate_bound(&recipe, &bindings, &policy, "full");
     assert!(full.valid, "{full:?}");
     for id in [
