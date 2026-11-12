@@ -1,4 +1,8 @@
-use crate::model::*;
+use crate::{
+    admission::{PARTITIONS, RunControl, WORKER_THREAD, busy, engine_batch_rows, run_id},
+    cancel::{Cancellation, RunPhase},
+    model::*,
+};
 use datafusion::{
     arrow::{
         array::{StringArray, UInt64Array},
@@ -37,37 +41,47 @@ pub struct RunReport {
 pub struct ExecutionContext {
     busy: AtomicBool,
 }
-struct Busy<'a>(&'a AtomicBool);
+pub(crate) struct Busy<'a>(&'a AtomicBool);
 impl Drop for Busy<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
     }
 }
 impl ExecutionContext {
-    pub fn run(
+    /// Run `recipe` to memory results. `cancel` is any [`Cancellation`] source:
+    /// `&AtomicBool`, `&Arc<AtomicBool>` or a [`crate::CancellationToken`].
+    pub fn run<C: Cancellation + ?Sized>(
         &self,
         recipe: &Recipe,
         bindings: &Bindings,
         policy: &Policy,
-        cancel: &AtomicBool,
+        cancel: &C,
     ) -> RunReport {
-        let id = format!(
-            "{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
-        let started = Instant::now();
+        let Some(_busy) = self.admit() else {
+            return busy(policy);
+        };
+        let control = RunControl::new(&cancel, policy);
+        let mut report = self.run_admitted(recipe, bindings, policy, &control);
+        control.record(&mut report, recipe, policy);
+        report
+    }
+    /// Admission: one active run per execution context.
+    fn admit(&self) -> Option<Busy<'_>> {
         if self.busy.swap(true, Ordering::AcqRel) {
-            return failed(
-                id,
-                Error::new("RUN_BUSY", "admission", "execution context already active"),
-                started,
-            );
+            None
+        } else {
+            Some(Busy(&self.busy))
         }
-        let _busy = Busy(&self.busy);
+    }
+    fn run_admitted(
+        &self,
+        recipe: &Recipe,
+        bindings: &Bindings,
+        policy: &Policy,
+        cancel: &RunControl<'_>,
+    ) -> RunReport {
+        let id = run_id();
+        let started = Instant::now();
         let report = crate::validation::validate(recipe);
         if !report.valid {
             return failed(
@@ -101,7 +115,7 @@ impl ExecutionContext {
         }
     }
 }
-fn failed(id: String, error: Error, started: Instant) -> RunReport {
+pub(crate) fn failed(id: String, error: Error, started: Instant) -> RunReport {
     let status = if error.code == "CANCELLED" {
         "cancelled"
     } else {
@@ -123,8 +137,22 @@ fn check(cancel: &AtomicBool) -> Result<()> {
         Ok(())
     }
 }
-fn engine_error(e: impl std::fmt::Display) -> Error {
-    Error::new("EXECUTION_ERROR", "execution", e.to_string())
+fn engine_error(e: impl std::fmt::Display + 'static) -> Error {
+    // A stateful operator that cannot reserve within the tracked pool fails; it never spills.
+    let exhausted = (&e as &dyn std::any::Any)
+        .downcast_ref::<datafusion::error::DataFusionError>()
+        .is_some_and(|e| {
+            matches!(
+                e.find_root(),
+                datafusion::error::DataFusionError::ResourcesExhausted(_)
+            )
+        });
+    let code = if exhausted {
+        "RESOURCE_LIMIT"
+    } else {
+        "EXECUTION_ERROR"
+    };
+    Error::new(code, "execution", e.to_string())
 }
 fn key(row: &Row, keys: &[String]) -> Option<String> {
     let values: Vec<_> = keys
@@ -205,7 +233,7 @@ fn execute(
     recipe: &Recipe,
     bindings: &Bindings,
     policy: &Policy,
-    cancel: &AtomicBool,
+    cancel: &RunControl<'_>,
 ) -> Result<(
     BTreeMap<String, Table>,
     Vec<serde_json::Value>,
@@ -214,6 +242,7 @@ fn execute(
     Vec<Error>,
 )> {
     check(cancel)?;
+    cancel.entered(RunPhase::Parse);
     let sources = crate::adapters::read_sources(recipe, bindings, policy, cancel)?;
     for source in &recipe.sources {
         let rows = &sources[&source.id];
@@ -227,7 +256,7 @@ fn execute(
         }
     }
     let runtime = RuntimeEnvBuilder::new()
-        .with_memory_limit(policy.limits.engine_bytes, 1.0)
+        .with_memory_pool(cancel.memory_pool())
         .with_disk_manager_builder(
             DiskManagerBuilder::default().with_mode(DiskManagerMode::Disabled),
         )
@@ -235,12 +264,15 @@ fn execute(
         .map_err(engine_error)?;
     let ctx = SessionContext::new_with_config_rt(
         SessionConfig::new()
-            .with_target_partitions(2)
-            .with_batch_size(policy.limits.batch_rows.min(8192).max(1)),
+            .with_target_partitions(PARTITIONS)
+            .with_batch_size(engine_batch_rows(policy))
+            .with_repartition_joins(false)
+            .with_round_robin_repartition(false),
         runtime,
     );
     let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
+        .worker_threads(PARTITIONS)
+        .thread_name(WORKER_THREAD)
         .enable_all()
         .build()
         .map_err(engine_error)?;
@@ -372,6 +404,7 @@ fn execute(
                 .gt_eq(col("r_start"))
                 .and(col("r_end").is_null().or(col("l_date").lt(col("r_end"))))
         });
+        cancel.entered(RunPhase::Join);
         let batches: Vec<RecordBatch> = rt.block_on(async {
             let frame=left_frame.join(right_frame,JoinType::Inner,&["l_key"],&["r_key"],temporal)?.select_columns(&["l_idx","r_idx"])?;
             let work=frame.collect();tokio::pin!(work);
@@ -629,82 +662,27 @@ fn orphan_details(
         .collect()
 }
 impl ExecutionContext {
-    pub fn run_bundle(
+    /// Run `recipe` and deliver one local directory bundle at a NEW `destination`.
+    /// The context stays busy until delivery finishes; after the atomic commit the
+    /// run cannot be cancelled.
+    pub fn run_bundle<C: Cancellation + ?Sized>(
         &self,
         recipe: &Recipe,
         bindings: &Bindings,
         policy: &Policy,
         destination: &std::path::Path,
-        cancel: &AtomicBool,
+        cancel: &C,
     ) -> RunReport {
-        let mut report = self.run(recipe, bindings, policy, cancel);
+        let Some(_busy) = self.admit() else {
+            return busy(policy);
+        };
+        let control = RunControl::new(&cancel, policy);
+        let mut report = self.run_admitted(recipe, bindings, policy, &control);
+        control.record(&mut report, recipe, policy);
         if report.status == "failed" || report.status == "cancelled" {
             return report;
         }
-        let mut schema = serde_json::Map::new();
-        for output in &recipe.outputs {
-            let mut columns: Vec<_> = output.columns.iter().filter(|c|output.aggregates.is_empty()||output.group_by.contains(&c.name)).map(|c|serde_json::json!({"name":c.name,"type":crate::validation::expression_type(&c.expr,recipe).ok().flatten()})).collect();
-            for aggregate in &output.aggregates {
-                let mut ty = crate::validation::expression_type(&aggregate.expr, recipe)
-                    .ok()
-                    .flatten();
-                if aggregate.function.starts_with("count_") {
-                    ty = Some(Type::Int64);
-                } else if aggregate.function == "sum" {
-                    if let Some(Type::Decimal { scale, .. }) = ty {
-                        ty = Some(Type::Decimal {
-                            precision: 38,
-                            scale,
-                        });
-                    }
-                }
-                columns.push(serde_json::json!({"name":aggregate.name,"type":ty}));
-            }
-            columns.push(serde_json::json!({"name":"_status","type":{"kind":"string"}}));
-            schema.insert(output.id.clone(), serde_json::json!({"columns":columns}));
-        }
-        let evidence_table = report
-            .evidence
-            .iter()
-            .map(|record| {
-                BTreeMap::from([(
-                    "record_json".into(),
-                    Value::String {
-                        value: record.to_string(),
-                    },
-                )])
-            })
-            .collect();
-        report.tables.insert("_evidence".into(), evidence_table);
-        schema.insert(
-            "_evidence".into(),
-            serde_json::json!({"columns":[{"name":"record_json","type":{"kind":"string"}}]}),
-        );
-        match crate::sink::publish_bundle(
-            destination,
-            policy,
-            &report.tables,
-            &serde_json::Value::Object(schema),
-            &report.manifest,
-            cancel,
-        ) {
-            Ok(bytes) => {
-                report.manifest["bytes_written"] = serde_json::json!(bytes);
-                report.manifest["bundle"] = serde_json::json!(destination);
-            }
-            Err(error) => {
-                report.status = if error.code == "CANCELLED" {
-                    "cancelled"
-                } else {
-                    "failed"
-                }
-                .into();
-                report.tables.clear();
-                report.evidence.clear();
-                report.manifest["complete"] = serde_json::json!(false);
-                report.diagnostics.push(error);
-            }
-        }
+        crate::admission::deliver(&mut report, recipe, policy, destination, &control);
         report
     }
 }
