@@ -28,6 +28,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Verify x86 runner
         shell: bash
@@ -54,18 +55,30 @@ jobs:
         run: terraform -chdir=infra/github validate
 
   rust:
-    name: Rust tests and workload (x86)
-    runs-on: ${{ vars.CI_X86_RUNNER || 'ubuntu-24.04' }}
+    name: Rust tests and workload (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86
+            runner: ${{ vars.CI_X86_RUNNER || 'ubuntu-24.04' }}
+            machine: x86_64
+          - arch: arm
+            runner: ubuntu-24.04-arm
+            machine: aarch64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
       CARGO_BUILD_JOBS: "2"
+      IRESIPHI_EXPECTED_ARCH: ${{ matrix.machine }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Verify architecture and install pinned Rust
         run: |
-          test "$(uname -m)" = x86_64
+          test "$(uname -m)" = "$IRESIPHI_EXPECTED_ARCH"
           rustup toolchain install 1.94.0 --profile minimal --component rustfmt
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -73,21 +86,41 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: rust-x86-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'examples/**') }}
-          restore-keys: rust-x86-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+          key: rust-${{ matrix.arch }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'examples/**') }}
+          restore-keys: rust-${{ matrix.arch }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
       - run: cargo fmt --all -- --check
       - run: cargo test --locked --all-targets
       - name: Verify dependency notices
         run: |
           python3 scripts/third_party_notices.py --output /tmp/THIRD_PARTY_NOTICES.md
           diff -u THIRD_PARTY_NOTICES.md /tmp/THIRD_PARTY_NOTICES.md
+      - name: Set up ARM CPython 3.12
+        if: matrix.arch == 'arm'
+        id: arm-python312
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+          architecture: arm64
+      - name: Set up ARM CPython 3.13
+        if: matrix.arch == 'arm'
+        id: arm-python313
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+          architecture: arm64
+      - name: Build and test installed native ARM wheels
+        if: matrix.arch == 'arm'
+        env:
+          IRESIPHI_PY312: ${{ steps.arm-python312.outputs.python-path }}
+          IRESIPHI_PY313: ${{ steps.arm-python313.outputs.python-path }}
+        run: bash scripts/ci/test-arm-wheels.sh
       - name: Measure complete 100,000-line workload and cancellation
         run: bash scripts/ci/workload.sh
       - name: Preserve workload evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: x86-workload-${{ github.sha }}
+          name: ${{ matrix.arch }}-workload-${{ github.event.pull_request.head.sha || github.sha }}
           path: ci-artifacts
           if-no-files-found: warn
 
@@ -102,6 +135,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Build from sdist and audit wheels
         run: |
           test "$(uname -m)" = x86_64
@@ -122,7 +156,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: x86-distributions-${{ github.sha }}
+          name: x86-distributions-${{ github.event.pull_request.head.sha || github.sha }}
           path: ci-artifacts
           if-no-files-found: warn
 

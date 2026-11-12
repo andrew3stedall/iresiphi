@@ -9,8 +9,9 @@ A clause is blocked when it needs something this machine or this ticket cannot p
 The initial x86 wheel build, audits and fresh glibc 2.28 installs are now verified
 by [GitHub Actions](ci-x86.md). The workflow reruns these gates for later commits.
 Standards/spec reviews identified output-name, currency-scope and diagnostic-count
-errors; regression fixes are on main. Latest source-capability/schema changes await
-their own final workflow result before release certification.
+errors; regression fixes are on main. Source-capability and schema-inspection
+changes passed the complete PR #25 workflow. Later changes still require their
+own ARM and x86 evidence before acceptance.
 
 | Clause | Status | Reason |
 | --- | --- | --- |

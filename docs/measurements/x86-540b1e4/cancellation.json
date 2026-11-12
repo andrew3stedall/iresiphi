@@ -1,0 +1,176 @@
+{
+  "cancel_after_ms": 50,
+  "cancel_to_return_us": 990,
+  "diagnostics": [
+    {
+      "affected_count": null,
+      "check": "cancellation",
+      "code": "CANCELLED",
+      "message": "source read cancelled",
+      "phase": "source",
+      "severity": "error",
+      "subject": "source:a"
+    }
+  ],
+  "manifest": {
+    "admission": {
+      "active_runs_per_context": 1,
+      "batch_rows": 8192,
+      "partitions": 2,
+      "producer_model": "pull",
+      "queued_batches_per_producer": 2,
+      "spill": false
+    },
+    "bytes_read": 0,
+    "bytes_written": null,
+    "check_results": [
+      {
+        "coverage": "version, references, types, named paths, grain and capabilities",
+        "id": "static",
+        "status": "passed"
+      },
+      {
+        "coverage": "incomplete; the run stopped before this check",
+        "id": "access",
+        "status": "not-run"
+      },
+      {
+        "coverage": "incomplete; the run stopped before this check",
+        "id": "data.types",
+        "status": "not-run"
+      },
+      {
+        "coverage": "incomplete; the run stopped before this check",
+        "id": "data.identity",
+        "status": "not-run"
+      },
+      {
+        "coverage": "incomplete; the run stopped before this check",
+        "id": "data.rate_validity",
+        "status": "not-run"
+      },
+      {
+        "coverage": "incomplete; the run stopped before this check",
+        "id": "data.relationships",
+        "status": "not-run"
+      },
+      {
+        "coverage": "incomplete; the run stopped before this check",
+        "id": "lookup.cardinality",
+        "status": "not-run"
+      },
+      {
+        "coverage": "incomplete; the run stopped before this check",
+        "id": "lookup.coverage",
+        "status": "not-run"
+      },
+      {
+        "coverage": "incomplete; the run stopped before this check",
+        "id": "detail.parent",
+        "status": "not-run"
+      },
+      {
+        "coverage": "incomplete; the run stopped before this check",
+        "id": "output.population",
+        "status": "not-run"
+      },
+      {
+        "coverage": "incomplete; the run stopped before this check",
+        "id": "evidence",
+        "status": "not-run"
+      },
+      {
+        "coverage": "incomplete; the run stopped at this check",
+        "id": "cancellation",
+        "status": "failed"
+      }
+    ],
+    "checks": {
+      "data": "incomplete"
+    },
+    "complete": false,
+    "counts": "incomplete",
+    "data_checks": "full",
+    "diagnostic_values": false,
+    "elapsed_ms": 51,
+    "engine_peak_reservation": {
+      "limit_bytes": 268435456,
+      "peak_bytes": 0,
+      "scope": "tracked DataFusion pool reservations; some engine allocations are untracked",
+      "spill": false
+    },
+    "evidence": "incomplete",
+    "executed_nodes": [],
+    "format_version": "0.1",
+    "limits": {
+      "anchor_rows": 100000,
+      "batch_bytes": 16777216,
+      "batch_rows": 8192,
+      "candidate_pairs": 1000000,
+      "component_rows": 1000000,
+      "engine_bytes": 268435456,
+      "field_bytes": 1048576,
+      "file_bytes": 67108864,
+      "input_bytes": 268435456,
+      "json_depth": 64,
+      "lookup_rows": 100000,
+      "output_bytes": 1073741824,
+      "retained_bytes": 1073741824,
+      "worksheet_cells": 1000000,
+      "xlsx_bytes": 268435456
+    },
+    "package_version": "0.1.0",
+    "peak_rss": {
+      "bytes": 17580032,
+      "scope": "process lifetime high-water mark; includes allocations outside run accounting",
+      "source": "/proc/self/status VmHWM"
+    },
+    "phases_us": {
+      "static_validation": 25,
+      "total": 50441
+    },
+    "policy": {
+      "allowed_output_roots": [
+        "/tmp/tmp.juqjwsEbgZ"
+      ],
+      "allowed_read_roots": [
+        "/tmp/tmp.juqjwsEbgZ"
+      ],
+      "diagnostic_values": false,
+      "limits": {
+        "anchor_rows": 100000,
+        "batch_bytes": 16777216,
+        "batch_rows": 8192,
+        "candidate_pairs": 1000000,
+        "component_rows": 1000000,
+        "engine_bytes": 268435456,
+        "field_bytes": 1048576,
+        "file_bytes": 67108864,
+        "input_bytes": 268435456,
+        "json_depth": 64,
+        "lookup_rows": 100000,
+        "output_bytes": 1073741824,
+        "retained_bytes": 1073741824,
+        "worksheet_cells": 1000000,
+        "xlsx_bytes": 268435456
+      }
+    },
+    "recipe_hash": "c1ec549ae593222c62f3eee9ac31752abb49d796971e27f55c7480cdf198be1c",
+    "reconciliation": "incomplete",
+    "run_id": "12870-1794486723226993332",
+    "source_rows": "incomplete",
+    "sources": {},
+    "timings_ms": {
+      "total": 50
+    },
+    "totals": "incomplete",
+    "unknown_measurements": [
+      "bytes_written"
+    ]
+  },
+  "open_recipe_us": 544,
+  "peak_rss_after_delivery_bytes": 17580032,
+  "rss_before_run_bytes": 12529664,
+  "run_bundle_wall_us": 51215,
+  "status": "cancelled"
+}

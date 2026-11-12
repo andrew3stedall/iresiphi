@@ -22,15 +22,25 @@ and public Rust/Python tests on `main`. Follow-up integration work has fixed:
 
 The final source-reader changes add explicit capabilities to bound explanations
 and source-read manifests, and inspect JSON schema through borrowed spans rather
-than decoding invoice records. Their final workflow result remains an acceptance
-gate before those tickets are closed.
+than decoding invoice records. PR #25 merged after its full x86 workflow passed;
+the [evidence record](measurements/ci-x86.md) identifies the tested commits.
 
 [#24](https://github.com/andrew3stedall/iresiphi/issues/24) adds the executable
 walkthrough, measured 100,000-line workload, notices and distributions. The first
-x86 wheel/audit/clean-install run passed; the latest full Rust, packaging and
-workload run must pass together. Evidence is linked in the
+x86 wheel/audit/clean-install run and the complete PR #25 Rust, packaging and
+workload run passed. Evidence is linked in the
 [x86 record](measurements/ci-x86.md); known contract limitations remain in
 [unmet.md](measurements/unmet.md).
+
+The subsequent consolidation adopts the shared requirement for ARM and x86
+passes at the same commit, and declares the workload's 1 GiB byte limits during
+fixture generation. Its own architecture passes gate completion; issue states
+and workflow results record the current acceptance outcome.
+
+Both architectures have hosted CI jobs at the exact PR head. Native ARM CI
+provides the full workload verification when a local run cannot finish; local
+ARM development remains available. Neither interrupted local workload attempt
+at `72ffd6c` is counted as a pass.
 
 ## Remaining scope
 

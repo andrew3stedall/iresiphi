@@ -16,10 +16,18 @@ substitute for the required workflow evidence.
 
 A change is accepted, and a release gate is met, only when it passes on both architectures at the same commit:
 
-- **ARM (aarch64):** the full Rust suite (`cargo test --locked`), the Python suites on CPython 3.12 and 3.13 against installed wheels, the Rust/Python parity golden, and the 100,000-line workload. These run locally on native ARM.
+- **ARM (aarch64):** the full Rust suite (`cargo test --locked`), the Python suites on CPython 3.12 and 3.13 against installed wheels, the Rust/Python parity golden, and the 100,000-line workload. These run on the native `ubuntu-24.04-arm` GitHub runner; they may also run locally on native ARM.
 - **x86 (x86_64):** the same suites and workload, plus the manylinux_2_28 wheel build, `auditwheel`, and clean-image installs. These run in the GitHub Actions x86 job.
 
-A pass on one architecture does not stand in for the other. Record each pass with its commit; evidence for an earlier commit does not carry forward.
+A pass on one architecture does not stand in for the other. Record each pass with its commit; evidence for an earlier commit does not carry forward. PR workflows check out the PR head SHA explicitly, so local ARM and x86 jobs test the same commit rather than different synthetic merge commits.
+
+The ARM runner provides a complete verification path when local sessions cannot
+finish the workload. Local Rust and Python suites passed at `72ffd6c`, but two
+local workload attempts terminated without a report, so they are not recorded as
+passes. Native ARM CI records the same fixture, explicit limits and result
+assertions as x86 CI. ARM wheels remain development artifacts, without a
+manylinux audit or ARM release-support claim. GitHub documents the native runner
+in its [runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 
 The repository includes the Rust/Python invoice-review preview. CI validates
 Terraform and runs the Rust suite, Python packaging checks and workload evidence
