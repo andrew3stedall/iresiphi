@@ -52,3 +52,76 @@ jobs:
       - name: Validate repository settings
         run: terraform -chdir=infra/github validate
 
+  rust:
+    name: Rust tests and workload (x86)
+    runs-on: ${{ vars.CI_X86_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Verify architecture and install pinned Rust
+        run: |
+          test "$(uname -m)" = x86_64
+          rustup toolchain install 1.94.0 --profile minimal --component rustfmt
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-x86-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'examples/**') }}
+          restore-keys: rust-x86-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+      - run: cargo fmt --all -- --check
+      - run: cargo test --locked --all-targets
+      - name: Verify dependency notices
+        run: |
+          python3 scripts/third_party_notices.py --output /tmp/THIRD_PARTY_NOTICES.md
+          diff -u THIRD_PARTY_NOTICES.md /tmp/THIRD_PARTY_NOTICES.md
+      - name: Measure complete 100,000-line workload and cancellation
+        run: bash scripts/ci/workload.sh
+      - name: Preserve workload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: x86-workload-${{ github.sha }}
+          path: ci-artifacts
+          if-no-files-found: warn
+
+  wheels:
+    name: Audited cp312/cp313 manylinux wheels (x86)
+    runs-on: ${{ vars.CI_X86_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 90
+    env:
+      # Resolved from Quay on 2026-11-12; both build and clean test images are immutable.
+      MANYLINUX_IMAGE: quay.io/pypa/manylinux_2_28_x86_64@sha256:9555ba6c479fa69a2aa80ad1dc57154a60d562b19df159361d9379a02beb1e36
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build from sdist and audit wheels
+        run: |
+          test "$(uname -m)" = x86_64
+          mkdir -p ci-artifacts
+          docker pull "$MANYLINUX_IMAGE"
+          docker image inspect "$MANYLINUX_IMAGE" > ci-artifacts/build-image.json
+          docker run --rm -v "$PWD:/io" "$MANYLINUX_IMAGE" bash /io/scripts/ci/build-wheels.sh
+      - name: Install and test each wheel offline on glibc 2.28
+        run: |
+          for abi in cp312-cp312 cp313-cp313; do
+            docker run --rm --network none \
+              -v "$PWD/ci-artifacts/dist:/dist:ro" \
+              -v "$PWD/tests:/tests:ro" -v "$PWD/scripts:/scripts:ro" \
+              "$MANYLINUX_IMAGE" bash /scripts/ci/test-wheel.sh "$abi" \
+              | tee "ci-artifacts/$abi-clean-install.txt"
+          done
+      - name: Preserve distributions and audit evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: x86-distributions-${{ github.sha }}
+          path: ci-artifacts
+          if-no-files-found: warn
+

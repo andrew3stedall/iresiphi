@@ -13,3 +13,4 @@ crash.*.log
 __pycache__/
 *.so
 *.whl
+/ci-artifacts/

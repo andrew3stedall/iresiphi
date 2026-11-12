@@ -6,14 +6,16 @@ checks `uname -m` before running tools. ARM development machines do not need to
 emulate x86 to run this job. GitHub documents `ubuntu-24.04` as an x64 runner in
 its [runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 
-The repository currently contains design documents, without a Rust crate,
-Python package, TypeScript package, containers, or integration tests. No existing
-dependency has been identified as ARM-incompatible. CI currently checks Terraform
-formatting and validates the repository settings. Add actual ARM-incompatible
-builds, service containers, and integration tests to the `x86` job when they exist;
-record the dependency, version, and architecture limitation here. Portable tests
-should also run on ARM once those tests exist; x86 CI alone does not establish ARM
-package compatibility.
+Every workload that requires x86 must run through GitHub Actions on an x86
+runner. This includes the preview's Linux x86_64 wheels, native dependency audits,
+and minimum-glibc container tests. ARM-compatible builds, tests and processing may
+run locally using native ARM tools and artifacts. Local ARM results establish
+development behavior; they cannot certify an x86 distribution. A local x86
+emulator is not a substitute for the required workflow evidence.
+
+The repository includes the Rust/Python invoice-review preview. CI validates
+Terraform and runs the Rust suite, Python packaging checks and workload evidence
+on x86. TypeScript and ARM release wheels remain deferred by the preview scope.
 
 ## Terraform-managed settings
 
