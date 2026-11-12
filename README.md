@@ -77,7 +77,9 @@ The package name `iresiphi` returned no package record in direct checks of PyPI,
 [CI and processor architecture](docs/ci.md) describes the GitHub-hosted x86 job,
 Terraform-managed repository settings, and where to add ARM-incompatible workloads
 as implementation proceeds. Work requiring x86 must run through GitHub Actions;
-ARM-compatible builds, tests and processing may run locally on ARM.
+ARM-compatible builds, tests and processing may run locally on ARM. Every change
+and release gate needs a pass on both ARM and x86 at the same commit; see
+[Required passes](docs/ci.md#required-passes-arm-and-x86).
 
 ## License
 

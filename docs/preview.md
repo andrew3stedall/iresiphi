@@ -7,6 +7,8 @@ manylinux_2_28 wheels have passed workflow build, audit and clean-install checks
 see the [commit-specific evidence](measurements/ci-x86.md). Each subsequent code
 change must pass those gates again before it is treated as verified.
 
+Every acceptance and release check must pass on both ARM (aarch64) and x86 (x86_64) at the same commit. ARM passes run locally; x86 passes run in GitHub Actions. See [Required passes](ci.md#required-passes-arm-and-x86).
+
 ## Walkthrough: save, reopen, rebind, validate, explain and run
 
 `examples/run.rs` and `examples/run.py` run the same steps through the public API:

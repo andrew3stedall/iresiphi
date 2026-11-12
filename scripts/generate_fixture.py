@@ -2,7 +2,7 @@
 """Create deterministic local invoice-review fixtures using only Python's stdlib.
 
 Example: python scripts/generate_fixture.py /tmp/iresiphi-tiny
-         python scripts/generate_fixture.py /tmp/iresiphi-100k --lines 100000
+         python scripts/generate_fixture.py /tmp/iresiphi-100k --lines 100000 --byte-limit 1073741824
 The seed identifies deterministic arithmetic generation (no PRNG is used): the same
 seed and --lines always produce byte-identical data files and recipe, so the
 `fixture_sha256` printed and written to fixture-manifest.json identifies the fixture.
@@ -97,7 +97,7 @@ def make_recipe():
     sources.append(source("enrichment", {"id": typed("id"), "supplier": typed("supplier"), "amount": typed("amount", "decimal", precision=18, scale=2)}, ["supplier", "id"]))
     return {"format_version": "0.1", "name": "Auditable two-supplier invoice review", "sources": sources, "relationships": list(reversed(relationships)), "features": [], "outputs": outputs, "annotations": {"fixture_seed": SEED}}
 
-def generate(root, count):
+def generate(root, count, byte_limit=None):
     root.mkdir(parents=True, exist_ok=True)
     a, b, components, enrichment = [], [], [], []
     full, comparable, expected_total = 0, 0, 0
@@ -130,7 +130,7 @@ def generate(root, count):
     bindings = {id: {"path": str(root / filename), "adapter": adapter, "settings": {}} for id, filename, adapter in [("a", "a.json", "json"), ("b", "b.json", "json"), ("mapping", "mapping.csv", "csv"), ("rates", "rates.csv", "csv"), ("components", "components.csv", "csv"), ("enrichment", "enrichment.xlsx", "xlsx")]}
     bindings["enrichment"]["settings"] = {"sheet": "Review", "header_row": 1}
     write_json(root / "bindings.json", bindings)
-    write_json(root / "policy.json", {"allowed_read_roots": [str(root)], "allowed_output_roots": [str(root)], "limits": {}, "diagnostic_values": False})
+    write_json(root / "policy.json", {"allowed_read_roots": [str(root)], "allowed_output_roots": [str(root)], "limits": {} if byte_limit is None else {"output_bytes": byte_limit, "retained_bytes": byte_limit}, "diagnostic_values": False})
     inputs = {name: {"sha256": hashlib.sha256((root / name).read_bytes()).hexdigest(), "bytes": (root / name).stat().st_size} for name in ["a.json", "b.json", "mapping.csv", "rates.csv", "components.csv", "enrichment.xlsx", "recipe.iresiphi"]}
     # One digest for the whole fixture: SHA-256 of the compact, key-sorted JSON map
     # of file name to file SHA-256. bindings.json and policy.json hold absolute
@@ -145,7 +145,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     parser.add_argument("--lines", type=int, default=3)
+    parser.add_argument("--byte-limit", type=int, default=None, help="set the policy's output_bytes and retained_bytes limits (the 100,000-line workload uses 1073741824)")
     args = parser.parse_args()
     if args.lines < 3:
         parser.error("--lines must be at least 3")
-    generate(args.directory.resolve(), args.lines)
+    generate(args.directory.resolve(), args.lines, args.byte_limit)
