@@ -1,7 +1,7 @@
 use crate::{
     model::*,
     scalar::{Decimal, Rounding},
-    validation::{expression_type, value_type},
+    validation::{canonical_value, expression_type, value_type},
 };
 use num_bigint::BigInt;
 use std::cmp::Ordering;
@@ -74,6 +74,7 @@ pub fn cast(value: Value, target: &Type) -> Result<Value> {
     if value == Value::Null {
         return Ok(value);
     }
+    let value = canonical_value(&value)?;
     let result = match target {
         Type::String => Value::String {
             value: match value {
@@ -108,7 +109,12 @@ pub fn cast(value: Value, target: &Type) -> Result<Value> {
         }
         Type::Decimal { precision, scale } => {
             let text = match &value {
-                Value::String { value } | Value::Int64 { value } => value.clone(),
+                Value::String { value } => value.clone(),
+                // Integer text is always well formed, so failure is narrowing overflow.
+                Value::Int64 { value } => {
+                    return Ok(dv(Decimal::parse(value, *precision, *scale)
+                        .map_err(|e| fail("ARITHMETIC_OVERFLOW", e.to_string()))?));
+                }
                 Value::Decimal { .. } => {
                     let d = decimal(&value)?;
                     let out = d
@@ -139,7 +145,7 @@ pub fn cast(value: Value, target: &Type) -> Result<Value> {
             _ => return Err(fail("INVALID_CAST", "invalid Boolean cast")),
         },
     };
-    value_type(&result)?;
+    value_type(&result).map_err(|e| fail("INVALID_CAST", e.message))?;
     Ok(result)
 }
 /// Evaluate checked scalar expressions. The executor resolves explicit field paths;
@@ -162,10 +168,7 @@ where
     let mut next = |e: &Expr| evaluate(e, r, resolver, depth + 1);
     use Expr::*;
     match expr {
-        Literal { value } => {
-            value_type(value)?;
-            Ok(value.clone())
-        }
+        Literal { value } => canonical_value(value),
         Field {
             source,
             field,
@@ -247,6 +250,34 @@ where
         IsNull { expr } => Ok(Value::Boolean {
             value: next(expr)? == Value::Null,
         }),
+        ValidOn {
+            date,
+            valid_from,
+            valid_to,
+        } => {
+            let date = next(date)?;
+            let start = next(valid_from)?;
+            let end = next(valid_to)?;
+            let (Value::Date { value: date }, Value::Date { value: start }) = (&date, &start)
+            else {
+                // A missing date or lower bound leaves validity unknown.
+                return Ok(Value::Null);
+            };
+            match &end {
+                Value::Null => Ok(bv(Some(start <= date))),
+                Value::Date { value: end } if end <= start => Err(fail(
+                    "INVALID_INTERVAL",
+                    "validity interval requires valid_from < valid_to",
+                )),
+                // ISO YYYY-MM-DD text orders chronologically.
+                Value::Date { value: end } => Ok(bv(Some(start <= date && date < end))),
+                _ => Err(fail("TYPE_MISMATCH", "valid_to must be a date")),
+            }
+        }
+        Divide { .. } => Err(fail(
+            "UNSUPPORTED_OPERATION",
+            "division is deferred in format 0.1",
+        )),
         Coalesce { values } => {
             for e in values {
                 let value = next(e)?;
