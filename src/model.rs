@@ -136,6 +136,12 @@ pub enum Expr {
         left: Box<Expr>,
         right: Box<Expr>,
     },
+    /// Representable so that documents fail with an explicit diagnostic, but
+    /// division is deferred in format 0.1 and always rejected statically.
+    Divide {
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
     Equal {
         left: Box<Expr>,
         right: Box<Expr>,
@@ -161,6 +167,13 @@ pub enum Expr {
     },
     IsNull {
         expr: Box<Expr>,
+    },
+    /// Rate-validity predicate: `valid_from <= date < valid_to`, where a null
+    /// `valid_to` is an explicit open-ended upper bound.
+    ValidOn {
+        date: Box<Expr>,
+        valid_from: Box<Expr>,
+        valid_to: Box<Expr>,
     },
     Coalesce {
         values: Vec<Expr>,
@@ -323,4 +336,20 @@ pub struct BundledDefinition {
     pub content_hash: String,
     #[serde(default)]
     pub provenance: Option<String>,
+}
+
+/// In-memory catalog of reusable declarations. Bundling copies a declaration
+/// into a recipe so the saved document never refers back to the catalog.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Catalog {
+    pub name: String,
+    #[serde(default)]
+    pub revision: Option<String>,
+    #[serde(default)]
+    pub sources: Vec<Source>,
+    #[serde(default)]
+    pub relationships: Vec<Relationship>,
+    #[serde(default)]
+    pub features: Vec<Feature>,
 }
