@@ -766,15 +766,16 @@ fn manifest_records_decision9_run_evidence() {
     );
     assert_eq!(m["resolved_rows"], 2);
     assert_eq!(m["unresolved_rows"], 1);
-    for unknown in ["peak_rss", "engine_peak_reservation", "bytes_written"] {
-        assert!(
-            m["unknown_measurements"]
-                .as_array()
-                .unwrap()
-                .contains(&json!(unknown)),
-            "{unknown}"
-        );
-    }
+    // Memory runs cannot know bytes written; #22 measures the engine reservation
+    // and, where the platform allows, peak RSS — only unmeasured values stay unknown.
+    let unknown = m["unknown_measurements"].as_array().unwrap();
+    assert!(unknown.contains(&json!("bytes_written")));
+    assert!(!unknown.contains(&json!("engine_peak_reservation")));
+    assert!(m["engine_peak_reservation"]["peak_bytes"].is_number());
+    assert_eq!(
+        unknown.contains(&json!("peak_rss")),
+        m["peak_rss"].get("bytes").is_none()
+    );
     let checks = m["check_results"].as_array().unwrap();
     for id in [
         "static",
