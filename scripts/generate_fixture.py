@@ -3,7 +3,15 @@
 
 Example: python scripts/generate_fixture.py /tmp/iresiphi-tiny
          python scripts/generate_fixture.py /tmp/iresiphi-100k --lines 100000
-The seed identifies deterministic arithmetic generation (no PRNG is used).
+The seed identifies deterministic arithmetic generation (no PRNG is used): the same
+seed and --lines always produce byte-identical data files and recipe, so the
+`fixture_sha256` printed and written to fixture-manifest.json identifies the fixture.
+
+Shape: supplier A and B lines alternate; each supplier has one JSON document whose
+lines carry their own invoice identifier (a new invoice every 100 generated
+lines, so 50 lines per invoice). Line i has i % 4
+observed components (0 to 3), so component counts vary from line to line. Line 3 has
+an unmapped item and stays unresolved. Every line has an XLSX enrichment row.
 """
 import argparse
 import csv
@@ -124,7 +132,12 @@ def generate(root, count):
     write_json(root / "bindings.json", bindings)
     write_json(root / "policy.json", {"allowed_read_roots": [str(root)], "allowed_output_roots": [str(root)], "limits": {}, "diagnostic_values": False})
     inputs = {name: {"sha256": hashlib.sha256((root / name).read_bytes()).hexdigest(), "bytes": (root / name).stat().st_size} for name in ["a.json", "b.json", "mapping.csv", "rates.csv", "components.csv", "enrichment.xlsx", "recipe.iresiphi"]}
-    evidence = {"seed": SEED, "line_count": count, "component_count": len(components), "expected": {"full_billed": str(full), "comparable_billed": str(comparable), "expected": str(expected_total), "variance": str(comparable - expected_total), "unresolved_billed": str(full - comparable), "unresolved_count": 1 if count >= 3 else 0}, "inputs": inputs}
+    # One digest for the whole fixture: SHA-256 of the compact, key-sorted JSON map
+    # of file name to file SHA-256. bindings.json and policy.json hold absolute
+    # paths, so they are excluded; regenerate them for each directory.
+    fixture_sha256 = hashlib.sha256(json.dumps({name: entry["sha256"] for name, entry in inputs.items()}, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    invoices = len({line["invoice"] for line in a} | {line["invoice"] for line in b})
+    evidence = {"seed": SEED, "fixture_sha256": fixture_sha256, "line_count": count, "invoice_count": invoices, "component_count": len(components), "expected": {"full_billed": str(full), "comparable_billed": str(comparable), "expected": str(expected_total), "variance": str(comparable - expected_total), "unresolved_billed": str(full - comparable), "unresolved_count": 1 if count >= 3 else 0}, "inputs": inputs}
     write_json(root / "fixture-manifest.json", evidence)
     print(json.dumps(evidence, indent=2))
 

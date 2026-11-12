@@ -1108,3 +1108,62 @@ fn comparison_summary_selects_resolved_lines_explicitly_and_never_claims_complet
         1
     );
 }
+
+// --- Currency at line grain and without an anchor currency (ticket #24) ----------
+
+#[test]
+fn line_grain_comparison_of_amounts_in_different_currencies_fails() {
+    let mut l = ledger();
+    l.doc["sources"][1]["projection"]["fields"]["currency"] = column("currency", string());
+    l.write("customers", "id,budget,currency\nC1,1000,AUD\nC2,500,USD\n");
+    l.add_column(
+        "headroom",
+        json!({"op":"subtract","left":via("customers","budget",&["customer"]),"right":field("lines","billed")}),
+    );
+    // L3 is billed in AUD against C2's USD budget; L4 (USD) against USD is fine.
+    let report = l.run();
+    assert_eq!(failure(&report), "MIXED_CURRENCY");
+    let d = &report.diagnostics[0];
+    assert_eq!(d.subject.as_deref(), Some("expression:review.headroom"));
+    assert_eq!(d.affected_count, Some(1));
+    assert_eq!(d.samples[0].location, "record:4");
+    // Matching currencies compare normally.
+    l.write("lines", &LINES.replace("L3,C2,AUD", "L3,C2,USD"));
+    let report = l.succeeded();
+    assert_eq!(
+        text(&row(&report.tables["review"], &[("id", "L1")])["headroom"]),
+        "990.00"
+    );
+}
+
+#[test]
+fn grouped_amounts_from_a_currency_source_need_an_anchor_currency() {
+    let mut l = ledger();
+    l.doc["sources"][0]["projection"]["fields"]
+        .as_object_mut()
+        .unwrap()
+        .remove("currency");
+    l.output()["columns"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|c| c["name"] != "currency");
+    l.group(
+        &["customer"],
+        vec![measure(
+            "components",
+            "sum",
+            detail("line_components", "sum", Some("amount")),
+        )],
+    );
+    // Without currency anywhere the grouped sum is accepted.
+    assert_eq!(static_code(&l.recipe()), "valid");
+    // Components that carry a currency cannot be summed across lines whose own
+    // currency is undeclared: nothing would keep USD and AUD apart.
+    l.doc["sources"][2]["projection"]["fields"]["currency"] = column("currency", string());
+    l.write(
+        "components",
+        "id,line,amount,currency\nk1,L1,1,AUD\nk4,L2,4,USD\n",
+    );
+    assert_eq!(static_code(&l.recipe()), "GRAIN_VIOLATION");
+    assert_eq!(failure(&l.run()), "GRAIN_VIOLATION");
+}

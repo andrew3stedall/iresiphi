@@ -8,6 +8,8 @@ version = "0.1.0"
 requires-python = ">=3.12,<3.14"
 description = "Source-preserving local recipe developer preview"
 license = "Apache-2.0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+readme = "README.md"
 
 [tool.maturin]
 features = ["python"]

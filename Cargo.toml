@@ -4,6 +4,29 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
 license = "Apache-2.0"
+description = "Source-preserving local recipes: developer preview of an auditable invoice review"
+repository = "https://github.com/andrew3stedall/iresiphi"
+readme = "README.md"
+# Distributions (the crate and the Python sdist) carry only what builds, tests and
+# documents the library. Vendored agent skills, planning specs and research notes
+# stay in the repository.
+include = [
+    "/src/**",
+    "/examples/**",
+    "/tests/**",
+    "/scripts/generate_fixture.py",
+    "/scripts/third_party_notices.py",
+    "/python/**",
+    "/docs/preview.md",
+    "/docs/measurements/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/pyproject.toml",
+    "/rust-toolchain.toml",
+    "/README.md",
+    "/LICENSE",
+    "/THIRD_PARTY_NOTICES.md",
+]
 
 [lib]
 crate-type = ["rlib", "cdylib"]

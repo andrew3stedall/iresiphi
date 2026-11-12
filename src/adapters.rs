@@ -213,8 +213,11 @@ fn materialize_sources(
             .ok_or_else(|| err("MISSING_BINDING", format!("missing binding {}", source.id)))?;
         let subject = |e: Error| tag_source(e, &source.id);
         check_text_settings(binding).map_err(subject)?;
+        let accessed = std::time::Instant::now();
         let bytes = read_bytes(binding, policy, &mut total, cancel).map_err(subject)?;
         let fingerprint = crate::validation::hex(&Sha256::digest(&bytes));
+        let access_us = micros(accessed);
+        let parsed = std::time::Instant::now();
         let reference = SourceReference {
             source: source.id.clone(),
             binding: binding_identity(binding)?,
@@ -348,6 +351,9 @@ fn materialize_sources(
                     fingerprint: reference.fingerprint.clone(),
                     bytes_read: bytes.len(),
                     rows: rows.len(),
+                    access_us,
+                    parse_us: micros(parsed),
+                    conversion_us: 0,
                 },
             );
         }
@@ -365,6 +371,20 @@ pub struct SourceRead {
     pub fingerprint: String,
     pub bytes_read: usize,
     pub rows: usize,
+    /// Opening, reading and fingerprinting the bytes, in microseconds.
+    #[serde(default)]
+    pub access_us: u64,
+    /// Decoding the bytes into typed, identity-checked observations.
+    #[serde(default)]
+    pub parse_us: u64,
+    /// Converting the observations to typed Arrow batches and back.
+    #[serde(default)]
+    pub conversion_us: u64,
+}
+
+/// Microseconds elapsed since `started`, saturating.
+pub(crate) fn micros(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
 /// Attribute a diagnostic to the source being read unless it already names one.
@@ -398,6 +418,45 @@ pub fn plain_value(value: &Value) -> serde_json::Value {
         | Value::String { value }
         | Value::Decimal { value, .. }
         | Value::Date { value } => serde_json::Value::String(value.clone()),
+    }
+}
+
+/// Value failures collected across a whole source, so the diagnostic carries the
+/// exact number of affected records and bounded references, not only the first.
+/// Structural, policy and budget errors still stop reading at once.
+#[derive(Default)]
+struct ValueFailures {
+    first: Option<Error>,
+    count: usize,
+    samples: Vec<SourceReference>,
+}
+impl ValueFailures {
+    /// Codes that describe one record's value rather than the source's structure.
+    const CODES: [&'static str; 5] = [
+        "INVALID_VALUE",
+        "INVALID_DECIMAL",
+        "INVALID_DATE",
+        "NULL_REQUIRED",
+        "XLSX_CELL_ERROR",
+    ];
+    /// Count a record whose value failed, or return any other error unchanged.
+    fn record(&mut self, error: Error, reference: &SourceReference) -> Result<()> {
+        if !Self::CODES.contains(&error.code.as_str()) {
+            return Err(error);
+        }
+        self.count += 1;
+        if self.samples.len() < Error::SAMPLE_CAP {
+            self.samples.push(reference.clone());
+        }
+        self.first.get_or_insert(error);
+        Ok(())
+    }
+    /// The first failure, with the exact count and the first references.
+    fn finish(self) -> Result<()> {
+        match self.first {
+            None => Ok(()),
+            Some(error) => Err(error.with_affected(self.count, self.samples.iter())),
+        }
     }
 }
 
@@ -746,6 +805,7 @@ fn read_json(
         None => vec![&root],
     };
     let mut rows = RowCollector::new(policy);
+    let mut failures = ValueFailures::default();
     for (index, record) in records.into_iter().enumerate() {
         check_cancel(cancel)?;
         let mut row = Row {
@@ -759,37 +819,44 @@ fn read_json(
             .as_ref()
             .map(|p| format!("{p}/{index}"))
             .unwrap_or_default();
-        for (name, field) in &source.projection.fields {
-            let raw = json_lookup(if field.header { &root } else { record }, &field.path)?
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
-            let text = match &raw {
-                serde_json::Value::Null => None,
-                serde_json::Value::String(s) => Some(s.clone()),
-                serde_json::Value::Number(n)
-                    if matches!(field.data_type, Type::Int64 | Type::Decimal { .. }) =>
-                {
-                    Some(n.to_string())
+        let filled = (|| -> Result<()> {
+            for (name, field) in &source.projection.fields {
+                let raw = json_lookup(if field.header { &root } else { record }, &field.path)?
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let text = match &raw {
+                    serde_json::Value::Null => None,
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    serde_json::Value::Number(n)
+                        if matches!(field.data_type, Type::Int64 | Type::Decimal { .. }) =>
+                    {
+                        Some(n.to_string())
+                    }
+                    serde_json::Value::Bool(b) if field.data_type == Type::Boolean => {
+                        Some(b.to_string())
+                    }
+                    _ => {
+                        return Err(err(
+                            "INVALID_VALUE",
+                            "JSON value type differs from declared scalar type",
+                        ));
+                    }
+                };
+                if matches!(field.data_type, Type::String) && !raw.is_string() && !raw.is_null() {
+                    return Err(err("INVALID_VALUE", "JSON string required"));
                 }
-                serde_json::Value::Bool(b) if field.data_type == Type::Boolean => {
-                    Some(b.to_string())
-                }
-                _ => {
-                    return Err(err(
-                        "INVALID_VALUE",
-                        "JSON value type differs from declared scalar type",
-                    ));
-                }
-            };
-            if matches!(field.data_type, Type::String) && !raw.is_string() && !raw.is_null() {
-                return Err(err("INVALID_VALUE", "JSON string required"));
+                let value = value_from_text(text.as_deref(), field)?;
+                row.raw.insert(name.clone(), raw);
+                row.fields.insert(name.clone(), value);
             }
-            let value = value_from_text(text.as_deref(), field)?;
-            row.raw.insert(name.clone(), raw);
-            row.fields.insert(name.clone(), value);
+            Ok(())
+        })();
+        match filled {
+            Ok(()) => rows.push(row)?,
+            Err(error) => failures.record(error, &row.reference)?,
         }
-        rows.push(row)?;
     }
+    failures.finish()?;
     Ok(rows.rows)
 }
 
@@ -987,6 +1054,7 @@ fn read_csv(
         })
         .collect::<Result<_>>()?;
     let mut rows = RowCollector::new(policy);
+    let mut failures = ValueFailures::default();
     let mut index = 0usize;
     while let Some(record) = reader.next_record()? {
         check_cancel(cancel)?;
@@ -1008,25 +1076,32 @@ fn read_csv(
             reference: reference.clone(),
         };
         row.reference.location = format!("record:{number}");
-        for (name, field, col) in &columns {
-            let original = record[*col].as_str();
-            let decoded = if original.starts_with("\\\\") {
-                &original[1..]
-            } else {
-                original
-            };
-            let text = if dialect.nulls.iter().any(|n| n == original) {
-                None
-            } else {
-                Some(decoded)
-            };
-            row.fields
-                .insert((*name).clone(), value_from_text(text, field)?);
-            row.raw
-                .insert((*name).clone(), serde_json::Value::String(original.into()));
+        let filled = (|| -> Result<()> {
+            for (name, field, col) in &columns {
+                let original = record[*col].as_str();
+                let decoded = if original.starts_with("\\\\") {
+                    &original[1..]
+                } else {
+                    original
+                };
+                let text = if dialect.nulls.iter().any(|n| n == original) {
+                    None
+                } else {
+                    Some(decoded)
+                };
+                row.fields
+                    .insert((*name).clone(), value_from_text(text, field)?);
+                row.raw
+                    .insert((*name).clone(), serde_json::Value::String(original.into()));
+            }
+            Ok(())
+        })();
+        match filled {
+            Ok(()) => rows.push(row)?,
+            Err(error) => failures.record(error, &row.reference)?,
         }
-        rows.push(row)?;
     }
+    failures.finish()?;
     Ok(rows.rows)
 }
 
@@ -1522,6 +1597,7 @@ fn read_xlsx(
         })
         .collect::<Result<_>>()?;
     let mut rows = RowCollector::new(policy);
+    let mut failures = ValueFailures::default();
     let end_row = range.end().unwrap().0;
     let date_system = if epoch1904 { "1904" } else { "1900" };
     for row_index in header_row + 1..=end_row {
@@ -1532,127 +1608,134 @@ fn read_xlsx(
             reference: reference.clone(),
         };
         row.reference.location = format!("{sheet}!{}", row_index + 1);
-        for (name, field, col) in &columns {
-            let cell = range.get_value((row_index, *col)).unwrap_or(&Data::Empty);
-            let formula = formulas
-                .get_value((row_index, *col))
-                .filter(|s| !s.is_empty());
-            if formula.is_some() {
-                if matches!(cell, Data::Empty) {
-                    return Err(err(
-                        "FORMULA_CACHE_MISSING",
-                        "formula requires a stored cached value; formulas are not evaluated",
-                    ));
+        let filled = (|| -> Result<()> {
+            for (name, field, col) in &columns {
+                let cell = range.get_value((row_index, *col)).unwrap_or(&Data::Empty);
+                let formula = formulas
+                    .get_value((row_index, *col))
+                    .filter(|s| !s.is_empty());
+                if formula.is_some() {
+                    if matches!(cell, Data::Empty) {
+                        return Err(err(
+                            "FORMULA_CACHE_MISSING",
+                            "formula requires a stored cached value; formulas are not evaluated",
+                        ));
+                    }
+                    if preflight.full_calc_on_load {
+                        return Err(err(
+                            "FORMULA_CACHE_UNCERTAIN",
+                            "workbook requests recalculation on load, so stored formula results are not established",
+                        ));
+                    }
                 }
-                if preflight.full_calc_on_load {
-                    return Err(err(
-                        "FORMULA_CACHE_UNCERTAIN",
-                        "workbook requests recalculation on load, so stored formula results are not established",
-                    ));
-                }
+                let rounding = settings.quantization.get(name.as_str()).copied();
+                let quantization = || {
+                    rounding.ok_or_else(|| {
+                        err(
+                            "XLSX_QUANTIZATION_REQUIRED",
+                            "numeric decimal cell requires explicit quantization policy",
+                        )
+                    })
+                };
+                let declared_date = || {
+                    if settings.excel_dates.contains(name.as_str()) {
+                        Ok(())
+                    } else {
+                        Err(err(
+                            "INVALID_BINDING",
+                            "numeric date requires excel_dates field declaration",
+                        ))
+                    }
+                };
+                let mut conversion = None;
+                let value = match cell {
+                    Data::Empty => value_from_text(None, field)?,
+                    Data::Error(_) => return Err(err("XLSX_CELL_ERROR", "spreadsheet error cell")),
+                    Data::String(text) => {
+                        limit(text.len() <= policy.limits.field_bytes, "XLSX field bytes")?;
+                        value_from_text(Some(text), field)?
+                    }
+                    Data::Bool(value) if field.data_type == Type::Boolean => {
+                        Value::Boolean { value: *value }
+                    }
+                    Data::Int(value) if field.data_type == Type::Int64 => Value::Int64 {
+                        value: value.to_string(),
+                    },
+                    Data::Float(value) if field.data_type == Type::Int64 => {
+                        // Beyond 2^53 a stored double no longer identifies one integer.
+                        if !value.is_finite()
+                            || value.fract() != 0.0
+                            || value.abs() >= 9007199254740992.0
+                        {
+                            return Err(err(
+                                "INVALID_VALUE",
+                                "XLSX integer is fractional or not exactly representable",
+                            ));
+                        }
+                        Value::Int64 {
+                            value: (*value as i64).to_string(),
+                        }
+                    }
+                    Data::Int(value) if matches!(field.data_type, Type::Decimal { .. }) => {
+                        quantization()?;
+                        value_from_text(Some(&value.to_string()), field)?
+                    }
+                    Data::Float(value) if matches!(field.data_type, Type::Decimal { .. }) => {
+                        let mode = quantization()?;
+                        conversion = Some("shortest_roundtrip_decimal");
+                        numeric_decimal(*value, field, mode)?
+                    }
+                    Data::DateTime(value) if field.data_type == Type::Date => {
+                        declared_date()?;
+                        if value.is_duration() {
+                            return Err(err(
+                                "INVALID_VALUE",
+                                "XLSX duration cell is not a calendar date",
+                            ));
+                        }
+                        excel_date(value.as_f64(), epoch1904)?
+                    }
+                    Data::DateTimeIso(value) if field.data_type == Type::Date => {
+                        value_from_text(Some(value), field)?
+                    }
+                    Data::Int(value) if field.data_type == Type::Date => {
+                        declared_date()?;
+                        excel_date(*value as f64, epoch1904)?
+                    }
+                    Data::Float(value) if field.data_type == Type::Date => {
+                        declared_date()?;
+                        excel_date(*value, epoch1904)?
+                    }
+                    _ => {
+                        return Err(err(
+                            "INVALID_VALUE",
+                            "XLSX cell type differs from declared field",
+                        ));
+                    }
+                };
+                let (cell_type, observed) = xlsx_observed(cell);
+                row.raw.insert(
+                    (*name).clone(),
+                    serde_json::json!({
+                        "cell": format!("{sheet}!{}", cell_label(*col, row_index)),
+                        "cell_type": cell_type,
+                        "observed": observed,
+                        "formula": formula,
+                        "quantization": rounding,
+                        "conversion": conversion,
+                        "date_system": date_system,
+                    }),
+                );
+                row.fields.insert((*name).clone(), value);
             }
-            let rounding = settings.quantization.get(name.as_str()).copied();
-            let quantization = || {
-                rounding.ok_or_else(|| {
-                    err(
-                        "XLSX_QUANTIZATION_REQUIRED",
-                        "numeric decimal cell requires explicit quantization policy",
-                    )
-                })
-            };
-            let declared_date = || {
-                if settings.excel_dates.contains(name.as_str()) {
-                    Ok(())
-                } else {
-                    Err(err(
-                        "INVALID_BINDING",
-                        "numeric date requires excel_dates field declaration",
-                    ))
-                }
-            };
-            let mut conversion = None;
-            let value = match cell {
-                Data::Empty => value_from_text(None, field)?,
-                Data::Error(_) => return Err(err("XLSX_CELL_ERROR", "spreadsheet error cell")),
-                Data::String(text) => {
-                    limit(text.len() <= policy.limits.field_bytes, "XLSX field bytes")?;
-                    value_from_text(Some(text), field)?
-                }
-                Data::Bool(value) if field.data_type == Type::Boolean => {
-                    Value::Boolean { value: *value }
-                }
-                Data::Int(value) if field.data_type == Type::Int64 => Value::Int64 {
-                    value: value.to_string(),
-                },
-                Data::Float(value) if field.data_type == Type::Int64 => {
-                    // Beyond 2^53 a stored double no longer identifies one integer.
-                    if !value.is_finite()
-                        || value.fract() != 0.0
-                        || value.abs() >= 9007199254740992.0
-                    {
-                        return Err(err(
-                            "INVALID_VALUE",
-                            "XLSX integer is fractional or not exactly representable",
-                        ));
-                    }
-                    Value::Int64 {
-                        value: (*value as i64).to_string(),
-                    }
-                }
-                Data::Int(value) if matches!(field.data_type, Type::Decimal { .. }) => {
-                    quantization()?;
-                    value_from_text(Some(&value.to_string()), field)?
-                }
-                Data::Float(value) if matches!(field.data_type, Type::Decimal { .. }) => {
-                    let mode = quantization()?;
-                    conversion = Some("shortest_roundtrip_decimal");
-                    numeric_decimal(*value, field, mode)?
-                }
-                Data::DateTime(value) if field.data_type == Type::Date => {
-                    declared_date()?;
-                    if value.is_duration() {
-                        return Err(err(
-                            "INVALID_VALUE",
-                            "XLSX duration cell is not a calendar date",
-                        ));
-                    }
-                    excel_date(value.as_f64(), epoch1904)?
-                }
-                Data::DateTimeIso(value) if field.data_type == Type::Date => {
-                    value_from_text(Some(value), field)?
-                }
-                Data::Int(value) if field.data_type == Type::Date => {
-                    declared_date()?;
-                    excel_date(*value as f64, epoch1904)?
-                }
-                Data::Float(value) if field.data_type == Type::Date => {
-                    declared_date()?;
-                    excel_date(*value, epoch1904)?
-                }
-                _ => {
-                    return Err(err(
-                        "INVALID_VALUE",
-                        "XLSX cell type differs from declared field",
-                    ));
-                }
-            };
-            let (cell_type, observed) = xlsx_observed(cell);
-            row.raw.insert(
-                (*name).clone(),
-                serde_json::json!({
-                    "cell": format!("{sheet}!{}", cell_label(*col, row_index)),
-                    "cell_type": cell_type,
-                    "observed": observed,
-                    "formula": formula,
-                    "quantization": rounding,
-                    "conversion": conversion,
-                    "date_system": date_system,
-                }),
-            );
-            row.fields.insert((*name).clone(), value);
+            Ok(())
+        })();
+        match filled {
+            Ok(()) => rows.push(row)?,
+            Err(error) => failures.record(error, &row.reference)?,
         }
-        rows.push(row)?;
     }
+    failures.finish()?;
     Ok(rows.rows)
 }
 
@@ -1852,10 +1935,14 @@ pub fn read_sources_observed(
     let sources = into_batches(recipe, policy, cancel, rows)?;
     let mut result = BTreeMap::new();
     for (id, batches) in sources {
+        let converted = std::time::Instant::now();
         let mut rows = Vec::new();
         for batch in batches {
             check_cancel(cancel)?;
             rows.extend(batch?.observations);
+        }
+        if let Some(read) = reads.get_mut(&id) {
+            read.conversion_us = micros(converted);
         }
         result.insert(id, rows);
     }

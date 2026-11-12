@@ -90,7 +90,9 @@ impl ExecutionContext {
         let id = run_id();
         let started = Instant::now();
         let mut progress = Progress::default();
+        let validating = Instant::now();
         let report = crate::validation::validate(recipe);
+        progress.time("static_validation", validating);
         if !report.valid {
             // Fail with the failing check's own diagnostic (for example
             // UNSUPPORTED_OPERATION), keeping the full static report as context.
@@ -249,7 +251,7 @@ fn qualified(rel: &Relationship, left: &Row, right: &Row) -> Result<bool> {
 }
 /// Checks every actual run performs, in execution order. A failed run reports the
 /// checks it completed, the one that failed and the rest as not-run.
-const RUN_CHECKS: [&str; 10] = [
+const RUN_CHECKS: [&str; 11] = [
     "static",
     "access",
     "data.types",
@@ -259,6 +261,7 @@ const RUN_CHECKS: [&str; 10] = [
     "lookup.cardinality",
     "lookup.coverage",
     "detail.parent",
+    "output.population",
     "evidence",
 ];
 /// What a run has established so far; retained on failure for the manifest.
@@ -268,8 +271,15 @@ struct Progress {
     reads: BTreeMap<String, crate::adapters::SourceRead>,
     nodes: Vec<String>,
     timings: BTreeMap<&'static str, u128>,
+    /// Workload phases in microseconds: static and data validation, source access,
+    /// parsing, Arrow conversion, planning, execution and evidence.
+    phases: BTreeMap<&'static str, u64>,
 }
 impl Progress {
+    /// Add the time since `started` to `phase`.
+    fn time(&mut self, phase: &'static str, started: Instant) {
+        *self.phases.entry(phase).or_default() += crate::adapters::micros(started);
+    }
     fn pass(&mut self, id: &str, coverage: impl Into<String>) {
         self.checks.push((id.into(), coverage.into()));
     }
@@ -426,7 +436,17 @@ fn execute(
     let phase = Instant::now();
     let (sources, reads) =
         crate::adapters::read_sources_observed(recipe, bindings, policy, cancel)?;
+    for read in reads.values() {
+        for (phase, us) in [
+            ("source_access", read.access_us),
+            ("parse", read.parse_us),
+            ("conversion", read.conversion_us),
+        ] {
+            *progress.phases.entry(phase).or_default() += us;
+        }
+    }
     progress.reads = reads;
+    let validating = Instant::now();
     let rows_read: usize = sources.values().map(Vec::len).sum();
     progress.pass(
         "access",
@@ -458,8 +478,10 @@ fn execute(
         "data.identity",
         format!("full: declared identity of every record; {rows_read} source records"),
     );
+    progress.time("data_validation", validating);
     progress.timings.insert("read", phase.elapsed().as_millis());
     let phase = Instant::now();
+    let validating = Instant::now();
     let mut validated = 0;
     for rel in &recipe.relationships {
         check_intervals(rel, &sources[&rel.to], policy)?;
@@ -471,6 +493,8 @@ fn execute(
         "data.rate_validity",
         format!("full: every validity interval of every date-qualified lookup target; {validated} interval records"),
     );
+    progress.time("data_validation", validating);
+    let planning = Instant::now();
     let runtime = RuntimeEnvBuilder::new()
         .with_memory_pool(cancel.memory_pool())
         .with_disk_manager_builder(
@@ -523,6 +547,8 @@ fn execute(
             ));
         }
     }
+    progress.time("planning", planning);
+    let executing = Instant::now();
     for rel in ordered {
         check(cancel)?;
         progress.nodes.push(format!("relationship:{}", rel.id));
@@ -814,6 +840,8 @@ fn execute(
     // Distinct anchor lines of primary outputs, resolved only if resolved in every
     // output that selects them; a line read by several outputs is counted once.
     let mut lines: BTreeMap<(&str, usize), bool> = BTreeMap::new();
+    let mut evidence_time = std::time::Duration::ZERO;
+    let mut asserted_lines = 0usize;
     for output in &recipe.outputs {
         progress.nodes.push(format!("output:{}", output.id));
         let parents = output
@@ -826,6 +854,22 @@ fn execute(
         let mut members: Vec<Member> = vec![];
         let mut eligible = 0usize;
         let mut statuses: BTreeMap<&'static str, usize> = BTreeMap::new();
+        // Columns that add, subtract or compare currency amounts, and the lines on
+        // which those amounts carry more than one currency.
+        let currency_checks: Vec<(&str, Vec<(String, Vec<String>)>)> = output
+            .columns
+            .iter()
+            .map(|c| {
+                (
+                    c.name.as_str(),
+                    crate::validation::combined_currency_amounts(&c.expr, recipe),
+                )
+            })
+            .filter(|(_, amounts)| !amounts.is_empty())
+            .collect();
+        let mut mixed: BTreeMap<&str, Vec<&SourceReference>> = BTreeMap::new();
+        let evidence_before = evidence.len();
+        let mut selected: Vec<usize> = vec![];
         for (row_index, row) in anchor_rows.iter().enumerate() {
             check(cancel)?;
             let mut reasons: Vec<Outcome> = vec![];
@@ -902,6 +946,18 @@ fn execute(
                         &mut |s: &str, f: &str, p: &[String]| resolve(&mut reasons, s, f, p),
                     )?,
                 );
+            }
+            for (column, amounts) in &currency_checks {
+                let mut currencies: Vec<Value> = vec![];
+                for (source, path) in amounts {
+                    let currency = resolve(&mut vec![], source, "currency", path)?;
+                    if currency != Value::Null && !currencies.contains(&currency) {
+                        currencies.push(currency);
+                    }
+                }
+                if currencies.len() > 1 {
+                    mixed.entry(column).or_default().push(&row.reference);
+                }
             }
             // Measure inputs at line grain; the lookups they read are part of the
             // line's status.
@@ -1011,6 +1067,7 @@ fn execute(
                 _ => "undeclared".into(),
             };
             population.push((currency, status == "matched"));
+            let recording = Instant::now();
             let mut lookups = vec![];
             for rel in recipe
                 .relationships
@@ -1076,6 +1133,32 @@ fn execute(
                 table.push(values);
             }
             evidence.push(record);
+            selected.push(row_index);
+            evidence_time += recording.elapsed();
+        }
+        check_population(
+            output,
+            anchor_rows,
+            &selected,
+            eligible,
+            evidence.len() - evidence_before,
+            if grouped { members.len() } else { table.len() },
+        )?;
+        asserted_lines += selected.len();
+        if let Some((column, references)) = mixed.into_iter().next() {
+            return Err(Error::new(
+                "MIXED_CURRENCY",
+                "execution",
+                format!(
+                    "{} {} records combine amounts in different currencies in {}.{column}; amounts in different currencies are never summed or compared",
+                    references.len(),
+                    output.anchor,
+                    output.id
+                ),
+            )
+            .with_subject(format!("expression:{}.{column}", output.id))
+            .with_check("expression.currency")
+            .with_affected(references.len(), references.iter().copied()));
         }
         let tally = |s: &str| statuses.get(s).copied().unwrap_or(0);
         let count = if grouped {
@@ -1107,9 +1190,17 @@ fn execute(
         counts.insert(output.id.clone(), count);
         tables.insert(output.id.clone(), table);
     }
+    progress.pass(
+        "output.population",
+        format!(
+            "full: {asserted_lines} anchor lines across {} outputs each appear once in their output and evidence; no line was added, dropped or repeated by lookups or detail",
+            recipe.outputs.len()
+        ),
+    );
     let resolved = lines.values().filter(|r| **r).count();
     let unresolved = lines.len() - resolved;
     let totals = review_totals(recipe, &tables, &populations)?;
+    let budgeting = Instant::now();
     let evidence_rows = candidate_evidence.len() + detail_evidence.len();
     if evidence_rows > policy.limits.candidate_pairs {
         return Err(evidence_budget(format!(
@@ -1128,6 +1219,11 @@ fn execute(
         error.phase = "delivery".into();
         return Err(error);
     }
+    evidence_time += budgeting.elapsed();
+    let evidence_us = u64::try_from(evidence_time.as_micros()).unwrap_or(u64::MAX);
+    *progress.phases.entry("evidence").or_default() += evidence_us;
+    *progress.phases.entry("execution").or_default() +=
+        crate::adapters::micros(executing).saturating_sub(evidence_us);
     progress.pass(
         "evidence",
         format!(
@@ -1372,6 +1468,15 @@ fn manifest_base(
         "total".into(),
         serde_json::json!(started.elapsed().as_millis() as u64),
     );
+    let mut phases: serde_json::Map<_, _> = progress
+        .phases
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), serde_json::json!(v)))
+        .collect();
+    phases.insert(
+        "total".into(),
+        serde_json::json!(crate::adapters::micros(started)),
+    );
     serde_json::json!({
         "run_id": id,
         "format_version": "0.1",
@@ -1385,6 +1490,7 @@ fn manifest_base(
         "executed_nodes": progress.nodes,
         "elapsed_ms": started.elapsed().as_millis(),
         "timings_ms": timings,
+        "phases_us": phases,
         "peak_rss": null,
         "engine_peak_reservation": null,
         "bytes_written": null,
@@ -1463,6 +1569,47 @@ fn finish_failed(
     let mut report = failed(id, error, started);
     report.manifest = manifest;
     report
+}
+
+/// Population and identity invariants of one output, asserted after execution
+/// (decision #11): every selected anchor line appears exactly once, in both the
+/// output (or its group members) and the evidence, and a line-grain output without
+/// a final filter keeps every eligible line.
+fn check_population(
+    output: &Output,
+    anchor_rows: &[Row],
+    selected: &[usize],
+    eligible: usize,
+    evidence_rows: usize,
+    output_lines: usize,
+) -> Result<()> {
+    let mut locations = std::collections::HashSet::with_capacity(selected.len());
+    let repeated = selected
+        .iter()
+        .filter(|&&i| !locations.insert(anchor_rows[i].reference.location.as_str()))
+        .count();
+    let kept_all =
+        output.filter.is_some() || !output.aggregates.is_empty() || selected.len() == eligible;
+    if repeated == 0
+        && evidence_rows == selected.len()
+        && output_lines == selected.len()
+        && eligible <= anchor_rows.len()
+        && kept_all
+    {
+        return Ok(());
+    }
+    Err(Error::new(
+        "POPULATION_INVARIANT",
+        "execution",
+        format!(
+            "output {} broke its population: {} anchor records, {eligible} eligible, {} selected, {output_lines} output lines, {evidence_rows} evidence records, {repeated} repeated",
+            output.id,
+            anchor_rows.len(),
+            selected.len()
+        ),
+    )
+    .with_subject(format!("output:{}", output.id))
+    .with_check("output.population"))
 }
 
 /// Detail records that no one-to-many relationship attaches to any parent are reported

@@ -765,6 +765,142 @@ fn children(e: &Expr) -> Vec<&Expr> {
     }
 }
 
+/// True when `source` declares a `currency` field.
+fn has_currency(r: &Recipe, source: &str) -> bool {
+    r.sources
+        .iter()
+        .find(|s| s.id == source)
+        .is_some_and(|s| s.projection.fields.contains_key("currency"))
+}
+/// True when `source.field` is a decimal amount of a source that declares a currency.
+fn currency_amount(r: &Recipe, source: &str, field: &str) -> bool {
+    has_currency(r, source)
+        && r.sources
+            .iter()
+            .find(|s| s.id == source)
+            .and_then(|s| s.projection.fields.get(field))
+            .is_some_and(|f| matches!(f.data_type, Type::Decimal { .. }))
+}
+/// Line-grain currency amounts an expression reads, as (source, path). Per-line
+/// detail aggregates are excluded: they check their own currencies.
+fn line_amounts(
+    e: &Expr,
+    r: &Recipe,
+    seen: &mut BTreeSet<String>,
+    found: &mut Vec<(String, Vec<String>)>,
+) {
+    match e {
+        Expr::Field {
+            source,
+            field,
+            path,
+        } => {
+            let amount = (source.clone(), path.clone());
+            if currency_amount(r, source, field) && !found.contains(&amount) {
+                found.push(amount);
+            }
+        }
+        Expr::Aggregate { .. } => {}
+        Expr::Feature { id } => {
+            if seen.insert(id.clone()) {
+                if let Some(f) = r.features.iter().find(|f| f.id == *id) {
+                    line_amounts(&f.expr, r, seen, found);
+                }
+                seen.remove(id);
+            }
+        }
+        _ => {
+            for child in children(e) {
+                line_amounts(child, r, seen, found);
+            }
+        }
+    }
+}
+/// Currency amounts that one line-grain expression adds, subtracts or compares
+/// with each other, as (source, path). A run must find one currency among them
+/// on every line: amounts in different currencies are never combined.
+pub(crate) fn combined_currency_amounts(e: &Expr, r: &Recipe) -> Vec<(String, Vec<String>)> {
+    fn walk(
+        e: &Expr,
+        r: &Recipe,
+        seen: &mut BTreeSet<String>,
+        out: &mut Vec<(String, Vec<String>)>,
+    ) {
+        match e {
+            Expr::Add { left, right }
+            | Expr::Subtract { left, right }
+            | Expr::Equal { left, right }
+            | Expr::Less { left, right }
+            | Expr::LessEqual { left, right } => {
+                let mut found = vec![];
+                line_amounts(left, r, seen, &mut found);
+                line_amounts(right, r, seen, &mut found);
+                if found.len() > 1 {
+                    for amount in found {
+                        if !out.contains(&amount) {
+                            out.push(amount);
+                        }
+                    }
+                }
+                walk(left, r, seen, out);
+                walk(right, r, seen, out);
+            }
+            Expr::Aggregate { .. } => {}
+            Expr::Feature { id } => {
+                if seen.insert(id.clone()) {
+                    if let Some(f) = r.features.iter().find(|f| f.id == *id) {
+                        walk(&f.expr, r, seen, out);
+                    }
+                    seen.remove(id);
+                }
+            }
+            _ => {
+                for child in children(e) {
+                    walk(child, r, seen, out);
+                }
+            }
+        }
+    }
+    let mut out = vec![];
+    walk(e, r, &mut BTreeSet::new(), &mut out);
+    out
+}
+/// A source declaring a currency whose amounts a grouped measure input reads.
+fn measure_currency_source(e: &Expr, r: &Recipe, seen: &mut BTreeSet<String>) -> Option<String> {
+    match e {
+        Expr::Field { source, field, .. } => {
+            currency_amount(r, source, field).then(|| source.clone())
+        }
+        Expr::Aggregate {
+            relationship,
+            function,
+            field: Some(_),
+            ..
+        } if ["sum", "min", "max"].contains(&function.as_str()) => r
+            .relationships
+            .iter()
+            .find(|rel| rel.id == *relationship)
+            .filter(|rel| has_currency(r, &rel.to))
+            .map(|rel| rel.to.clone()),
+        Expr::Aggregate { .. } => None,
+        Expr::Feature { id } => {
+            if !seen.insert(id.clone()) {
+                return None;
+            }
+            let found = r
+                .features
+                .iter()
+                .find(|f| f.id == *id)
+                .and_then(|f| measure_currency_source(&f.expr, r, seen));
+            seen.remove(id);
+            found
+        }
+        _ => children(e)
+            .into_iter()
+            .find_map(|child| measure_currency_source(child, r, seen)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Canonical JSON and content identity.
 
@@ -1404,6 +1540,26 @@ fn check_outputs(r: &Recipe) -> Result<()> {
                     out.id
                 ),
             ));
+        }
+        // Without an anchor currency nothing keeps amounts of different currencies
+        // in separate groups, so measures may not read currency-bearing amounts.
+        if !has_currency(r, &out.anchor) {
+            for aggregate in out
+                .aggregates
+                .iter()
+                .filter(|a| ["sum", "min", "max"].contains(&a.function.as_str()))
+            {
+                let input = line_scope(&aggregate.expr, out, true)?;
+                if let Some(source) = measure_currency_source(&input, r, &mut BTreeSet::new()) {
+                    return Err(error(
+                        "GRAIN_VIOLATION",
+                        format!(
+                            "measure {} of grouped output {} reads amounts of {source}, which declares a currency, but anchor {} declares no currency to group by",
+                            aggregate.name, out.id, out.anchor
+                        ),
+                    ));
+                }
+            }
         }
     }
     Ok(())

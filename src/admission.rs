@@ -171,6 +171,99 @@ impl std::ops::Deref for RunControl<'_> {
     }
 }
 
+const RECONCILIATION_COUNTS: [&str; 4] = [
+    "population_rows",
+    "resolved_rows",
+    "unresolved_rows",
+    "null_rows",
+];
+const RECONCILIATION_TOTALS: [&str; 3] =
+    ["population_total", "comparable_total", "unresolved_total"];
+
+/// Typed columns of the bundle's reconciliation table. Totals are exact decimal or
+/// integer text, because one table holds columns of different scales.
+fn reconciliation_schema() -> serde_json::Value {
+    let mut columns = vec![
+        json!({"name":"scope","type":{"kind":"string"}}),
+        json!({"name":"currency","type":{"kind":"string"}}),
+        json!({"name":"column","type":{"kind":"string"}}),
+    ];
+    columns.extend(
+        RECONCILIATION_COUNTS
+            .iter()
+            .map(|n| json!({"name":n,"type":{"kind":"int64"}})),
+    );
+    columns.extend(
+        RECONCILIATION_TOTALS
+            .iter()
+            .map(|n| json!({"name":n,"type":{"kind":"string"},"nullable":true})),
+    );
+    json!({"columns": columns})
+}
+
+/// One row per scope (an output, or `combined`), currency and numeric column: the
+/// manifest's full-population, comparable and unresolved totals as a table. A null
+/// total means some line's value was null, so no complete total exists.
+fn reconciliation(manifest: &serde_json::Value) -> crate::engine::Table {
+    let mut rows = vec![];
+    let mut scopes: Vec<(&str, &serde_json::Value)> = vec![];
+    if let Some(outputs) = manifest["totals"]["by_output"].as_object() {
+        scopes.extend(outputs.iter().map(|(id, totals)| (id.as_str(), totals)));
+    }
+    scopes.push(("combined", &manifest["totals"]["combined"]));
+    let text = |value: &serde_json::Value| match value {
+        serde_json::Value::String(text) => Value::String {
+            value: text.clone(),
+        },
+        _ => Value::Null,
+    };
+    let int = |value: &serde_json::Value| Value::Int64 {
+        value: value.as_u64().unwrap_or(0).to_string(),
+    };
+    for (scope, currencies) in scopes {
+        let Some(currencies) = currencies.as_object() else {
+            continue;
+        };
+        for (currency, totals) in currencies {
+            let Some(columns) = totals["columns"].as_object() else {
+                continue;
+            };
+            for (column, sums) in columns {
+                let mut row = BTreeMap::from([
+                    (
+                        "scope".to_string(),
+                        Value::String {
+                            value: scope.into(),
+                        },
+                    ),
+                    (
+                        "currency".to_string(),
+                        Value::String {
+                            value: currency.clone(),
+                        },
+                    ),
+                    (
+                        "column".to_string(),
+                        Value::String {
+                            value: column.clone(),
+                        },
+                    ),
+                ]);
+                let counts = &totals["rows"];
+                row.insert("population_rows".into(), int(&counts["population"]));
+                row.insert("resolved_rows".into(), int(&counts["resolved"]));
+                row.insert("unresolved_rows".into(), int(&counts["unresolved"]));
+                row.insert("null_rows".into(), int(&sums["null_rows"]));
+                row.insert("population_total".into(), text(&sums["population"]));
+                row.insert("comparable_total".into(), text(&sums["comparable"]));
+                row.insert("unresolved_total".into(), text(&sums["unresolved"]));
+                rows.push(row);
+            }
+        }
+    }
+    rows
+}
+
 /// Publish a successful run as one directory bundle; on failure the report keeps
 /// no results and records the delivery outcome and cleanup evidence.
 pub(crate) fn deliver(
@@ -180,6 +273,7 @@ pub(crate) fn deliver(
     destination: &std::path::Path,
     control: &RunControl<'_>,
 ) {
+    let delivering = std::time::Instant::now();
     let mut schema = output_schema(recipe);
     for (name, records) in [
         ("_evidence", &report.evidence),
@@ -203,6 +297,10 @@ pub(crate) fn deliver(
             json!({"columns":[{"name":"record_json","type":{"kind":"string"}}]}),
         );
     }
+    report
+        .tables
+        .insert("_reconciliation".into(), reconciliation(&report.manifest));
+    schema.insert("_reconciliation".into(), reconciliation_schema());
     // A bundle cannot record its own size: bytes_written is added to the run
     // report only after commit, so it is neither present nor "unknown" inside.
     if let Some(manifest) = report.manifest.as_object_mut() {
@@ -222,6 +320,8 @@ pub(crate) fn deliver(
         control.cancel(),
     ) {
         Ok(published) => {
+            // Like bytes_written, publication time is known only after commit.
+            report.manifest["phases_us"]["delivery"] = json!(crate::adapters::micros(delivering));
             report.manifest["bytes_written"] = json!(published.bytes);
             report.manifest["bundle"] = json!(destination);
             report.manifest["cleanup"] = json!(published.cleanup);
