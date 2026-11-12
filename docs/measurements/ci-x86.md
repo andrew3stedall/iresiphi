@@ -4,6 +4,35 @@ All x86 processing runs in [GitHub Actions](../../.github/workflows/ci.yml).
 Native ARM builds and tests remain useful for local development; only the x86
 workflow provides evidence for the preview distribution target.
 
+## Complete passing preview run
+
+[Run 43215391634](https://github.com/andrew3stedall/iresiphi/actions/runs/43215391634)
+passed all three jobs for PR #25 head
+`540b1e435b919f060044cc30c7863bacd6d88cc3`, tested as merge commit
+`3bc182aa76be8849ff330d77ba4844ed00d280e8`. PR #25 merged as
+`b76a9ed9a0bf91462278ccf233a5bda320fabbeb`.
+
+- Terraform formatting and validation passed.
+- All 229 Rust tests passed, including the Rust/Python parity golden.
+- The sdist and separate cp312/cp313 manylinux_2_28 wheels built and passed
+  auditwheel checks. Each interpreter passed 33 Python tests after an offline
+  wheel installation in a fresh glibc 2.28 container.
+- The complete workload processed 100,000 invoice lines, 2,000 invoices and
+  150,000 observed components under the recorded 1 GiB output/retention limits.
+  It preserved 99,999 resolved lines and one unresolved line, and verified exact
+  totals against the deterministic fixture oracle.
+
+The workload took 29,276,631 microseconds to run and deliver its bundle. It read
+13,464,645 bytes, wrote 815,130,525 bytes and reported process peak RSS of
+8,678,895,616 bytes. A separate cooperative cancellation measurement returned
+990 microseconds after its 50 ms cancellation request. These are observations
+of this run, not performance or memory guarantees.
+
+The [provenance record](x86-540b1e4/provenance.json), full run/cancellation
+manifests, fixture hashes, policies and environment details are retained beside
+this document. Distribution artifacts remain attached to the linked workflow
+run. Subsequent changes require their own passes on both architectures.
+
 ## First verified packaging run
 
 [Run 43209653236](https://github.com/andrew3stedall/iresiphi/actions/runs/43209653236),

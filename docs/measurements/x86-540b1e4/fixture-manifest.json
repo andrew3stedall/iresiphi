@@ -1,0 +1,45 @@
+{
+  "seed": "iresiphi-preview-v1",
+  "fixture_sha256": "b015de79f08da46b05288e2b878304afb6ba644d6459ce737a6993aefdb2bbb6",
+  "line_count": 100000,
+  "invoice_count": 2000,
+  "component_count": 150000,
+  "expected": {
+    "full_billed": "7999910",
+    "comparable_billed": "7999890",
+    "expected": "7249900",
+    "variance": "749990",
+    "unresolved_billed": "20",
+    "unresolved_count": 1
+  },
+  "inputs": {
+    "a.json": {
+      "sha256": "9d7dd5eb5f987ead7864b9fee4af2aab000365abf8d378baa7030f2b3862e976",
+      "bytes": 4039155
+    },
+    "b.json": {
+      "sha256": "e21238fd06a30418b2d60b9a7f0a82257cefd8e952be7c9e2ac2081761957759",
+      "bytes": 4489165
+    },
+    "mapping.csv": {
+      "sha256": "a3df67dce91f7eb1bab73dd55081534d91929f5a18118e321239dffc2ba6ef55",
+      "bytes": 65
+    },
+    "rates.csv": {
+      "sha256": "b0cce2dd9b6294a37cbe2febf1377cab2bbcf7e01e125d8e6a0f549a65eece3b",
+      "bytes": 106
+    },
+    "components.csv": {
+      "sha256": "3b071800121d6675fae869030a65b49debde9bcbfdcf68a8fe99ce1251a3beeb",
+      "bytes": 3550669
+    },
+    "enrichment.xlsx": {
+      "sha256": "a5a35269ab647d3f3f1431b68441b22771f70ccc0c71ba9df9b63faac71934fb",
+      "bytes": 1385485
+    },
+    "recipe.iresiphi": {
+      "sha256": "7cc528355feabea79e3f4f08930123b5d7aefcefd5beeb4ee54b2bde62164967",
+      "bytes": 7555
+    }
+  }
+}
