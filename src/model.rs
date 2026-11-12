@@ -450,6 +450,8 @@ pub fn default_check(code: &str, phase: &str) -> String {
         "LOOKUP_AMBIGUOUS" => "lookup.cardinality".into(),
         "LOOKUP_UNMATCHED" => "lookup.coverage".into(),
         "ORPHAN_DETAIL" => "detail.parent".into(),
+        "MIXED_CURRENCY" => "aggregate.currency".into(),
+        "CONTEXT_NOT_CONSTANT" => "aggregate.context".into(),
         "INVALID_PROJECTION" | "INVALID_BINDING" => "source_schema".into(),
         "POLICY_DENIED" | "SOURCE_ACCESS" | "MISSING_BINDING" | "SOURCE_CHANGED" => "access".into(),
         "RESOURCE_LIMIT" => "budget".into(),
@@ -493,6 +495,12 @@ pub fn default_remediation(code: &str) -> &'static str {
             "Add the missing lookup records or correct the key values; affected lines keep null dependent values."
         }
         "ORPHAN_DETAIL" => "Correct the detail parent keys or supply the missing parent lines.",
+        "MIXED_CURRENCY" => {
+            "Group by currency or filter the aggregate input to one currency; amounts in different currencies are never summed or compared."
+        }
+        "CONTEXT_NOT_CONSTANT" => {
+            "Group by the dimension that owns the broadcast value, or aggregate it from its original source; a context reduction requires equal values."
+        }
         "INVALID_PROJECTION" | "INVALID_BINDING" => {
             "Align the declared projection and binding settings with the source's actual headers, sheets and paths."
         }
@@ -515,12 +523,26 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// A measure of a grouped output (decision #7). `expr` and `filter` are evaluated
+/// at the anchor (line) grain and may reference the output's own line columns,
+/// including `_status`, as `{"op":"field","source":<output id>,"field":<name>}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupAggregate {
     pub name: String,
     pub function: String,
     pub expr: Expr,
+    /// Aggregate input predicate: applied to each line before grouping. It
+    /// excludes lines from this measure only and never changes the group population.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<Expr>,
+    /// Named context reduction: a `min`/`max` of a value broadcast along a to-one
+    /// path, valid only when every non-null value in each group is equal.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub context: bool,
+}
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

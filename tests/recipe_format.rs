@@ -591,6 +591,8 @@ fn explain_reports_unsupported_operations_with_their_node_ids() {
             field: "quantity".into(),
             path: vec![],
         },
+        filter: None,
+        context: false,
     });
     recipe.outputs[0].group_by = vec!["id".into()];
     assert!(!validate(&recipe).valid);
