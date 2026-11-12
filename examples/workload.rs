@@ -86,7 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let diagnostics: Vec<_> = report
         .diagnostics
         .iter()
-        .map(|d| json!({"code":d.code,"severity":d.severity,"subject":d.subject,"affected_count":d.affected_count}))
+        .map(|d| json!({"code":d.code,"severity":d.severity,"phase":d.phase,"check":d.check,"subject":d.subject,"affected_count":d.affected_count,"message":d.message}))
         .collect();
     println!(
         "{}",

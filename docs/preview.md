@@ -99,7 +99,7 @@ The policy sets allowed read and output roots and these limits. The values below
 
 A run that exceeds a limit fails with `RESOURCE_LIMIT` and publishes nothing. Each execution context runs one run at a time, and another attempt gets `RUN_BUSY`. Execution uses two partitions.
 
-These limits do not cap process memory. DataFusion does not track every allocation, the adapters hold each source's rows in memory, and Python owns any values it copies out. The manifest reports the tracked engine reservation peak (`engine_peak_reservation`) separately from the process's peak resident set (`peak_rss`, read from `/proc/self/status`). That peak covers the whole process lifetime, not one run. If you need a hard memory ceiling, run Iresiphi in an OS-isolated process with its own limits. [The 100,000-line measurement](measurements/workload-100k.md) shows what one complete run used on one machine.
+These limits do not cap process memory. DataFusion does not track every allocation, the adapters hold each source's rows in memory, and Python owns any values it copies out. The manifest reports the tracked engine reservation peak (`engine_peak_reservation`) separately from the process's peak resident set (`peak_rss`, read from `/proc/self/status`). That peak covers the whole process lifetime, not one run. If you need a hard memory ceiling, run Iresiphi in an OS-isolated process with its own limits. [The 100,000-line measurement](measurements/workload-100k.md) shows what one complete run used on one machine. At that size the default `output_bytes` and `retained_bytes` are too small for the evidence the run produces (757 MB), so that run raised both to 1 GiB.
 
 ## XLSX: quantization, cached values and limits
 
