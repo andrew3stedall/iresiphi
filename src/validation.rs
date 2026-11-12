@@ -2297,6 +2297,7 @@ pub fn explain_bound(recipe: &Recipe, bindings: &Bindings, policy: &Policy) -> J
         "reads": recipe.sources.iter().map(|source| json!({
             "source": format!("source:{}", source.id),
             "adapter": bindings.get(&source.id).map(|b| &b.adapter),
+            "capabilities": bindings.get(&source.id).map(|b| crate::adapters::adapter_capabilities(&b.adapter)),
             "location": "local",
             "rows": null,
             "bytes": null,

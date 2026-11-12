@@ -2,7 +2,10 @@
 
 This preview runs one workflow: an auditable invoice review. It reads two suppliers' invoice JSON, an XLSX enrichment workbook, and CSV mapping, rate and component tables. Then it compares billed charges with contracted rates and keeps every invoice line, including lines it cannot resolve. It ships as a Rust crate and a Python package that share one Rust core, both at version 0.1.0. The recipe format is versioned separately, at `0.1`.
 
-Nothing has been published to crates.io or PyPI. The supported wheel target, Linux x86_64 manylinux_2_28, has not been built or audited yet; see [Packaging](#packaging).
+Nothing has been published to crates.io or PyPI. The initial Linux x86_64
+manylinux_2_28 wheels have passed workflow build, audit and clean-install checks;
+see the [commit-specific evidence](measurements/ci-x86.md). Each subsequent code
+change must pass those gates again before it is treated as verified.
 
 Every acceptance and release check must pass on both ARM (aarch64) and x86 (x86_64) at the same commit. ARM passes run locally; x86 passes run in GitHub Actions. See [Required passes](ci.md#required-passes-arm-and-x86).
 
@@ -64,7 +67,7 @@ The saved recipe holds no paths, data or secrets. Each run takes its bindings (s
 | Area | In this preview | Deferred |
 | --- | --- | --- |
 | Interfaces | Rust crate `iresiphi`; Python package `iresiphi` on ordinary (GIL) CPython 3.12 and 3.13 | TypeScript, Node, browsers; abi3, free-threaded CPython, PyPy |
-| Platforms | Target: Linux x86_64, glibc 2.28 or later, as manylinux_2_28 wheels. Built and tested so far only on Linux aarch64 (glibc 2.43), which is not a supported target | macOS, Windows and ARM wheels |
+| Platforms | Linux x86_64, glibc 2.28 or later, as manylinux_2_28 wheels, subject to the commit's CI evidence. Native Linux ARM development tests may run locally | macOS, Windows and ARM release wheels |
 | Inputs | Local UTF-8 JSON with one declared array and header fields; local CSV with an explicit dialect; local XLSX with a named sheet, declared header row and typed columns | Dataframes, SQL, Snowflake, Spark, NDJSON, XML, arbitrary text, Parquet, remote stores, network reads |
 | Execution | One local executor; DataFusion 55.2.0 produces lookup candidate pairs | Pushdown, remote staging, hybrid placement, spill to disk |
 | Scalars | Boolean, Int64, UTF-8 string, Decimal128 (precision 1 to 38), calendar date | Floating point, timestamps and time zones |
@@ -76,6 +79,12 @@ The saved recipe holds no paths, data or secrets. Each run takes its bindings (s
 | XLSX formulas | Stored cached values only | Formula evaluation |
 
 Unsupported bindings and operations fail with a diagnostic (`UNSUPPORTED_OPERATION`, `UNSUPPORTED_CAPABILITY`, `INVALID_BINDING`). The library never switches to another executor and never collects data some other way.
+
+Bound explanations and run source-read records report each adapter's capabilities:
+local typed reads with bounded materialization, no pushdown, no streaming and no
+shared snapshot. Run fingerprints identify the bytes actually read. Schema-only
+JSON validation scans borrowed document spans to locate headers and the declared
+array without decoding its records; it still reads the encoded document.
 
 ## Resource profile
 
@@ -173,7 +182,11 @@ A bundle run stages its files in a sibling directory of the destination, named `
 - The Python sdist (`maturin sdist`) contains the Rust sources, `Cargo.toml` and `Cargo.lock`, so building from it needs Rust 1.94.0, a C compiler, and maturin 1.16.0 as the PEP 517 backend.
 - Wheels are built separately for CPython 3.12 and 3.13 (`cp312`, `cp313`) with the `python` feature, which links PyO3 0.30.1.
 
-The release target is Linux x86_64 manylinux_2_28 wheels built in a pinned build image and audited with auditwheel. That has not happened: this preview was built on an aarch64 machine with no x86_64 toolchain or container runtime. [docs/measurements/packaging.md](measurements/packaging.md) records what was built and audited locally, and the external blockers.
+The release target is Linux x86_64 manylinux_2_28 wheels built in a pinned build
+image and audited with auditwheel. Those tasks run through GitHub Actions; ARM
+development builds remain local. The [x86 evidence](measurements/ci-x86.md) and
+[earlier ARM packaging record](measurements/packaging.md) distinguish what was
+actually tested on each platform.
 
 Third-party crate licenses and NOTICE texts are listed in [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md), which `scripts/third_party_notices.py` generates from `Cargo.lock`.
 
