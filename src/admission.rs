@@ -157,6 +157,8 @@ impl<'a> RunControl<'a> {
                 ),
             )
             .is_ok()
+                && (report.allocation_evidence.is_empty()
+                    || serde_json::to_writer(&mut counter, &report.allocation_evidence).is_ok())
             {
                 manifest["retained_result_bytes"] = json!(counter.0);
             }
@@ -279,7 +281,12 @@ pub(crate) fn deliver(
         ("_evidence", &report.evidence),
         ("_candidate_evidence", &report.candidate_evidence),
         ("_detail_evidence", &report.detail_evidence),
+        ("_allocation_evidence", &report.allocation_evidence),
     ] {
+        // Allocation evidence exists only for recipes that allocate.
+        if name == "_allocation_evidence" && records.is_empty() {
+            continue;
+        }
         let evidence_table = records
             .iter()
             .map(|record| {
@@ -342,6 +349,7 @@ pub(crate) fn deliver(
             report.evidence.clear();
             report.candidate_evidence.clear();
             report.detail_evidence.clear();
+            report.allocation_evidence.clear();
             report.manifest["complete"] = json!(false);
             report.manifest["delivery"]["status"] = json!(status);
             report.manifest["delivery"]["committed"] = json!(false);

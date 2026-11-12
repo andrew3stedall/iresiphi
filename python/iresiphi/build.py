@@ -183,13 +183,68 @@ def validity(date, valid_from, valid_to):
     return {"date": date, "valid_from": valid_from, "valid_to": valid_to}
 
 
-def relationship(id, from_, to, from_keys, to_keys, cardinality, validity=None, strict=False):
+def relationship(id, from_, to, from_keys, to_keys, cardinality, validity=None, strict=False,
+                 period=None):
+    """A keyed relationship. ``period`` (see ``period_match``) adds a derived period key
+    to a relationship from a population."""
     declared = {"id": id, "from": from_, "to": to, "from_keys": list(from_keys),
                 "to_keys": list(to_keys), "cardinality": cardinality}
     if validity is not None:
         declared["validity"] = validity
     if strict:
         declared["strict"] = True
+    if period is not None:
+        declared["period"] = period
+    return declared
+
+
+def months(field, values=None, from_=None):
+    """A finite period set of calendar months (``YYYY-MM``), named ``field`` on each member.
+
+    Give either the listed ``values`` or ``from_=(source, field)``: the distinct values
+    of a named field of a named source. Nothing infers the period set."""
+    declared = {"field": field, "calendar": "month"}
+    if values is not None:
+        declared["values"] = list(values)
+    if from_ is not None:
+        source_id, source_field = from_
+        declared["from"] = {"source": source_id, "field": source_field}
+    return declared
+
+
+def population(id, recipients, period, filter=None):
+    """An explicit population: records of ``recipients`` that pass ``filter``, crossed
+    with the ``period`` set (see ``months``). Outputs anchor at ``id``."""
+    declared = {"id": id, "recipients": recipients, "period": period}
+    if filter is not None:
+        declared["filter"] = filter
+    return declared
+
+
+def period_match(key, date):
+    """The member's period field ``key`` equals the calendar month of the target's
+    ``date``. Dates are business-local; nothing converts time zones."""
+    return {"key": key, "date": date, "calendar": "month"}
+
+
+def allocation(name, quantity, partition, via, weight, precision, scale, residual,
+               recipient_filter=None, null_weight=None, unallocated=None):
+    """Allocate ``quantity=(source, field)`` onto an output's population members.
+
+    ``partition`` is the quantity source's grain; ``via`` a many_to_one relationship
+    from the population to that source; ``residual`` is ``"largest_remainder"`` or
+    ``"report"``. ``recipient_filter`` runs before normalization. ``null_weight="zero"``
+    and ``unallocated="report"`` are the declared alternatives to an error."""
+    source_id, field_name = quantity
+    declared = {"name": name, "quantity": {"source": source_id, "field": field_name},
+                "partition": list(partition), "via": via, "weight": weight,
+                "precision": precision, "scale": scale, "residual": residual}
+    if recipient_filter is not None:
+        declared["recipient_filter"] = recipient_filter
+    if null_weight is not None:
+        declared["null_weight"] = null_weight
+    if unallocated is not None:
+        declared["unallocated"] = unallocated
     return declared
 
 
@@ -202,7 +257,7 @@ def column(name, expr):
 
 
 def output(id, anchor, columns, eligibility=None, filter=None, detail=False,
-           group_by=(), aggregates=()):
+           group_by=(), aggregates=(), complete=(), allocations=()):
     declared = {"id": id, "anchor": anchor, "columns": list(columns)}
     if eligibility is not None:
         declared["eligibility"] = eligibility
@@ -214,14 +269,20 @@ def output(id, anchor, columns, eligibility=None, filter=None, detail=False,
         declared["group_by"] = list(group_by)
     if aggregates:
         declared["aggregates"] = list(aggregates)
+    if complete:
+        declared["complete"] = list(complete)
+    if allocations:
+        declared["allocations"] = list(allocations)
     return declared
 
 
 def recipe(name, sources, outputs, relationships=(), features=(),
-           required_capabilities=(), annotations=None):
+           required_capabilities=(), annotations=None, populations=()):
     declared = {"format_version": FORMAT_VERSION, "name": name, "sources": list(sources),
                 "relationships": list(relationships), "features": list(features),
                 "outputs": list(outputs)}
+    if populations:
+        declared["populations"] = list(populations)
     if required_capabilities:
         declared["required_capabilities"] = list(required_capabilities)
     if annotations:

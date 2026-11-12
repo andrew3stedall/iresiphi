@@ -1,0 +1,2763 @@
+{
+  "canonical_json": "{\"bundled_definitions\":{},\"features\":[],\"format_version\":\"0.1\",\"name\":\"customer month targets\",\"outputs\":[{\"aggregates\":[],\"allocations\":[{\"name\":\"allocated_target\",\"partition\":[\"Territory\",\"Period\"],\"precision\":18,\"quantity\":{\"field\":\"Goal\",\"source\":\"targets\"},\"residual\":\"largest_remainder\",\"scale\":2,\"via\":\"region_target\",\"weight\":{\"field\":\"Share\",\"op\":\"field\",\"path\":[],\"source\":\"customer_month\"}}],\"anchor\":\"customer_month\",\"columns\":[{\"expr\":{\"field\":\"CustNo\",\"op\":\"field\",\"path\":[],\"source\":\"customer_month\"},\"name\":\"CustNo\"},{\"expr\":{\"field\":\"month\",\"op\":\"field\",\"path\":[],\"source\":\"customer_month\"},\"name\":\"month\"},{\"expr\":{\"op\":\"literal\",\"value\":{\"kind\":\"string\",\"value\":\"AUD\"}},\"name\":\"currency\"},{\"expr\":{\"field\":\"gross\",\"filter\":null,\"function\":\"sum\",\"op\":\"aggregate\",\"relationship\":\"sales\"},\"name\":\"sales\"},{\"expr\":{\"field\":null,\"filter\":null,\"function\":\"count_records\",\"op\":\"aggregate\",\"relationship\":\"sales\"},\"name\":\"transactions\"},{\"expr\":{\"field\":\"Goal\",\"op\":\"field\",\"path\":[\"region_target\"],\"source\":\"targets\"},\"name\":\"target_context\"}],\"complete\":[\"sales\"],\"detail\":false,\"eligibility\":null,\"filter\":null,\"group_by\":[],\"id\":\"customer_targets\"}],\"populations\":[{\"id\":\"customer_month\",\"period\":{\"calendar\":\"month\",\"field\":\"month\",\"values\":[\"2026-01\",\"2026-02\"]},\"recipients\":\"customers\"}],\"relationships\":[{\"cardinality\":\"many_to_one\",\"from\":\"customer_month\",\"from_keys\":[\"SalesArea\",\"month\"],\"id\":\"region_target\",\"strict\":false,\"to\":\"targets\",\"to_keys\":[\"Territory\",\"Period\"],\"validity\":null},{\"cardinality\":\"one_to_many\",\"from\":\"customer_month\",\"from_keys\":[\"CustNo\"],\"id\":\"sales\",\"period\":{\"calendar\":\"month\",\"date\":\"booked_at\",\"key\":\"month\"},\"strict\":false,\"to\":\"transactions\",\"to_keys\":[\"buyer_ref\"],\"validity\":null}],\"required_capabilities\":[\"allocation\",\"population\"],\"sources\":[{\"grain\":[\"CustNo\"],\"id\":\"customers\",\"identity\":[\"CustNo\"],\"projection\":{\"array\":null,\"fields\":{\"CustNo\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"CustNo\"},\"SalesArea\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"SalesArea\"},\"Share\":{\"data_type\":{\"kind\":\"int64\"},\"header\":false,\"nullable\":false,\"path\":\"Share\"}}}},{\"grain\":[\"Territory\",\"Period\"],\"id\":\"targets\",\"identity\":[\"Territory\",\"Period\"],\"projection\":{\"array\":null,\"fields\":{\"Goal\":{\"data_type\":{\"kind\":\"decimal\",\"precision\":18,\"scale\":2},\"header\":false,\"nullable\":true,\"path\":\"Goal\"},\"Period\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"Period\"},\"Territory\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"Territory\"}}}},{\"grain\":[\"receipt_id\"],\"id\":\"transactions\",\"identity\":[\"receipt_id\"],\"projection\":{\"array\":null,\"fields\":{\"booked_at\":{\"data_type\":{\"kind\":\"date\"},\"header\":false,\"nullable\":true,\"path\":\"booked_at\"},\"buyer_ref\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"buyer_ref\"},\"gross\":{\"data_type\":{\"kind\":\"decimal\",\"precision\":18,\"scale\":2},\"header\":false,\"nullable\":false,\"path\":\"gross\"},\"receipt_id\":{\"data_type\":{\"kind\":\"string\"},\"header\":false,\"nullable\":false,\"path\":\"receipt_id\"}}}}]}",
+  "errors": {
+    "null_weight": {
+      "check": "allocation.weights",
+      "code": "ALLOCATION_NULL_WEIGHT",
+      "phase": "allocation",
+      "status": "failed",
+      "subject": "output:customer_targets/allocation:allocated_target"
+    }
+  },
+  "expected": {
+    "allocation_evidence": [
+      {
+        "allocation": "allocated_target",
+        "assigned_sum": "900.00",
+        "conserved": true,
+        "output": "customer_targets",
+        "partition": {
+          "Period": "2026-01",
+          "Territory": "North"
+        },
+        "policy": "largest_remainder",
+        "quantity": "900.00",
+        "recipient_count": 2,
+        "residual": "0.00",
+        "status": "allocated",
+        "weight_sum": "4"
+      },
+      {
+        "allocation": "allocated_target",
+        "assigned_sum": "300.00",
+        "conserved": true,
+        "output": "customer_targets",
+        "partition": {
+          "Period": "2026-01",
+          "Territory": "South"
+        },
+        "policy": "largest_remainder",
+        "quantity": "300.00",
+        "recipient_count": 1,
+        "residual": "0.00",
+        "status": "allocated",
+        "weight_sum": "1"
+      },
+      {
+        "allocation": "allocated_target",
+        "assigned_sum": "800.00",
+        "conserved": true,
+        "output": "customer_targets",
+        "partition": {
+          "Period": "2026-02",
+          "Territory": "North"
+        },
+        "policy": "largest_remainder",
+        "quantity": "800.00",
+        "recipient_count": 2,
+        "residual": "0.00",
+        "status": "allocated",
+        "weight_sum": "4"
+      },
+      {
+        "allocation": "allocated_target",
+        "assigned_sum": "400.00",
+        "conserved": true,
+        "output": "customer_targets",
+        "partition": {
+          "Period": "2026-02",
+          "Territory": "South"
+        },
+        "policy": "largest_remainder",
+        "quantity": "400.00",
+        "recipient_count": 1,
+        "residual": "0.00",
+        "status": "allocated",
+        "weight_sum": "1"
+      }
+    ],
+    "allocations": {
+      "customer_targets": {
+        "allocated_target": {
+          "assigned_total": "2400.00",
+          "by_currency": {
+            "undeclared": {
+              "assigned_total": "2400.00",
+              "conserved": true,
+              "residual_total": "0.00",
+              "source_total": "2400.00"
+            }
+          },
+          "check": {
+            "id": "allocation.conservation",
+            "partitions": 4,
+            "statement": "For every partition, assigned sum plus reported residual equals the source quantity exactly.",
+            "status": "passed"
+          },
+          "conserved": true,
+          "missing_quantity_recipients": 0,
+          "null_weight": "error",
+          "partition": [
+            "Territory",
+            "Period"
+          ],
+          "partitions": [
+            {
+              "assigned_sum": "900.00",
+              "conserved": true,
+              "partition": {
+                "Period": "2026-01",
+                "Territory": "North"
+              },
+              "policy": "largest_remainder",
+              "quantity": "900.00",
+              "recipient_count": 2,
+              "residual": "0.00",
+              "status": "allocated",
+              "weight_sum": "4"
+            },
+            {
+              "assigned_sum": "300.00",
+              "conserved": true,
+              "partition": {
+                "Period": "2026-01",
+                "Territory": "South"
+              },
+              "policy": "largest_remainder",
+              "quantity": "300.00",
+              "recipient_count": 1,
+              "residual": "0.00",
+              "status": "allocated",
+              "weight_sum": "1"
+            },
+            {
+              "assigned_sum": "800.00",
+              "conserved": true,
+              "partition": {
+                "Period": "2026-02",
+                "Territory": "North"
+              },
+              "policy": "largest_remainder",
+              "quantity": "800.00",
+              "recipient_count": 2,
+              "residual": "0.00",
+              "status": "allocated",
+              "weight_sum": "4"
+            },
+            {
+              "assigned_sum": "400.00",
+              "conserved": true,
+              "partition": {
+                "Period": "2026-02",
+                "Territory": "South"
+              },
+              "policy": "largest_remainder",
+              "quantity": "400.00",
+              "recipient_count": 1,
+              "residual": "0.00",
+              "status": "allocated",
+              "weight_sum": "1"
+            }
+          ],
+          "policy": "largest_remainder",
+          "precision": 18,
+          "quantity": "source:targets/field:Goal",
+          "recipient_filter": false,
+          "recipients": 6,
+          "residual_total": "0.00",
+          "scale": 2,
+          "source_total": "2400.00",
+          "unallocated": "error",
+          "via": "relationship:region_target"
+        }
+      }
+    },
+    "diagnostics": [],
+    "evidence_counts": {
+      "allocation": 4,
+      "candidate": 6,
+      "detail": 5,
+      "primary": 6
+    },
+    "populations": {
+      "customer_targets": {
+        "activity": {
+          "sales": {
+            "empty_member_rule": "declared_complete",
+            "empty_members": 2,
+            "matched_records": 5,
+            "period": {
+              "date": "booked_at",
+              "derive": "calendar_month",
+              "key": "month"
+            },
+            "records": 5,
+            "relationship": "relationship:sales",
+            "source": "source:transactions",
+            "statement": "Declared complete: a member with no transactions records through sales has sum 0 and count 0. Completeness is a declared assumption, not an observation; the run does not verify it.",
+            "unmatched_records": 0,
+            "unmatched_samples_truncated": false
+          }
+        },
+        "inference": "none: the declared recipients crossed with the declared periods",
+        "limit": {
+          "counted": "before materialization",
+          "name": "anchor_rows",
+          "value": 100000
+        },
+        "members": 6,
+        "period_field": "month",
+        "period_source": "listed",
+        "periods": [
+          "2026-01",
+          "2026-02"
+        ],
+        "population": "population:customer_month",
+        "recipient_filter": false,
+        "recipient_records": 3,
+        "recipients": 3,
+        "recipients_source": "source:customers"
+      }
+    },
+    "reconciliation": {
+      "resolved_rows": 6,
+      "statement": "Every selected line resolved; comparable and full-population totals coincide.",
+      "status": "complete",
+      "unresolved_rows": 0
+    },
+    "schema": {
+      "customer_targets": {
+        "anchor": "population:customer_month",
+        "anchor_grain": [
+          "CustNo",
+          "month"
+        ],
+        "columns": [
+          {
+            "additive": false,
+            "grain": [
+              "CustNo",
+              "month"
+            ],
+            "name": "CustNo",
+            "origins": [
+              {
+                "field": "CustNo",
+                "origin_grain": [
+                  "CustNo",
+                  "month"
+                ],
+                "path": [],
+                "source": "source:customer_month",
+                "transition": "owned"
+              }
+            ],
+            "ownership": "owned",
+            "role": "column",
+            "type": {
+              "kind": "string"
+            }
+          },
+          {
+            "additive": false,
+            "grain": [
+              "CustNo",
+              "month"
+            ],
+            "name": "month",
+            "origins": [
+              {
+                "field": "month",
+                "origin_grain": [
+                  "CustNo",
+                  "month"
+                ],
+                "path": [],
+                "source": "source:customer_month",
+                "transition": "owned"
+              }
+            ],
+            "ownership": "owned",
+            "role": "column",
+            "type": {
+              "kind": "string"
+            }
+          },
+          {
+            "additive": false,
+            "grain": [
+              "CustNo",
+              "month"
+            ],
+            "name": "currency",
+            "origins": [],
+            "ownership": "constant",
+            "role": "column",
+            "type": {
+              "kind": "string"
+            }
+          },
+          {
+            "additive": true,
+            "grain": [
+              "CustNo",
+              "month"
+            ],
+            "name": "sales",
+            "origins": [
+              {
+                "field": "gross",
+                "origin_grain": [
+                  "receipt_id"
+                ],
+                "path": [
+                  "sales"
+                ],
+                "source": "source:transactions",
+                "transition": "aggregated"
+              }
+            ],
+            "ownership": "owned",
+            "role": "column",
+            "type": {
+              "kind": "decimal",
+              "precision": 38,
+              "scale": 2
+            }
+          },
+          {
+            "additive": true,
+            "grain": [
+              "CustNo",
+              "month"
+            ],
+            "name": "transactions",
+            "origins": [],
+            "ownership": "owned",
+            "role": "column",
+            "type": {
+              "kind": "int64"
+            }
+          },
+          {
+            "additive": false,
+            "grain": [
+              "CustNo",
+              "month"
+            ],
+            "name": "target_context",
+            "origins": [
+              {
+                "field": "Goal",
+                "origin_grain": [
+                  "Territory",
+                  "Period"
+                ],
+                "path": [
+                  "region_target"
+                ],
+                "source": "source:targets",
+                "transition": "broadcast"
+              }
+            ],
+            "ownership": "broadcast",
+            "role": "column",
+            "type": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2
+            }
+          },
+          {
+            "additive": true,
+            "grain": [
+              "CustNo",
+              "month"
+            ],
+            "name": "allocated_target",
+            "origins": [
+              {
+                "field": "Goal",
+                "origin_grain": [
+                  "Territory",
+                  "Period"
+                ],
+                "path": [
+                  "region_target"
+                ],
+                "source": "source:targets",
+                "transition": "allocated"
+              }
+            ],
+            "ownership": "allocated",
+            "partition": [
+              "Territory",
+              "Period"
+            ],
+            "residual": "largest_remainder",
+            "role": "allocation",
+            "type": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2
+            }
+          },
+          {
+            "grain": [
+              "CustNo",
+              "month"
+            ],
+            "name": "_status",
+            "role": "status",
+            "type": {
+              "kind": "string"
+            }
+          },
+          {
+            "grain": [
+              "CustNo",
+              "month"
+            ],
+            "name": "_reason",
+            "role": "reason",
+            "type": {
+              "kind": "string"
+            }
+          }
+        ],
+        "grain": [
+          "CustNo",
+          "month"
+        ],
+        "grouped": false,
+        "line_inputs": [],
+        "population": "population:customer_month"
+      }
+    },
+    "status": "succeeded",
+    "tables": {
+      "customer_targets": [
+        {
+          "CustNo": {
+            "kind": "string",
+            "value": "A"
+          },
+          "_reason": {
+            "kind": "null"
+          },
+          "_status": {
+            "kind": "string",
+            "value": "matched"
+          },
+          "allocated_target": {
+            "kind": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "value": "200.00"
+          },
+          "currency": {
+            "kind": "string",
+            "value": "AUD"
+          },
+          "month": {
+            "kind": "string",
+            "value": "2026-02"
+          },
+          "sales": {
+            "kind": "decimal",
+            "precision": 38,
+            "scale": 2,
+            "value": "0.00"
+          },
+          "target_context": {
+            "kind": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "value": "800.00"
+          },
+          "transactions": {
+            "kind": "int64",
+            "value": "0"
+          }
+        },
+        {
+          "CustNo": {
+            "kind": "string",
+            "value": "A"
+          },
+          "_reason": {
+            "kind": "null"
+          },
+          "_status": {
+            "kind": "string",
+            "value": "matched"
+          },
+          "allocated_target": {
+            "kind": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "value": "225.00"
+          },
+          "currency": {
+            "kind": "string",
+            "value": "AUD"
+          },
+          "month": {
+            "kind": "string",
+            "value": "2026-01"
+          },
+          "sales": {
+            "kind": "decimal",
+            "precision": 38,
+            "scale": 2,
+            "value": "100.00"
+          },
+          "target_context": {
+            "kind": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "value": "900.00"
+          },
+          "transactions": {
+            "kind": "int64",
+            "value": "2"
+          }
+        },
+        {
+          "CustNo": {
+            "kind": "string",
+            "value": "B"
+          },
+          "_reason": {
+            "kind": "null"
+          },
+          "_status": {
+            "kind": "string",
+            "value": "matched"
+          },
+          "allocated_target": {
+            "kind": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "value": "600.00"
+          },
+          "currency": {
+            "kind": "string",
+            "value": "AUD"
+          },
+          "month": {
+            "kind": "string",
+            "value": "2026-02"
+          },
+          "sales": {
+            "kind": "decimal",
+            "precision": 38,
+            "scale": 2,
+            "value": "120.00"
+          },
+          "target_context": {
+            "kind": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "value": "800.00"
+          },
+          "transactions": {
+            "kind": "int64",
+            "value": "1"
+          }
+        },
+        {
+          "CustNo": {
+            "kind": "string",
+            "value": "B"
+          },
+          "_reason": {
+            "kind": "null"
+          },
+          "_status": {
+            "kind": "string",
+            "value": "matched"
+          },
+          "allocated_target": {
+            "kind": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "value": "675.00"
+          },
+          "currency": {
+            "kind": "string",
+            "value": "AUD"
+          },
+          "month": {
+            "kind": "string",
+            "value": "2026-01"
+          },
+          "sales": {
+            "kind": "decimal",
+            "precision": 38,
+            "scale": 2,
+            "value": "200.00"
+          },
+          "target_context": {
+            "kind": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "value": "900.00"
+          },
+          "transactions": {
+            "kind": "int64",
+            "value": "1"
+          }
+        },
+        {
+          "CustNo": {
+            "kind": "string",
+            "value": "C"
+          },
+          "_reason": {
+            "kind": "null"
+          },
+          "_status": {
+            "kind": "string",
+            "value": "matched"
+          },
+          "allocated_target": {
+            "kind": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "value": "300.00"
+          },
+          "currency": {
+            "kind": "string",
+            "value": "AUD"
+          },
+          "month": {
+            "kind": "string",
+            "value": "2026-01"
+          },
+          "sales": {
+            "kind": "decimal",
+            "precision": 38,
+            "scale": 2,
+            "value": "50.00"
+          },
+          "target_context": {
+            "kind": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "value": "300.00"
+          },
+          "transactions": {
+            "kind": "int64",
+            "value": "1"
+          }
+        },
+        {
+          "CustNo": {
+            "kind": "string",
+            "value": "C"
+          },
+          "_reason": {
+            "kind": "null"
+          },
+          "_status": {
+            "kind": "string",
+            "value": "matched"
+          },
+          "allocated_target": {
+            "kind": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "value": "400.00"
+          },
+          "currency": {
+            "kind": "string",
+            "value": "AUD"
+          },
+          "month": {
+            "kind": "string",
+            "value": "2026-02"
+          },
+          "sales": {
+            "kind": "decimal",
+            "precision": 38,
+            "scale": 2,
+            "value": "0.00"
+          },
+          "target_context": {
+            "kind": "decimal",
+            "precision": 18,
+            "scale": 2,
+            "value": "400.00"
+          },
+          "transactions": {
+            "kind": "int64",
+            "value": "0"
+          }
+        }
+      ]
+    },
+    "totals": {
+      "by_output": {
+        "customer_targets": {
+          "AUD": {
+            "columns": {
+              "allocated_target": {
+                "allocation": {
+                  "assigned_total": "2400.00",
+                  "conserved": true,
+                  "residual_total": "0.00",
+                  "scope": "every partition of the quantity source, including members the output filter removed",
+                  "source": "source:targets/field:Goal",
+                  "source_total": "2400.00"
+                },
+                "comparable": "2400.00",
+                "null_rows": 0,
+                "population": "2400.00",
+                "unresolved": "0.00"
+              },
+              "sales": {
+                "comparable": "470.00",
+                "null_rows": 0,
+                "population": "470.00",
+                "unresolved": "0.00"
+              },
+              "transactions": {
+                "comparable": "5",
+                "null_rows": 0,
+                "population": "5",
+                "unresolved": "0"
+              }
+            },
+            "excluded": {
+              "target_context": {
+                "reason": "context repeated on each member; summing it would count one coarse value once per member",
+                "transition": "broadcast"
+              }
+            },
+            "rows": {
+              "population": 6,
+              "resolved": 6,
+              "unresolved": 0
+            }
+          }
+        }
+      },
+      "combined": {}
+    }
+  },
+  "recipe_hash": "725a76b067299b307918b17549b095d460465f39b960fe0234c97c7b142988cd",
+  "scenarios": {
+    "missing_target": {
+      "allocation_evidence": [
+        {
+          "allocation": "allocated_target",
+          "assigned_sum": "900.00",
+          "conserved": true,
+          "output": "customer_targets",
+          "partition": {
+            "Period": "2026-01",
+            "Territory": "North"
+          },
+          "policy": "largest_remainder",
+          "quantity": "900.00",
+          "recipient_count": 2,
+          "residual": "0.00",
+          "status": "allocated",
+          "weight_sum": "4"
+        },
+        {
+          "allocation": "allocated_target",
+          "assigned_sum": "300.00",
+          "conserved": true,
+          "output": "customer_targets",
+          "partition": {
+            "Period": "2026-01",
+            "Territory": "South"
+          },
+          "policy": "largest_remainder",
+          "quantity": "300.00",
+          "recipient_count": 1,
+          "residual": "0.00",
+          "status": "allocated",
+          "weight_sum": "1"
+        },
+        {
+          "allocation": "allocated_target",
+          "assigned_sum": "800.00",
+          "conserved": true,
+          "output": "customer_targets",
+          "partition": {
+            "Period": "2026-02",
+            "Territory": "North"
+          },
+          "policy": "largest_remainder",
+          "quantity": "800.00",
+          "recipient_count": 2,
+          "residual": "0.00",
+          "status": "allocated",
+          "weight_sum": "4"
+        }
+      ],
+      "allocations": {
+        "customer_targets": {
+          "allocated_target": {
+            "assigned_total": "2000.00",
+            "by_currency": {
+              "undeclared": {
+                "assigned_total": "2000.00",
+                "conserved": true,
+                "residual_total": "0.00",
+                "source_total": "2000.00"
+              }
+            },
+            "check": {
+              "id": "allocation.conservation",
+              "partitions": 3,
+              "statement": "For every partition, assigned sum plus reported residual equals the source quantity exactly.",
+              "status": "passed"
+            },
+            "conserved": true,
+            "missing_quantity_recipients": 1,
+            "null_weight": "error",
+            "partition": [
+              "Territory",
+              "Period"
+            ],
+            "partitions": [
+              {
+                "assigned_sum": "900.00",
+                "conserved": true,
+                "partition": {
+                  "Period": "2026-01",
+                  "Territory": "North"
+                },
+                "policy": "largest_remainder",
+                "quantity": "900.00",
+                "recipient_count": 2,
+                "residual": "0.00",
+                "status": "allocated",
+                "weight_sum": "4"
+              },
+              {
+                "assigned_sum": "300.00",
+                "conserved": true,
+                "partition": {
+                  "Period": "2026-01",
+                  "Territory": "South"
+                },
+                "policy": "largest_remainder",
+                "quantity": "300.00",
+                "recipient_count": 1,
+                "residual": "0.00",
+                "status": "allocated",
+                "weight_sum": "1"
+              },
+              {
+                "assigned_sum": "800.00",
+                "conserved": true,
+                "partition": {
+                  "Period": "2026-02",
+                  "Territory": "North"
+                },
+                "policy": "largest_remainder",
+                "quantity": "800.00",
+                "recipient_count": 2,
+                "residual": "0.00",
+                "status": "allocated",
+                "weight_sum": "4"
+              }
+            ],
+            "policy": "largest_remainder",
+            "precision": 18,
+            "quantity": "source:targets/field:Goal",
+            "recipient_filter": false,
+            "recipients": 6,
+            "residual_total": "0.00",
+            "scale": 2,
+            "source_total": "2000.00",
+            "unallocated": "error",
+            "via": "relationship:region_target"
+          }
+        }
+      },
+      "diagnostics": [
+        {
+          "affected_count": 1,
+          "code": "ALLOCATION_MISSING_QUANTITY",
+          "severity": "warning",
+          "subject": "output:customer_targets/allocation:allocated_target"
+        },
+        {
+          "affected_count": 1,
+          "code": "LOOKUP_UNMATCHED",
+          "severity": "warning",
+          "subject": "relationship:region_target"
+        }
+      ],
+      "evidence_counts": {
+        "allocation": 3,
+        "candidate": 5,
+        "detail": 5,
+        "primary": 6
+      },
+      "populations": {
+        "customer_targets": {
+          "activity": {
+            "sales": {
+              "empty_member_rule": "declared_complete",
+              "empty_members": 2,
+              "matched_records": 5,
+              "period": {
+                "date": "booked_at",
+                "derive": "calendar_month",
+                "key": "month"
+              },
+              "records": 5,
+              "relationship": "relationship:sales",
+              "source": "source:transactions",
+              "statement": "Declared complete: a member with no transactions records through sales has sum 0 and count 0. Completeness is a declared assumption, not an observation; the run does not verify it.",
+              "unmatched_records": 0,
+              "unmatched_samples_truncated": false
+            }
+          },
+          "inference": "none: the declared recipients crossed with the declared periods",
+          "limit": {
+            "counted": "before materialization",
+            "name": "anchor_rows",
+            "value": 100000
+          },
+          "members": 6,
+          "period_field": "month",
+          "period_source": "listed",
+          "periods": [
+            "2026-01",
+            "2026-02"
+          ],
+          "population": "population:customer_month",
+          "recipient_filter": false,
+          "recipient_records": 3,
+          "recipients": 3,
+          "recipients_source": "source:customers"
+        }
+      },
+      "reconciliation": {
+        "resolved_rows": 5,
+        "statement": "Comparable totals cover 5 resolved lines only; 1 unresolved lines keep null expected values and are not reconciled.",
+        "status": "partial",
+        "unresolved_rows": 1
+      },
+      "schema": {
+        "customer_targets": {
+          "anchor": "population:customer_month",
+          "anchor_grain": [
+            "CustNo",
+            "month"
+          ],
+          "columns": [
+            {
+              "additive": false,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "CustNo",
+              "origins": [
+                {
+                  "field": "CustNo",
+                  "origin_grain": [
+                    "CustNo",
+                    "month"
+                  ],
+                  "path": [],
+                  "source": "source:customer_month",
+                  "transition": "owned"
+                }
+              ],
+              "ownership": "owned",
+              "role": "column",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "additive": false,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "month",
+              "origins": [
+                {
+                  "field": "month",
+                  "origin_grain": [
+                    "CustNo",
+                    "month"
+                  ],
+                  "path": [],
+                  "source": "source:customer_month",
+                  "transition": "owned"
+                }
+              ],
+              "ownership": "owned",
+              "role": "column",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "additive": false,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "currency",
+              "origins": [],
+              "ownership": "constant",
+              "role": "column",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "additive": true,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "sales",
+              "origins": [
+                {
+                  "field": "gross",
+                  "origin_grain": [
+                    "receipt_id"
+                  ],
+                  "path": [
+                    "sales"
+                  ],
+                  "source": "source:transactions",
+                  "transition": "aggregated"
+                }
+              ],
+              "ownership": "owned",
+              "role": "column",
+              "type": {
+                "kind": "decimal",
+                "precision": 38,
+                "scale": 2
+              }
+            },
+            {
+              "additive": true,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "transactions",
+              "origins": [],
+              "ownership": "owned",
+              "role": "column",
+              "type": {
+                "kind": "int64"
+              }
+            },
+            {
+              "additive": false,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "target_context",
+              "origins": [
+                {
+                  "field": "Goal",
+                  "origin_grain": [
+                    "Territory",
+                    "Period"
+                  ],
+                  "path": [
+                    "region_target"
+                  ],
+                  "source": "source:targets",
+                  "transition": "broadcast"
+                }
+              ],
+              "ownership": "broadcast",
+              "role": "column",
+              "type": {
+                "kind": "decimal",
+                "precision": 18,
+                "scale": 2
+              }
+            },
+            {
+              "additive": true,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "allocated_target",
+              "origins": [
+                {
+                  "field": "Goal",
+                  "origin_grain": [
+                    "Territory",
+                    "Period"
+                  ],
+                  "path": [
+                    "region_target"
+                  ],
+                  "source": "source:targets",
+                  "transition": "allocated"
+                }
+              ],
+              "ownership": "allocated",
+              "partition": [
+                "Territory",
+                "Period"
+              ],
+              "residual": "largest_remainder",
+              "role": "allocation",
+              "type": {
+                "kind": "decimal",
+                "precision": 18,
+                "scale": 2
+              }
+            },
+            {
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "_status",
+              "role": "status",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "_reason",
+              "role": "reason",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ],
+          "grain": [
+            "CustNo",
+            "month"
+          ],
+          "grouped": false,
+          "line_inputs": [],
+          "population": "population:customer_month"
+        }
+      },
+      "status": "succeeded_with_unresolved",
+      "tables": {
+        "customer_targets": [
+          {
+            "CustNo": {
+              "kind": "string",
+              "value": "A"
+            },
+            "_reason": {
+              "kind": "null"
+            },
+            "_status": {
+              "kind": "string",
+              "value": "matched"
+            },
+            "allocated_target": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "200.00"
+            },
+            "currency": {
+              "kind": "string",
+              "value": "AUD"
+            },
+            "month": {
+              "kind": "string",
+              "value": "2026-02"
+            },
+            "sales": {
+              "kind": "decimal",
+              "precision": 38,
+              "scale": 2,
+              "value": "0.00"
+            },
+            "target_context": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "800.00"
+            },
+            "transactions": {
+              "kind": "int64",
+              "value": "0"
+            }
+          },
+          {
+            "CustNo": {
+              "kind": "string",
+              "value": "A"
+            },
+            "_reason": {
+              "kind": "null"
+            },
+            "_status": {
+              "kind": "string",
+              "value": "matched"
+            },
+            "allocated_target": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "225.00"
+            },
+            "currency": {
+              "kind": "string",
+              "value": "AUD"
+            },
+            "month": {
+              "kind": "string",
+              "value": "2026-01"
+            },
+            "sales": {
+              "kind": "decimal",
+              "precision": 38,
+              "scale": 2,
+              "value": "100.00"
+            },
+            "target_context": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "900.00"
+            },
+            "transactions": {
+              "kind": "int64",
+              "value": "2"
+            }
+          },
+          {
+            "CustNo": {
+              "kind": "string",
+              "value": "B"
+            },
+            "_reason": {
+              "kind": "null"
+            },
+            "_status": {
+              "kind": "string",
+              "value": "matched"
+            },
+            "allocated_target": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "600.00"
+            },
+            "currency": {
+              "kind": "string",
+              "value": "AUD"
+            },
+            "month": {
+              "kind": "string",
+              "value": "2026-02"
+            },
+            "sales": {
+              "kind": "decimal",
+              "precision": 38,
+              "scale": 2,
+              "value": "120.00"
+            },
+            "target_context": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "800.00"
+            },
+            "transactions": {
+              "kind": "int64",
+              "value": "1"
+            }
+          },
+          {
+            "CustNo": {
+              "kind": "string",
+              "value": "B"
+            },
+            "_reason": {
+              "kind": "null"
+            },
+            "_status": {
+              "kind": "string",
+              "value": "matched"
+            },
+            "allocated_target": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "675.00"
+            },
+            "currency": {
+              "kind": "string",
+              "value": "AUD"
+            },
+            "month": {
+              "kind": "string",
+              "value": "2026-01"
+            },
+            "sales": {
+              "kind": "decimal",
+              "precision": 38,
+              "scale": 2,
+              "value": "200.00"
+            },
+            "target_context": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "900.00"
+            },
+            "transactions": {
+              "kind": "int64",
+              "value": "1"
+            }
+          },
+          {
+            "CustNo": {
+              "kind": "string",
+              "value": "C"
+            },
+            "_reason": {
+              "kind": "null"
+            },
+            "_status": {
+              "kind": "string",
+              "value": "matched"
+            },
+            "allocated_target": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "300.00"
+            },
+            "currency": {
+              "kind": "string",
+              "value": "AUD"
+            },
+            "month": {
+              "kind": "string",
+              "value": "2026-01"
+            },
+            "sales": {
+              "kind": "decimal",
+              "precision": 38,
+              "scale": 2,
+              "value": "50.00"
+            },
+            "target_context": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "300.00"
+            },
+            "transactions": {
+              "kind": "int64",
+              "value": "1"
+            }
+          },
+          {
+            "CustNo": {
+              "kind": "string",
+              "value": "C"
+            },
+            "_reason": {
+              "kind": "string",
+              "value": "region_target unmatched: no candidate with an equal key; allocated_target unmatched: no source quantity in targets (region_target unmatched: no candidate with an equal key)"
+            },
+            "_status": {
+              "kind": "string",
+              "value": "unmatched"
+            },
+            "allocated_target": {
+              "kind": "null"
+            },
+            "currency": {
+              "kind": "string",
+              "value": "AUD"
+            },
+            "month": {
+              "kind": "string",
+              "value": "2026-02"
+            },
+            "sales": {
+              "kind": "decimal",
+              "precision": 38,
+              "scale": 2,
+              "value": "0.00"
+            },
+            "target_context": {
+              "kind": "null"
+            },
+            "transactions": {
+              "kind": "int64",
+              "value": "0"
+            }
+          }
+        ]
+      },
+      "totals": {
+        "by_output": {
+          "customer_targets": {
+            "AUD": {
+              "columns": {
+                "allocated_target": {
+                  "allocation": {
+                    "assigned_total": "2000.00",
+                    "conserved": true,
+                    "residual_total": "0.00",
+                    "scope": "every partition of the quantity source, including members the output filter removed",
+                    "source": "source:targets/field:Goal",
+                    "source_total": "2000.00"
+                  },
+                  "comparable": "2000.00",
+                  "null_rows": 1,
+                  "population": null,
+                  "unresolved": null
+                },
+                "sales": {
+                  "comparable": "470.00",
+                  "null_rows": 0,
+                  "population": "470.00",
+                  "unresolved": "0.00"
+                },
+                "transactions": {
+                  "comparable": "5",
+                  "null_rows": 0,
+                  "population": "5",
+                  "unresolved": "0"
+                }
+              },
+              "excluded": {
+                "target_context": {
+                  "reason": "context repeated on each member; summing it would count one coarse value once per member",
+                  "transition": "broadcast"
+                }
+              },
+              "rows": {
+                "population": 6,
+                "resolved": 5,
+                "unresolved": 1
+              }
+            }
+          }
+        },
+        "combined": {}
+      }
+    },
+    "north_restricted_to_a": {
+      "allocation_evidence": [
+        {
+          "allocation": "allocated_target",
+          "assigned_sum": "900.00",
+          "conserved": true,
+          "output": "customer_targets",
+          "partition": {
+            "Period": "2026-01",
+            "Territory": "North"
+          },
+          "policy": "largest_remainder",
+          "quantity": "900.00",
+          "recipient_count": 1,
+          "residual": "0.00",
+          "status": "allocated",
+          "weight_sum": "1"
+        },
+        {
+          "allocation": "allocated_target",
+          "assigned_sum": "300.00",
+          "conserved": true,
+          "output": "customer_targets",
+          "partition": {
+            "Period": "2026-01",
+            "Territory": "South"
+          },
+          "policy": "largest_remainder",
+          "quantity": "300.00",
+          "recipient_count": 1,
+          "residual": "0.00",
+          "status": "allocated",
+          "weight_sum": "1"
+        },
+        {
+          "allocation": "allocated_target",
+          "assigned_sum": "800.00",
+          "conserved": true,
+          "output": "customer_targets",
+          "partition": {
+            "Period": "2026-02",
+            "Territory": "North"
+          },
+          "policy": "largest_remainder",
+          "quantity": "800.00",
+          "recipient_count": 1,
+          "residual": "0.00",
+          "status": "allocated",
+          "weight_sum": "1"
+        },
+        {
+          "allocation": "allocated_target",
+          "assigned_sum": "400.00",
+          "conserved": true,
+          "output": "customer_targets",
+          "partition": {
+            "Period": "2026-02",
+            "Territory": "South"
+          },
+          "policy": "largest_remainder",
+          "quantity": "400.00",
+          "recipient_count": 1,
+          "residual": "0.00",
+          "status": "allocated",
+          "weight_sum": "1"
+        }
+      ],
+      "allocations": {
+        "customer_targets": {
+          "allocated_target": {
+            "assigned_total": "2400.00",
+            "by_currency": {
+              "undeclared": {
+                "assigned_total": "2400.00",
+                "conserved": true,
+                "residual_total": "0.00",
+                "source_total": "2400.00"
+              }
+            },
+            "check": {
+              "id": "allocation.conservation",
+              "partitions": 4,
+              "statement": "For every partition, assigned sum plus reported residual equals the source quantity exactly.",
+              "status": "passed"
+            },
+            "conserved": true,
+            "missing_quantity_recipients": 0,
+            "null_weight": "error",
+            "partition": [
+              "Territory",
+              "Period"
+            ],
+            "partitions": [
+              {
+                "assigned_sum": "900.00",
+                "conserved": true,
+                "partition": {
+                  "Period": "2026-01",
+                  "Territory": "North"
+                },
+                "policy": "largest_remainder",
+                "quantity": "900.00",
+                "recipient_count": 1,
+                "residual": "0.00",
+                "status": "allocated",
+                "weight_sum": "1"
+              },
+              {
+                "assigned_sum": "300.00",
+                "conserved": true,
+                "partition": {
+                  "Period": "2026-01",
+                  "Territory": "South"
+                },
+                "policy": "largest_remainder",
+                "quantity": "300.00",
+                "recipient_count": 1,
+                "residual": "0.00",
+                "status": "allocated",
+                "weight_sum": "1"
+              },
+              {
+                "assigned_sum": "800.00",
+                "conserved": true,
+                "partition": {
+                  "Period": "2026-02",
+                  "Territory": "North"
+                },
+                "policy": "largest_remainder",
+                "quantity": "800.00",
+                "recipient_count": 1,
+                "residual": "0.00",
+                "status": "allocated",
+                "weight_sum": "1"
+              },
+              {
+                "assigned_sum": "400.00",
+                "conserved": true,
+                "partition": {
+                  "Period": "2026-02",
+                  "Territory": "South"
+                },
+                "policy": "largest_remainder",
+                "quantity": "400.00",
+                "recipient_count": 1,
+                "residual": "0.00",
+                "status": "allocated",
+                "weight_sum": "1"
+              }
+            ],
+            "policy": "largest_remainder",
+            "precision": 18,
+            "quantity": "source:targets/field:Goal",
+            "recipient_filter": true,
+            "recipients": 4,
+            "residual_total": "0.00",
+            "scale": 2,
+            "source_total": "2400.00",
+            "unallocated": "error",
+            "via": "relationship:region_target"
+          }
+        }
+      },
+      "diagnostics": [],
+      "evidence_counts": {
+        "allocation": 4,
+        "candidate": 6,
+        "detail": 5,
+        "primary": 6
+      },
+      "populations": {
+        "customer_targets": {
+          "activity": {
+            "sales": {
+              "empty_member_rule": "declared_complete",
+              "empty_members": 2,
+              "matched_records": 5,
+              "period": {
+                "date": "booked_at",
+                "derive": "calendar_month",
+                "key": "month"
+              },
+              "records": 5,
+              "relationship": "relationship:sales",
+              "source": "source:transactions",
+              "statement": "Declared complete: a member with no transactions records through sales has sum 0 and count 0. Completeness is a declared assumption, not an observation; the run does not verify it.",
+              "unmatched_records": 0,
+              "unmatched_samples_truncated": false
+            }
+          },
+          "inference": "none: the declared recipients crossed with the declared periods",
+          "limit": {
+            "counted": "before materialization",
+            "name": "anchor_rows",
+            "value": 100000
+          },
+          "members": 6,
+          "period_field": "month",
+          "period_source": "listed",
+          "periods": [
+            "2026-01",
+            "2026-02"
+          ],
+          "population": "population:customer_month",
+          "recipient_filter": false,
+          "recipient_records": 3,
+          "recipients": 3,
+          "recipients_source": "source:customers"
+        }
+      },
+      "reconciliation": {
+        "resolved_rows": 6,
+        "statement": "Every selected line resolved; comparable and full-population totals coincide.",
+        "status": "complete",
+        "unresolved_rows": 0
+      },
+      "schema": {
+        "customer_targets": {
+          "anchor": "population:customer_month",
+          "anchor_grain": [
+            "CustNo",
+            "month"
+          ],
+          "columns": [
+            {
+              "additive": false,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "CustNo",
+              "origins": [
+                {
+                  "field": "CustNo",
+                  "origin_grain": [
+                    "CustNo",
+                    "month"
+                  ],
+                  "path": [],
+                  "source": "source:customer_month",
+                  "transition": "owned"
+                }
+              ],
+              "ownership": "owned",
+              "role": "column",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "additive": false,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "month",
+              "origins": [
+                {
+                  "field": "month",
+                  "origin_grain": [
+                    "CustNo",
+                    "month"
+                  ],
+                  "path": [],
+                  "source": "source:customer_month",
+                  "transition": "owned"
+                }
+              ],
+              "ownership": "owned",
+              "role": "column",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "additive": false,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "currency",
+              "origins": [],
+              "ownership": "constant",
+              "role": "column",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "additive": true,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "sales",
+              "origins": [
+                {
+                  "field": "gross",
+                  "origin_grain": [
+                    "receipt_id"
+                  ],
+                  "path": [
+                    "sales"
+                  ],
+                  "source": "source:transactions",
+                  "transition": "aggregated"
+                }
+              ],
+              "ownership": "owned",
+              "role": "column",
+              "type": {
+                "kind": "decimal",
+                "precision": 38,
+                "scale": 2
+              }
+            },
+            {
+              "additive": true,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "transactions",
+              "origins": [],
+              "ownership": "owned",
+              "role": "column",
+              "type": {
+                "kind": "int64"
+              }
+            },
+            {
+              "additive": false,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "target_context",
+              "origins": [
+                {
+                  "field": "Goal",
+                  "origin_grain": [
+                    "Territory",
+                    "Period"
+                  ],
+                  "path": [
+                    "region_target"
+                  ],
+                  "source": "source:targets",
+                  "transition": "broadcast"
+                }
+              ],
+              "ownership": "broadcast",
+              "role": "column",
+              "type": {
+                "kind": "decimal",
+                "precision": 18,
+                "scale": 2
+              }
+            },
+            {
+              "additive": true,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "allocated_target",
+              "origins": [
+                {
+                  "field": "Goal",
+                  "origin_grain": [
+                    "Territory",
+                    "Period"
+                  ],
+                  "path": [
+                    "region_target"
+                  ],
+                  "source": "source:targets",
+                  "transition": "allocated"
+                }
+              ],
+              "ownership": "allocated",
+              "partition": [
+                "Territory",
+                "Period"
+              ],
+              "residual": "largest_remainder",
+              "role": "allocation",
+              "type": {
+                "kind": "decimal",
+                "precision": 18,
+                "scale": 2
+              }
+            },
+            {
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "_status",
+              "role": "status",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "_reason",
+              "role": "reason",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ],
+          "grain": [
+            "CustNo",
+            "month"
+          ],
+          "grouped": false,
+          "line_inputs": [],
+          "population": "population:customer_month"
+        }
+      },
+      "status": "succeeded",
+      "tables": {
+        "customer_targets": [
+          {
+            "CustNo": {
+              "kind": "string",
+              "value": "A"
+            },
+            "_reason": {
+              "kind": "null"
+            },
+            "_status": {
+              "kind": "string",
+              "value": "matched"
+            },
+            "allocated_target": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "800.00"
+            },
+            "currency": {
+              "kind": "string",
+              "value": "AUD"
+            },
+            "month": {
+              "kind": "string",
+              "value": "2026-02"
+            },
+            "sales": {
+              "kind": "decimal",
+              "precision": 38,
+              "scale": 2,
+              "value": "0.00"
+            },
+            "target_context": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "800.00"
+            },
+            "transactions": {
+              "kind": "int64",
+              "value": "0"
+            }
+          },
+          {
+            "CustNo": {
+              "kind": "string",
+              "value": "A"
+            },
+            "_reason": {
+              "kind": "null"
+            },
+            "_status": {
+              "kind": "string",
+              "value": "matched"
+            },
+            "allocated_target": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "900.00"
+            },
+            "currency": {
+              "kind": "string",
+              "value": "AUD"
+            },
+            "month": {
+              "kind": "string",
+              "value": "2026-01"
+            },
+            "sales": {
+              "kind": "decimal",
+              "precision": 38,
+              "scale": 2,
+              "value": "100.00"
+            },
+            "target_context": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "900.00"
+            },
+            "transactions": {
+              "kind": "int64",
+              "value": "2"
+            }
+          },
+          {
+            "CustNo": {
+              "kind": "string",
+              "value": "B"
+            },
+            "_reason": {
+              "kind": "null"
+            },
+            "_status": {
+              "kind": "string",
+              "value": "matched"
+            },
+            "allocated_target": {
+              "kind": "null"
+            },
+            "currency": {
+              "kind": "string",
+              "value": "AUD"
+            },
+            "month": {
+              "kind": "string",
+              "value": "2026-01"
+            },
+            "sales": {
+              "kind": "decimal",
+              "precision": 38,
+              "scale": 2,
+              "value": "200.00"
+            },
+            "target_context": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "900.00"
+            },
+            "transactions": {
+              "kind": "int64",
+              "value": "1"
+            }
+          },
+          {
+            "CustNo": {
+              "kind": "string",
+              "value": "B"
+            },
+            "_reason": {
+              "kind": "null"
+            },
+            "_status": {
+              "kind": "string",
+              "value": "matched"
+            },
+            "allocated_target": {
+              "kind": "null"
+            },
+            "currency": {
+              "kind": "string",
+              "value": "AUD"
+            },
+            "month": {
+              "kind": "string",
+              "value": "2026-02"
+            },
+            "sales": {
+              "kind": "decimal",
+              "precision": 38,
+              "scale": 2,
+              "value": "120.00"
+            },
+            "target_context": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "800.00"
+            },
+            "transactions": {
+              "kind": "int64",
+              "value": "1"
+            }
+          },
+          {
+            "CustNo": {
+              "kind": "string",
+              "value": "C"
+            },
+            "_reason": {
+              "kind": "null"
+            },
+            "_status": {
+              "kind": "string",
+              "value": "matched"
+            },
+            "allocated_target": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "300.00"
+            },
+            "currency": {
+              "kind": "string",
+              "value": "AUD"
+            },
+            "month": {
+              "kind": "string",
+              "value": "2026-01"
+            },
+            "sales": {
+              "kind": "decimal",
+              "precision": 38,
+              "scale": 2,
+              "value": "50.00"
+            },
+            "target_context": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "300.00"
+            },
+            "transactions": {
+              "kind": "int64",
+              "value": "1"
+            }
+          },
+          {
+            "CustNo": {
+              "kind": "string",
+              "value": "C"
+            },
+            "_reason": {
+              "kind": "null"
+            },
+            "_status": {
+              "kind": "string",
+              "value": "matched"
+            },
+            "allocated_target": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "400.00"
+            },
+            "currency": {
+              "kind": "string",
+              "value": "AUD"
+            },
+            "month": {
+              "kind": "string",
+              "value": "2026-02"
+            },
+            "sales": {
+              "kind": "decimal",
+              "precision": 38,
+              "scale": 2,
+              "value": "0.00"
+            },
+            "target_context": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "400.00"
+            },
+            "transactions": {
+              "kind": "int64",
+              "value": "0"
+            }
+          }
+        ]
+      },
+      "totals": {
+        "by_output": {
+          "customer_targets": {
+            "AUD": {
+              "columns": {
+                "allocated_target": {
+                  "allocation": {
+                    "assigned_total": "2400.00",
+                    "conserved": true,
+                    "residual_total": "0.00",
+                    "scope": "every partition of the quantity source, including members the output filter removed",
+                    "source": "source:targets/field:Goal",
+                    "source_total": "2400.00"
+                  },
+                  "comparable": null,
+                  "null_rows": 2,
+                  "population": null,
+                  "unresolved": "0.00"
+                },
+                "sales": {
+                  "comparable": "470.00",
+                  "null_rows": 0,
+                  "population": "470.00",
+                  "unresolved": "0.00"
+                },
+                "transactions": {
+                  "comparable": "5",
+                  "null_rows": 0,
+                  "population": "5",
+                  "unresolved": "0"
+                }
+              },
+              "excluded": {
+                "target_context": {
+                  "reason": "context repeated on each member; summing it would count one coarse value once per member",
+                  "transition": "broadcast"
+                }
+              },
+              "rows": {
+                "population": 6,
+                "resolved": 6,
+                "unresolved": 0
+              }
+            }
+          }
+        },
+        "combined": {}
+      }
+    },
+    "selected_a": {
+      "allocation_evidence": [
+        {
+          "allocation": "allocated_target",
+          "assigned_sum": "900.00",
+          "conserved": true,
+          "output": "customer_targets",
+          "partition": {
+            "Period": "2026-01",
+            "Territory": "North"
+          },
+          "policy": "largest_remainder",
+          "quantity": "900.00",
+          "recipient_count": 2,
+          "residual": "0.00",
+          "status": "allocated",
+          "weight_sum": "4"
+        },
+        {
+          "allocation": "allocated_target",
+          "assigned_sum": "300.00",
+          "conserved": true,
+          "output": "customer_targets",
+          "partition": {
+            "Period": "2026-01",
+            "Territory": "South"
+          },
+          "policy": "largest_remainder",
+          "quantity": "300.00",
+          "recipient_count": 1,
+          "residual": "0.00",
+          "status": "allocated",
+          "weight_sum": "1"
+        },
+        {
+          "allocation": "allocated_target",
+          "assigned_sum": "800.00",
+          "conserved": true,
+          "output": "customer_targets",
+          "partition": {
+            "Period": "2026-02",
+            "Territory": "North"
+          },
+          "policy": "largest_remainder",
+          "quantity": "800.00",
+          "recipient_count": 2,
+          "residual": "0.00",
+          "status": "allocated",
+          "weight_sum": "4"
+        },
+        {
+          "allocation": "allocated_target",
+          "assigned_sum": "400.00",
+          "conserved": true,
+          "output": "customer_targets",
+          "partition": {
+            "Period": "2026-02",
+            "Territory": "South"
+          },
+          "policy": "largest_remainder",
+          "quantity": "400.00",
+          "recipient_count": 1,
+          "residual": "0.00",
+          "status": "allocated",
+          "weight_sum": "1"
+        }
+      ],
+      "allocations": {
+        "customer_targets": {
+          "allocated_target": {
+            "assigned_total": "2400.00",
+            "by_currency": {
+              "undeclared": {
+                "assigned_total": "2400.00",
+                "conserved": true,
+                "residual_total": "0.00",
+                "source_total": "2400.00"
+              }
+            },
+            "check": {
+              "id": "allocation.conservation",
+              "partitions": 4,
+              "statement": "For every partition, assigned sum plus reported residual equals the source quantity exactly.",
+              "status": "passed"
+            },
+            "conserved": true,
+            "missing_quantity_recipients": 0,
+            "null_weight": "error",
+            "partition": [
+              "Territory",
+              "Period"
+            ],
+            "partitions": [
+              {
+                "assigned_sum": "900.00",
+                "conserved": true,
+                "partition": {
+                  "Period": "2026-01",
+                  "Territory": "North"
+                },
+                "policy": "largest_remainder",
+                "quantity": "900.00",
+                "recipient_count": 2,
+                "residual": "0.00",
+                "status": "allocated",
+                "weight_sum": "4"
+              },
+              {
+                "assigned_sum": "300.00",
+                "conserved": true,
+                "partition": {
+                  "Period": "2026-01",
+                  "Territory": "South"
+                },
+                "policy": "largest_remainder",
+                "quantity": "300.00",
+                "recipient_count": 1,
+                "residual": "0.00",
+                "status": "allocated",
+                "weight_sum": "1"
+              },
+              {
+                "assigned_sum": "800.00",
+                "conserved": true,
+                "partition": {
+                  "Period": "2026-02",
+                  "Territory": "North"
+                },
+                "policy": "largest_remainder",
+                "quantity": "800.00",
+                "recipient_count": 2,
+                "residual": "0.00",
+                "status": "allocated",
+                "weight_sum": "4"
+              },
+              {
+                "assigned_sum": "400.00",
+                "conserved": true,
+                "partition": {
+                  "Period": "2026-02",
+                  "Territory": "South"
+                },
+                "policy": "largest_remainder",
+                "quantity": "400.00",
+                "recipient_count": 1,
+                "residual": "0.00",
+                "status": "allocated",
+                "weight_sum": "1"
+              }
+            ],
+            "policy": "largest_remainder",
+            "precision": 18,
+            "quantity": "source:targets/field:Goal",
+            "recipient_filter": false,
+            "recipients": 6,
+            "residual_total": "0.00",
+            "scale": 2,
+            "source_total": "2400.00",
+            "unallocated": "error",
+            "via": "relationship:region_target"
+          }
+        }
+      },
+      "diagnostics": [],
+      "evidence_counts": {
+        "allocation": 4,
+        "candidate": 2,
+        "detail": 2,
+        "primary": 2
+      },
+      "populations": {
+        "customer_targets": {
+          "activity": {
+            "sales": {
+              "empty_member_rule": "declared_complete",
+              "empty_members": 2,
+              "matched_records": 5,
+              "period": {
+                "date": "booked_at",
+                "derive": "calendar_month",
+                "key": "month"
+              },
+              "records": 5,
+              "relationship": "relationship:sales",
+              "source": "source:transactions",
+              "statement": "Declared complete: a member with no transactions records through sales has sum 0 and count 0. Completeness is a declared assumption, not an observation; the run does not verify it.",
+              "unmatched_records": 0,
+              "unmatched_samples_truncated": false
+            }
+          },
+          "inference": "none: the declared recipients crossed with the declared periods",
+          "limit": {
+            "counted": "before materialization",
+            "name": "anchor_rows",
+            "value": 100000
+          },
+          "members": 6,
+          "period_field": "month",
+          "period_source": "listed",
+          "periods": [
+            "2026-01",
+            "2026-02"
+          ],
+          "population": "population:customer_month",
+          "recipient_filter": false,
+          "recipient_records": 3,
+          "recipients": 3,
+          "recipients_source": "source:customers"
+        }
+      },
+      "reconciliation": {
+        "resolved_rows": 2,
+        "statement": "Every selected line resolved; comparable and full-population totals coincide.",
+        "status": "complete",
+        "unresolved_rows": 0
+      },
+      "schema": {
+        "customer_targets": {
+          "anchor": "population:customer_month",
+          "anchor_grain": [
+            "CustNo",
+            "month"
+          ],
+          "columns": [
+            {
+              "additive": false,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "CustNo",
+              "origins": [
+                {
+                  "field": "CustNo",
+                  "origin_grain": [
+                    "CustNo",
+                    "month"
+                  ],
+                  "path": [],
+                  "source": "source:customer_month",
+                  "transition": "owned"
+                }
+              ],
+              "ownership": "owned",
+              "role": "column",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "additive": false,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "month",
+              "origins": [
+                {
+                  "field": "month",
+                  "origin_grain": [
+                    "CustNo",
+                    "month"
+                  ],
+                  "path": [],
+                  "source": "source:customer_month",
+                  "transition": "owned"
+                }
+              ],
+              "ownership": "owned",
+              "role": "column",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "additive": false,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "currency",
+              "origins": [],
+              "ownership": "constant",
+              "role": "column",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "additive": true,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "sales",
+              "origins": [
+                {
+                  "field": "gross",
+                  "origin_grain": [
+                    "receipt_id"
+                  ],
+                  "path": [
+                    "sales"
+                  ],
+                  "source": "source:transactions",
+                  "transition": "aggregated"
+                }
+              ],
+              "ownership": "owned",
+              "role": "column",
+              "type": {
+                "kind": "decimal",
+                "precision": 38,
+                "scale": 2
+              }
+            },
+            {
+              "additive": true,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "transactions",
+              "origins": [],
+              "ownership": "owned",
+              "role": "column",
+              "type": {
+                "kind": "int64"
+              }
+            },
+            {
+              "additive": false,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "target_context",
+              "origins": [
+                {
+                  "field": "Goal",
+                  "origin_grain": [
+                    "Territory",
+                    "Period"
+                  ],
+                  "path": [
+                    "region_target"
+                  ],
+                  "source": "source:targets",
+                  "transition": "broadcast"
+                }
+              ],
+              "ownership": "broadcast",
+              "role": "column",
+              "type": {
+                "kind": "decimal",
+                "precision": 18,
+                "scale": 2
+              }
+            },
+            {
+              "additive": true,
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "allocated_target",
+              "origins": [
+                {
+                  "field": "Goal",
+                  "origin_grain": [
+                    "Territory",
+                    "Period"
+                  ],
+                  "path": [
+                    "region_target"
+                  ],
+                  "source": "source:targets",
+                  "transition": "allocated"
+                }
+              ],
+              "ownership": "allocated",
+              "partition": [
+                "Territory",
+                "Period"
+              ],
+              "residual": "largest_remainder",
+              "role": "allocation",
+              "type": {
+                "kind": "decimal",
+                "precision": 18,
+                "scale": 2
+              }
+            },
+            {
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "_status",
+              "role": "status",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "grain": [
+                "CustNo",
+                "month"
+              ],
+              "name": "_reason",
+              "role": "reason",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ],
+          "grain": [
+            "CustNo",
+            "month"
+          ],
+          "grouped": false,
+          "line_inputs": [],
+          "population": "population:customer_month"
+        }
+      },
+      "status": "succeeded",
+      "tables": {
+        "customer_targets": [
+          {
+            "CustNo": {
+              "kind": "string",
+              "value": "A"
+            },
+            "_reason": {
+              "kind": "null"
+            },
+            "_status": {
+              "kind": "string",
+              "value": "matched"
+            },
+            "allocated_target": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "200.00"
+            },
+            "currency": {
+              "kind": "string",
+              "value": "AUD"
+            },
+            "month": {
+              "kind": "string",
+              "value": "2026-02"
+            },
+            "sales": {
+              "kind": "decimal",
+              "precision": 38,
+              "scale": 2,
+              "value": "0.00"
+            },
+            "target_context": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "800.00"
+            },
+            "transactions": {
+              "kind": "int64",
+              "value": "0"
+            }
+          },
+          {
+            "CustNo": {
+              "kind": "string",
+              "value": "A"
+            },
+            "_reason": {
+              "kind": "null"
+            },
+            "_status": {
+              "kind": "string",
+              "value": "matched"
+            },
+            "allocated_target": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "225.00"
+            },
+            "currency": {
+              "kind": "string",
+              "value": "AUD"
+            },
+            "month": {
+              "kind": "string",
+              "value": "2026-01"
+            },
+            "sales": {
+              "kind": "decimal",
+              "precision": 38,
+              "scale": 2,
+              "value": "100.00"
+            },
+            "target_context": {
+              "kind": "decimal",
+              "precision": 18,
+              "scale": 2,
+              "value": "900.00"
+            },
+            "transactions": {
+              "kind": "int64",
+              "value": "2"
+            }
+          }
+        ]
+      },
+      "totals": {
+        "by_output": {
+          "customer_targets": {
+            "AUD": {
+              "columns": {
+                "allocated_target": {
+                  "allocation": {
+                    "assigned_total": "2400.00",
+                    "conserved": true,
+                    "residual_total": "0.00",
+                    "scope": "every partition of the quantity source, including members the output filter removed",
+                    "source": "source:targets/field:Goal",
+                    "source_total": "2400.00"
+                  },
+                  "comparable": "425.00",
+                  "null_rows": 0,
+                  "population": "425.00",
+                  "unresolved": "0.00"
+                },
+                "sales": {
+                  "comparable": "100.00",
+                  "null_rows": 0,
+                  "population": "100.00",
+                  "unresolved": "0.00"
+                },
+                "transactions": {
+                  "comparable": "2",
+                  "null_rows": 0,
+                  "population": "2",
+                  "unresolved": "0"
+                }
+              },
+              "excluded": {
+                "target_context": {
+                  "reason": "context repeated on each member; summing it would count one coarse value once per member",
+                  "transition": "broadcast"
+                }
+              },
+              "rows": {
+                "population": 2,
+                "resolved": 2,
+                "unresolved": 0
+              }
+            }
+          }
+        },
+        "combined": {}
+      }
+    }
+  }
+}

@@ -193,6 +193,113 @@ class SaveReopenRebind(unittest.TestCase):
             self.assertEqual(raised.exception.report.status, "failed")
 
 
+def without_references(value):
+    """The golden's form of manifest sections: source references (whose binding
+    identity depends on file paths) removed, as tests/customer_month_parity.rs does."""
+    if isinstance(value, dict):
+        return {k: without_references(v) for k, v in value.items()
+                if k not in ("quantity_reference", "unmatched_samples")}
+    if isinstance(value, list):
+        return [without_references(v) for v in value]
+    return value
+
+
+class CustomerMonthParity(unittest.TestCase):
+    """Slice 2 (#28, #29): explicit population, completeness and allocation on the
+    customer/month fixture, compared to tests/fixtures/customer_month.parity.json."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        support.write_customer_month(self.root)
+        self.golden = json.loads(support.CUSTOMER_MONTH_GOLDEN.read_text(encoding="utf-8"),
+                                 parse_float=Decimal)
+        self.bindings = support.customer_month_bindings(self.root)
+        self.policy = support.policy(self.root)
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def assertMatchesGolden(self, result, expected):
+        self.assertEqual(result.status, expected["status"])
+        manifest = result.manifest
+        for key in ["totals", "reconciliation", "allocations"]:
+            self.assertEqual(manifest[key], expected[key], key)
+        self.assertEqual(without_references(manifest["populations"]), expected["populations"])
+        self.assertEqual(sorted(result.outputs), sorted(expected["tables"]))
+        for table, rows in expected["tables"].items():
+            self.assertEqual(result.schema(table), expected["schema"][table]["columns"])
+            self.assertEqual(tagged_rows(result, table), expected_rows(rows), table)
+        diagnostics = sorted(
+            ({"code": d["code"], "severity": d["severity"], "subject": d["subject"],
+              "affected_count": d["affected_count"]} for d in result.diagnostics),
+            key=lambda d: json.dumps(d, sort_keys=True))
+        self.assertEqual(diagnostics, expected["diagnostics"])
+        for kind, count in expected["evidence_counts"].items():
+            self.assertEqual(result.evidence_count(kind), count, kind)
+        self.assertEqual(without_references(result.evidence("allocation")),
+                         expected["allocation_evidence"])
+
+    def test_python_builders_produce_the_rust_recipe(self):
+        recipe = iresiphi.Recipe(support.customer_month_declaration())
+        self.assertEqual(recipe.hash, self.golden["recipe_hash"])
+        self.assertEqual(recipe.canonical_json(), self.golden["canonical_json"])
+        self.assertEqual(iresiphi.Recipe.from_json(recipe.to_json()).hash, recipe.hash)
+
+    def test_expected_results_match_rust(self):
+        recipe = iresiphi.Recipe(support.customer_month_declaration())
+        with iresiphi.run(recipe, self.bindings, self.policy) as result:
+            self.assertMatchesGolden(result, self.golden["expected"])
+            rows = {(r["CustNo"], r["month"]): r for r in result.batch("customer_targets")}
+            self.assertEqual(len(rows), 6)
+            allocated = {key: row["allocated_target"] for key, row in rows.items()}
+            self.assertEqual(allocated, {
+                ("A", "2026-01"): Decimal("225.00"), ("B", "2026-01"): Decimal("675.00"),
+                ("C", "2026-01"): Decimal("300.00"), ("A", "2026-02"): Decimal("200.00"),
+                ("B", "2026-02"): Decimal("600.00"), ("C", "2026-02"): Decimal("400.00")})
+            self.assertEqual(rows[("A", "2026-02")]["sales"], Decimal("0.00"))
+            self.assertEqual(rows[("B", "2026-02")]["transactions"], 1)
+            columns = result.manifest["totals"]["by_output"]["customer_targets"]["AUD"]["columns"]
+            self.assertEqual(columns["sales"]["population"], "470.00")
+            self.assertNotIn("target_context", columns)
+            self.assertEqual(columns["allocated_target"]["allocation"]["source_total"], "2400.00")
+            self.assertEqual(sum(row["target_context"] for row in rows.values()), Decimal("4100.00"))
+
+    def test_filter_and_missing_target_scenarios_match_rust(self):
+        scenarios = self.golden["scenarios"]
+        selected = support.customer_month_declaration(
+            output_filter=b.equal(b.ref("customer_targets", "CustNo"), b.lit("A")))
+        restricted = support.customer_month_declaration(recipient_filter=b.or_(
+            b.equal(b.ref("customer_month", "CustNo"), b.lit("A")),
+            b.equal(b.ref("customer_month", "SalesArea"), b.lit("South"))))
+        for name, declaration in [("selected_a", selected), ("north_restricted_to_a", restricted)]:
+            with iresiphi.run(iresiphi.Recipe(declaration), self.bindings, self.policy) as result:
+                self.assertMatchesGolden(result, scenarios[name])
+        support.write_customer_month(self.root, targets=support.TARGETS.replace("South,2026-02,400\n", ""))
+        recipe = iresiphi.Recipe(support.customer_month_declaration())
+        with iresiphi.run(recipe, self.bindings, self.policy) as result:
+            self.assertMatchesGolden(result, scenarios["missing_target"])
+
+    def test_error_parity_null_weight(self):
+        support.write_customer_month(self.root, customers=support.CUSTOMERS.replace("B,North,3", "B,North,\\N"))
+        recipe = iresiphi.Recipe(support.customer_month_declaration(nullable_share=True))
+        expected = self.golden["errors"]["null_weight"]
+        with self.assertRaises(iresiphi.IresiphiError) as raised:
+            iresiphi.run(recipe, self.bindings, self.policy)
+        for key in ["code", "phase", "check", "subject"]:
+            self.assertEqual(getattr(raised.exception, key), expected[key], key)
+        self.assertEqual(raised.exception.report.status, expected["status"])
+
+    def test_bundle_carries_allocation_evidence(self):
+        recipe = iresiphi.Recipe(support.customer_month_declaration())
+        destination = self.root / "bundle"
+        with iresiphi.run(recipe, self.bindings, self.policy, destination=destination) as result:
+            self.assertEqual(result.status, "succeeded")
+        tables = iresiphi.read_bundle(destination)
+        self.assertEqual(len(tables["customer_targets"]), 6)
+        self.assertEqual(len(tables["_allocation_evidence"]), 4)
+
+
 def literal_recipe(columns, name="python exact values"):
     return b.recipe(name, [b.source("lines", {"id": b.field("/id", b.string_type())}, ["id"], array="/lines")],
                     [b.output("values", "lines", [b.column(n, e) for n, e in columns])])

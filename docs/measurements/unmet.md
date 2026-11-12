@@ -28,6 +28,22 @@ own ARM and x86 evidence before acceptance.
 | Measure and report cancellation latency | Met, with a finding | `examples/workload.rs` measured two 100,000-line runs ([workload-100k.md](workload-100k.md)): 0.31 s from request to return during parsing, and 25.2 s during output building. The second delay was not diagnosed; freeing the partly built evidence under swap is the likely cost. No latency bound is promised. |
 | Internal batches are Arrow `RecordBatch` with declared schema, Decimal128/Date32 and validity bits (decision #12) | Partly met | Adapters convert each source to typed Arrow batches of at most `batch_rows` rows. The executor then keeps the observations as rows, and its checked arithmetic, quantization and aggregation run in Rust over those rows. Only lookup candidate pairs go through DataFusion. This is the semantic boundary decision #11 allows, but calculations do not run over Arrow arrays. |
 
+## Slice 2: explicit populations and allocation (#28, #29)
+
+The contract is [docs/spec/slice-2.md](../spec/slice-2.md); [docs/allocation.md](../allocation.md) describes the behaviour. Every clause of "Contract: explicit population" and "Contract: allocation" is implemented and covered by `tests/population.rs`, `tests/allocation.rs` and the customer/month parity golden (`tests/customer_month_parity.rs`, `CustomerMonthParity` in `tests/python_acceptance.py`), except as listed here. The Node bindings section belongs to #30.
+
+| Clause | Status | Reason |
+| --- | --- | --- |
+| Allocation 8: broadcast columns are excluded from additive totals | Partly met | Population outputs exclude broadcast columns from their totals and list them under `excluded`. The invoice-review outputs from the preview still total every numeric column, including values looked up along a to-one path such as `enriched`. Changing that would change the two-supplier parity golden, which this slice must keep. |
+| Allocation 11: the population size counts toward the existing row limits before it is materialized | Met, with a limitation | Recipients times periods is checked against `limits.anchor_rows` before any member is created. Members are held in memory like source rows, but they are not counted against `retained_bytes` until they reach the results and evidence, which the existing output and retained byte budgets cover. |
+| Allocation 7: dependency pruning keeps recipients that are in the denominator but not in the output | Met trivially | The executor prunes nothing: it reads every source and builds every member, then allocates over the whole population before the output filter runs. The tests check the observable result (B's weight stays in North's denominator when B is filtered out). No pruning optimizer exists to test. |
+| Allocation 11: cancellation applies unchanged | Met, with a limitation | The run checks for cancellation before each population, each allocation and each output row. The arithmetic of one allocation runs without a check; at the row limits it is short. |
+
+Two choices take the stricter reading of the contract:
+
+- A recipe that declares a population or an allocation must list `"population"` or `"allocation"` in `required_capabilities` (`UNDECLARED_CAPABILITY` otherwise). The contract only asks for additive, gated declarations.
+- A null quantity counts as "no source quantity": its recipients get null and become unresolved, the same as a missing quantity record.
+
 ## Closed in this ticket
 
 These gaps from earlier tickets were fixed, with tests in `tests/preview.rs` and `tests/aggregation.rs`:
@@ -54,5 +70,5 @@ These gaps from earlier tickets were fixed, with tests in `tests/preview.rs` and
 
 | Node contract clause | Status | Reason |
 | --- | --- | --- |
-| 6: customer/month parity golden | Blocked | The slice-2 customer/month golden does not exist yet. Node tests use the unchanged two-supplier Rust/Python golden. Add the customer/month comparison when tickets #28/#29 provide that shared fixture. |
+| 6: customer/month parity golden | Met | `bindings/node/test/customer_month.test.js` compares against the shared golden and the fixed acceptance numbers. |
 | 7: both hosted architectures pass at the same commit | Unverified | The workflow builds and tests pinned Node 22.16.0 and 24.11.1 on hosted x86_64 and aarch64. This implementation session cannot establish a hosted pass; the coordinator must run CI after pushing. Local Node 24 ARM evidence does not replace any of these four gates. |

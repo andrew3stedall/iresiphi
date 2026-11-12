@@ -142,3 +142,67 @@ def generated(root, lines):
     bindings = json.loads((root / "bindings.json").read_text(encoding="utf-8"))
     policy = json.loads((root / "policy.json").read_text(encoding="utf-8"))
     return recipe, bindings, policy
+
+
+# -- slice 2: the customer/month fixture (tests/support/customer_month.rs) ---------------
+
+CUSTOMER_MONTH_GOLDEN = REPO / "tests" / "fixtures" / "customer_month.parity.json"
+CUSTOMERS = "CustNo,SalesArea,Share\nA,North,1\nB,North,3\nC,South,1\n"
+TRANSACTIONS = ("receipt_id,buyer_ref,booked_at,gross\nt1,A,2026-01-05,60\nt2,A,2026-01-20,40\n"
+                "t3,B,2026-01-11,200\nt4,C,2026-01-17,50\nt5,B,2026-02-08,120\n")
+TARGETS = ("Territory,Period,Goal\nNorth,2026-01,900\nSouth,2026-01,300\nNorth,2026-02,800\n"
+           "South,2026-02,400\n")
+
+
+def write_customer_month(root, customers=CUSTOMERS, transactions=TRANSACTIONS, targets=TARGETS):
+    root = Path(root)
+    (root / "customers.csv").write_text(customers, encoding="utf-8")
+    (root / "transactions.csv").write_text(transactions, encoding="utf-8")
+    (root / "targets.csv").write_text(targets, encoding="utf-8")
+
+
+def customer_month_bindings(root):
+    root = Path(root)
+    return {id: b.binding(root / f"{id}.csv", "csv") for id in ["customers", "transactions", "targets"]}
+
+
+def customer_month_declaration(recipient_filter=None, output_filter=None, nullable_share=False):
+    """The full slice-2 fixture: sales aggregated onto customer × month, broadcast
+    regional targets and targets allocated by Share."""
+    s = b.string_type
+    sources = [
+        b.source("customers", {"CustNo": b.field("CustNo", s()), "SalesArea": b.field("SalesArea", s()),
+                               "Share": b.field("Share", b.int64_type(), nullable=nullable_share)},
+                 ["CustNo"]),
+        b.source("transactions", {"receipt_id": b.field("receipt_id", s()),
+                                  "buyer_ref": b.field("buyer_ref", s()),
+                                  "booked_at": b.field("booked_at", b.date_type(), nullable=True),
+                                  "gross": b.field("gross", b.decimal_type(18, 2))},
+                 ["receipt_id"]),
+        b.source("targets", {"Territory": b.field("Territory", s()), "Period": b.field("Period", s()),
+                             "Goal": b.field("Goal", b.decimal_type(18, 2), nullable=True)},
+                 ["Territory", "Period"]),
+    ]
+    population = b.population("customer_month", "customers",
+                              b.months("month", values=["2026-01", "2026-02"]))
+    relationships = [
+        b.relationship("sales", "customer_month", "transactions", ["CustNo"], ["buyer_ref"],
+                       "one_to_many", period=b.period_match("month", "booked_at")),
+        b.relationship("region_target", "customer_month", "targets", ["SalesArea", "month"],
+                       ["Territory", "Period"], "many_to_one"),
+    ]
+    columns = [
+        b.column("CustNo", b.ref("customer_month", "CustNo")),
+        b.column("month", b.ref("customer_month", "month")),
+        b.column("currency", b.lit("AUD")),
+        b.column("sales", b.aggregate("sales", "sum", "gross")),
+        b.column("transactions", b.aggregate("sales", "count_records")),
+        b.column("target_context", b.ref("targets", "Goal", ["region_target"])),
+    ]
+    allocated = b.allocation("allocated_target", ("targets", "Goal"), ["Territory", "Period"],
+                             "region_target", b.ref("customer_month", "Share"), 18, 2,
+                             "largest_remainder", recipient_filter=recipient_filter)
+    output = b.output("customer_targets", "customer_month", columns, filter=output_filter,
+                      complete=["sales"], allocations=[allocated])
+    return b.recipe("customer month targets", sources, [output], relationships=relationships,
+                    required_capabilities=["population", "allocation"], populations=[population])

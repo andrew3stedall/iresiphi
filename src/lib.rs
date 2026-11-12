@@ -1,5 +1,6 @@
 //! Source-preserving local recipes.
 mod admission;
+mod allocation;
 pub mod cancel;
 pub mod eval;
 pub mod model;

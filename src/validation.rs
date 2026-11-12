@@ -519,6 +519,17 @@ fn line_scope(e: &Expr, out: &Output, lineage: bool) -> Result<Expr> {
         if let Some(c) = out.columns.iter().find(|c| c.name == name) {
             return Ok(c.expr.clone());
         }
+        // Allocated values exist after allocation, before the output filter.
+        if let Some(a) = out.allocations.iter().find(|a| a.name == name) {
+            return Ok(if lineage {
+                Expr::Literal { value: Value::Null }
+            } else {
+                typed_null(Some(Type::Decimal {
+                    precision: a.precision,
+                    scale: a.scale,
+                }))
+            });
+        }
         Err(if out.aggregates.iter().any(|a| a.name == name) {
             error(
                 "GRAIN_VIOLATION",
@@ -1109,7 +1120,9 @@ fn check_format(r: &Recipe) -> Result<()> {
     )
 }
 fn check_capabilities(r: &Recipe) -> Result<()> {
-    const SUPPORTED: [&str; 11] = [
+    const SUPPORTED: [&str; 13] = [
+        "population",
+        "allocation",
         "local",
         "json",
         "csv",
@@ -1126,6 +1139,21 @@ fn check_capabilities(r: &Recipe) -> Result<()> {
         if !SUPPORTED.contains(&cap.as_str()) {
             return Err(error("UNSUPPORTED_CAPABILITY", cap));
         }
+    }
+    // Slice-2 declarations name the capability they need, so a document says what
+    // it requires before any of its declarations are read.
+    let declared = |cap: &str| r.required_capabilities.iter().any(|c| c == cap);
+    if !r.populations.is_empty() && !declared("population") {
+        return Err(error(
+            "UNDECLARED_CAPABILITY",
+            "the recipe declares populations; add \"population\" to required_capabilities",
+        ));
+    }
+    if r.outputs.iter().any(|o| !o.allocations.is_empty()) && !declared("allocation") {
+        return Err(error(
+            "UNDECLARED_CAPABILITY",
+            "the recipe declares allocations; add \"allocation\" to required_capabilities",
+        ));
     }
     Ok(())
 }
@@ -1149,6 +1177,7 @@ fn check_identifiers(r: &Recipe) -> Result<()> {
             "_candidate_evidence",
             "_detail_evidence",
             "_reconciliation",
+            "_allocation_evidence",
         ]
         .contains(&out.id.as_str())
         {
@@ -1163,6 +1192,7 @@ fn check_identifiers(r: &Recipe) -> Result<()> {
             .iter()
             .map(|c| &c.name)
             .chain(out.aggregates.iter().map(|a| &a.name))
+            .chain(out.allocations.iter().map(|a| &a.name))
         {
             if name.is_empty()
                 || !names.insert(name)
@@ -1211,12 +1241,13 @@ fn check_sources(r: &Recipe) -> Result<()> {
             }
         }
     }
-    Ok(())
+    check_populations(r)
 }
 fn check_relationships(r: &Recipe) -> Result<()> {
     for rel in &r.relationships {
         source(r, &rel.from)?;
         source(r, &rel.to)?;
+        check_period_match(r, rel)?;
         if rel.from_keys.is_empty() || rel.from_keys.len() != rel.to_keys.len() {
             return Err(error(
                 "INVALID_RELATIONSHIP",
@@ -1312,6 +1343,7 @@ fn check_expressions(r: &Recipe) -> Result<()> {
         for c in &out.columns {
             expression_type(&c.expr, r)?;
         }
+        check_allocation_types(r, out)?;
         if let Some(p) = &out.eligibility {
             boolean(expression_type(p, r)?)?;
         }
@@ -1349,6 +1381,7 @@ fn check_expressions(r: &Recipe) -> Result<()> {
 fn check_outputs(r: &Recipe) -> Result<()> {
     for out in &r.outputs {
         source(r, &out.anchor)?;
+        check_population_output(r, out)?;
         for c in &out.columns {
             check_output_paths(&c.expr, r, &out.anchor, &mut BTreeSet::new())?;
         }
@@ -1494,6 +1527,7 @@ fn check_outputs(r: &Recipe) -> Result<()> {
     Ok(())
 }
 fn static_report(r: &Recipe) -> Vec<Check> {
+    let r = &expand(r);
     let mut failed = false;
     STAGES
         .iter()
@@ -1518,6 +1552,7 @@ fn static_report(r: &Recipe) -> Vec<Check> {
         .collect()
 }
 fn static_checks(r: &Recipe) -> Result<()> {
+    let r = &expand(r);
     for (_, _, stage) in STAGES {
         stage(r)?;
     }
@@ -1684,6 +1719,7 @@ fn origins(e: &Expr, r: &Recipe) -> Vec<Json> {
 /// the grain each value belongs to, the grain each contributing field originates
 /// at, and how it got there.
 pub fn output_schema(r: &Recipe) -> Json {
+    let r = &expand(r);
     Json::Object(
         r.outputs
             .iter()
@@ -1704,15 +1740,20 @@ fn output_columns(r: &Recipe, out: &Output) -> Json {
     } else {
         anchor_grain.clone()
     };
+    let members = population_output(r, out);
     let column = |c: &Column, role: &str| {
-        json!({
+        let mut column = json!({
             "name": c.name,
             "type": expression_type(&c.expr, r).ok().flatten(),
             "role": role,
             "ownership": ownership(&c.expr, r, &out.anchor, &mut BTreeSet::new()).name(),
             "grain": grain,
             "origins": origins(&c.expr, r),
-        })
+        });
+        if members {
+            column["additive"] = json!(additive(r, out, c));
+        }
+        column
     };
     let mut columns = vec![];
     if grouped {
@@ -1740,6 +1781,9 @@ fn output_columns(r: &Recipe, out: &Output) -> Json {
         for c in &out.columns {
             columns.push(column(c, "column"));
         }
+        for a in &out.allocations {
+            columns.push(allocation_column(r, a, &grain));
+        }
     }
     columns.push(json!({"name":"_status","type":{"kind":"string"},"role":"status","grain":grain}));
     if !grouped {
@@ -1756,13 +1800,47 @@ fn output_columns(r: &Recipe, out: &Output) -> Json {
         .filter(|c| grouped && !out.group_by.contains(&c.name))
         .map(|c| &c.name)
         .collect();
-    json!({
+    let mut schema = json!({
         "anchor": format!("source:{}", out.anchor),
         "anchor_grain": anchor_grain,
         "grain": grain,
         "grouped": grouped,
         "columns": columns,
         "line_inputs": line_inputs,
+    });
+    if members {
+        schema["anchor"] = json!(format!("population:{}", out.anchor));
+        schema["population"] = json!(format!("population:{}", out.anchor));
+    }
+    schema
+}
+/// A population-output column is additive when it is numeric and owned by the
+/// member; broadcast context and constants are excluded from totals.
+pub(crate) fn additive(r: &Recipe, out: &Output, c: &Column) -> bool {
+    matches!(
+        expression_type(&c.expr, r),
+        Ok(Some(Type::Int64 | Type::Decimal { .. }))
+    ) && ownership(&c.expr, r, &out.anchor, &mut BTreeSet::new()) == Ownership::Owned
+}
+/// Schema of an allocated column: owned by the recipient through allocation,
+/// originating at the quantity source's partition grain.
+fn allocation_column(r: &Recipe, a: &Allocation, grain: &[String]) -> Json {
+    json!({
+        "name": a.name,
+        "type": Type::Decimal { precision: a.precision, scale: a.scale },
+        "role": "allocation",
+        "ownership": "allocated",
+        "additive": true,
+        "grain": grain,
+        "partition": a.partition,
+        "residual": a.residual,
+        "origins": [{
+            "source": format!("source:{}", a.quantity.source),
+            "field": a.quantity.field,
+            "path": [a.via],
+            "origin_grain": r.sources.iter().find(|s| s.id == a.quantity.source).map(|s| &s.grain),
+            "transition": "allocated",
+        }],
     })
 }
 fn sorted<'a, T>(items: &'a [T], id: impl Fn(&T) -> &str) -> Vec<&'a T> {
@@ -1772,10 +1850,14 @@ fn sorted<'a, T>(items: &'a [T], id: impl Fn(&T) -> &str) -> Vec<&'a T> {
 }
 /// Logical explanation with stable declaration IDs. It never opens sources,
 /// runs data checks or claims a cost optimum.
-pub fn explain(r: &Recipe) -> Json {
+pub fn explain(declared: &Recipe) -> Json {
+    let r = &expand(declared);
     let mut nodes = vec![];
     let mut unsupported = vec![];
     for s in sorted(&r.sources, |s| &s.id) {
+        if population(r, &s.id).is_some() {
+            continue;
+        }
         nodes.push(json!({
             "id": format!("source:{}", s.id),
             "kind": "scan",
@@ -1785,6 +1867,9 @@ pub fn explain(r: &Recipe) -> Json {
             "grain": s.grain,
             "estimates": {"rows":null,"bytes":null,"status":"unknown"},
         }));
+    }
+    for p in sorted(&r.populations, |p| &p.id) {
+        nodes.push(population_node(r, p, &mut unsupported));
     }
     for rel in sorted(&r.relationships, |x| &x.id) {
         let mut depends_on =
@@ -1808,6 +1893,10 @@ pub fn explain(r: &Recipe) -> Json {
             "strict": rel.strict,
             "depends_on": depends_on,
         }));
+        if let (Some(pm), Some(node)) = (&rel.period, nodes.last_mut()) {
+            node["period"] = json!({"key": pm.key, "date": pm.date, "derive": "calendar_month",
+                "rule": "the member's period equals the calendar month (YYYY-MM) of the date as recorded; dates are business-local and never converted between time zones"});
+        }
     }
     for f in sorted(&r.features, |f| &f.id) {
         nodes.push(expression_node(
@@ -1835,6 +1924,9 @@ pub fn explain(r: &Recipe) -> Json {
                     ("eligibility", true) => (Ok(p.clone()), "before_grouping"),
                     ("eligibility", false) => (Ok(p.clone()), "population_eligibility"),
                     (_, true) => (group_scope(p, r, out, true), "after_grouping"),
+                    _ if population_output(r, out) => {
+                        (line_scope(p, out, true), "after_allocation")
+                    }
                     _ => (line_scope(p, out, true), "final_selection"),
                 };
                 let mut node = expression_node(
@@ -1845,7 +1937,9 @@ pub fn explain(r: &Recipe) -> Json {
                     &mut unsupported,
                 );
                 node["applies"] = json!(applies);
-                node["retains"] = json!(if applies == "after_grouping" {
+                node["retains"] = json!(if applies == "after_allocation" {
+                    "member rows where the predicate is true; it runs after allocation and never changes shares or the recipients in any denominator"
+                } else if applies == "after_grouping" {
                     "group rows where the predicate is true; it changes no measure and no group population"
                 } else {
                     "rows where the predicate is true; false and unknown are excluded"
@@ -1908,7 +2002,12 @@ pub fn explain(r: &Recipe) -> Json {
         if !out.aggregates.is_empty() {
             transitions.push(json!({"from":anchor_grain,"to":out.group_by,"operation":"group_by"}));
         }
-        nodes.push(json!({
+        for a in &out.allocations {
+            let node = allocation_node(r, out, a, &mut unsupported);
+            columns.push(node["id"].clone());
+            nodes.push(node);
+        }
+        let mut node = json!({
             "id": base,
             "kind": "output",
             "anchor": format!("source:{}", out.anchor),
@@ -1920,11 +2019,17 @@ pub fn explain(r: &Recipe) -> Json {
             "schema": output_columns(r, out),
             "detail": out.detail,
             "output_order": "unspecified",
-        }));
+        });
+        if population_output(r, out) {
+            node["anchor"] = json!(format!("population:{}", out.anchor));
+            node["population"] = json!(format!("population:{}", out.anchor));
+            node["completeness"] = completeness(r, out);
+        }
+        nodes.push(node);
     }
     json!({
-        "recipe": {"name": r.name, "format_version": r.format_version, "hash": r.hash().ok()},
-        "validation": validate(r),
+        "recipe": {"name": r.name, "format_version": r.format_version, "hash": declared.hash().ok()},
+        "validation": validate(declared),
         "placement": "local",
         "estimates": {"rows": null, "bytes": null, "status": "unknown"},
         "data_checks": "not-run",
@@ -2308,4 +2413,554 @@ pub fn explain_bound(recipe: &Recipe, bindings: &Bindings, policy: &Policy) -> J
         "data_checks": "not-run",
     });
     explanation
+}
+
+// ---------------------------------------------------------------------------
+// Slice 2: explicit populations and allocation (docs/spec/slice-2.md).
+
+/// The population declared with `id`, if any.
+pub(crate) fn population<'a>(r: &'a Recipe, id: &str) -> Option<&'a Population> {
+    r.populations.iter().find(|p| p.id == id)
+}
+/// True when `out` anchors at an explicit population.
+pub(crate) fn population_output(r: &Recipe, out: &Output) -> bool {
+    population(r, &out.anchor).is_some()
+}
+/// A copy of `r` in which each population is also a source: the recipient's
+/// fields plus the period field, with the recipient identity and grain extended
+/// by the period. Relationships, expressions and outputs then address members
+/// the same way they address any source. Never serialized: canonical JSON and
+/// hashes come from the declared recipe.
+pub(crate) fn expand(r: &Recipe) -> Recipe {
+    let mut expanded = r.clone();
+    for p in &r.populations {
+        let recipients = r.sources.iter().find(|s| s.id == p.recipients);
+        let mut fields = recipients
+            .map(|s| s.projection.fields.clone())
+            .unwrap_or_default();
+        fields.insert(
+            p.period.field.clone(),
+            Field {
+                path: String::new(),
+                data_type: Type::String,
+                nullable: false,
+                header: false,
+            },
+        );
+        let extend = |keys: Option<&Vec<String>>| {
+            let mut keys = keys.cloned().unwrap_or_default();
+            keys.push(p.period.field.clone());
+            keys
+        };
+        expanded.sources.push(Source {
+            id: p.id.clone(),
+            projection: Projection {
+                array: None,
+                fields,
+            },
+            identity: extend(recipients.map(|s| &s.identity)),
+            grain: extend(recipients.map(|s| &s.grain)),
+        });
+    }
+    expanded
+}
+/// `YYYY-MM` with a month from 01 to 12.
+pub(crate) fn calendar_month(text: &str) -> bool {
+    let b = text.as_bytes();
+    b.len() == 7
+        && b[4] == b'-'
+        && b.iter()
+            .enumerate()
+            .all(|(i, c)| i == 4 || c.is_ascii_digit())
+        && matches!(text[5..].parse::<u8>(), Ok(1..=12))
+}
+/// A recipient filter reads recipient fields only: no paths, no aggregates.
+fn recipient_predicate(
+    e: &Expr,
+    r: &Recipe,
+    recipients: &str,
+    seen: &mut BTreeSet<String>,
+) -> Result<()> {
+    match e {
+        Expr::Field { source, path, .. } => {
+            if source != recipients || !path.is_empty() {
+                return Err(error(
+                    "INVALID_PATH",
+                    format!(
+                        "a population filter reads only fields of its recipient source {recipients}"
+                    ),
+                ));
+            }
+        }
+        Expr::Aggregate { .. } => {
+            return Err(error(
+                "INVALID_PATH",
+                "a population filter cannot aggregate; it selects recipient records",
+            ));
+        }
+        Expr::Feature { id } => {
+            if seen.insert(id.clone()) {
+                if let Some(f) = r.features.iter().find(|f| f.id == *id) {
+                    recipient_predicate(&f.expr, r, recipients, seen)?;
+                }
+            }
+        }
+        _ => {
+            for child in children(e) {
+                recipient_predicate(child, r, recipients, seen)?;
+            }
+        }
+    }
+    Ok(())
+}
+fn invalid_population(message: impl Into<String>) -> Error {
+    error("INVALID_POPULATION", message)
+}
+fn invalid_allocation(message: impl Into<String>) -> Error {
+    error("INVALID_ALLOCATION", message)
+}
+/// Population declarations: recipients, period set and recipient filter.
+fn check_populations(r: &Recipe) -> Result<()> {
+    for p in &r.populations {
+        if population(r, &p.recipients).is_some() {
+            return Err(invalid_population(format!(
+                "population {} must cross a declared source, not another population",
+                p.id
+            )));
+        }
+        let recipients = source(r, &p.recipients)?;
+        let period = &p.period;
+        if period.field.is_empty() || recipients.projection.fields.contains_key(&period.field) {
+            return Err(invalid_population(format!(
+                "period field {:?} of population {} must be a new name, not a field of {}",
+                period.field, p.id, p.recipients
+            )));
+        }
+        match (&period.values, &period.from) {
+            (Some(values), None) => {
+                if values.is_empty() {
+                    return Err(invalid_population(format!(
+                        "population {} lists no periods",
+                        p.id
+                    )));
+                }
+                let mut seen = BTreeSet::new();
+                for value in values {
+                    if !calendar_month(value) {
+                        return Err(error(
+                            "INVALID_PERIOD",
+                            format!(
+                                "period {value:?} of population {} is not a calendar month YYYY-MM",
+                                p.id
+                            ),
+                        ));
+                    }
+                    if !seen.insert(value) {
+                        return Err(invalid_population(format!(
+                            "population {} lists period {value} twice",
+                            p.id
+                        )));
+                    }
+                }
+            }
+            (None, Some(from)) => {
+                if population(r, &from.source).is_some() {
+                    return Err(invalid_population(
+                        "a period set is read from a declared source",
+                    ));
+                }
+                if field(r, &from.source, &from.field)?.data_type != Type::String {
+                    return Err(error(
+                        "TYPE_MISMATCH",
+                        format!(
+                            "period set of population {} reads {}.{}, which must be calendar-month text (string)",
+                            p.id, from.source, from.field
+                        ),
+                    ));
+                }
+            }
+            _ => {
+                return Err(invalid_population(format!(
+                    "population {} declares its periods either as listed values or from a named source field, exactly one of the two; nothing infers them",
+                    p.id
+                )));
+            }
+        }
+        if let Some(filter) = &p.filter {
+            boolean(expression_type(filter, r)?)?;
+            recipient_predicate(filter, r, &p.recipients, &mut BTreeSet::new())?;
+        }
+    }
+    Ok(())
+}
+/// A period-derived key joins finer records to a population by the calendar
+/// period of a target date.
+fn check_period_match(r: &Recipe, rel: &Relationship) -> Result<()> {
+    let Some(pm) = &rel.period else {
+        return Ok(());
+    };
+    let Some(p) = population(r, &rel.from) else {
+        return Err(error(
+            "INVALID_RELATIONSHIP",
+            format!(
+                "relationship {} derives a period key but starts at {}, which is not a population",
+                rel.id, rel.from
+            ),
+        ));
+    };
+    if pm.key != p.period.field {
+        return Err(error(
+            "INVALID_RELATIONSHIP",
+            format!(
+                "relationship {} must match the period field {} of population {}",
+                rel.id, p.period.field, p.id
+            ),
+        ));
+    }
+    if rel.validity.is_some() {
+        return Err(error(
+            "INVALID_RELATIONSHIP",
+            format!(
+                "relationship {} declares both validity and a period key",
+                rel.id
+            ),
+        ));
+    }
+    if field(r, &rel.to, &pm.date)?.data_type != Type::Date {
+        return Err(error(
+            "TYPE_MISMATCH",
+            format!(
+                "period derivation of {} requires {}.{} to be a date",
+                rel.id, rel.to, pm.date
+            ),
+        ));
+    }
+    Ok(())
+}
+/// Typing of allocation declarations.
+fn check_allocation_types(r: &Recipe, out: &Output) -> Result<()> {
+    for a in &out.allocations {
+        let quantity = field(r, &a.quantity.source, &a.quantity.field)?;
+        if !matches!(quantity.data_type, Type::Decimal { .. }) {
+            return Err(error(
+                "TYPE_MISMATCH",
+                format!(
+                    "allocation {} quantity {}.{} must be a decimal",
+                    a.name, a.quantity.source, a.quantity.field
+                ),
+            ));
+        }
+        check_type(&Type::Decimal {
+            precision: a.precision,
+            scale: a.scale,
+        })?;
+        if !matches!(
+            expression_type(&a.weight, r)?,
+            Some(Type::Int64 | Type::Decimal { .. })
+        ) {
+            return Err(error(
+                "TYPE_MISMATCH",
+                format!("allocation {} weight must be Int64 or decimal", a.name),
+            ));
+        }
+        if let Some(filter) = &a.recipient_filter {
+            if expression_type(filter, r)? != Some(Type::Boolean) {
+                return Err(error(
+                    "TYPE_MISMATCH",
+                    format!("recipient filter of allocation {} must be Boolean", a.name),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+/// Shape of a population output, its completeness declaration and allocations.
+fn check_population_output(r: &Recipe, out: &Output) -> Result<()> {
+    if !population_output(r, out) {
+        if !out.complete.is_empty() {
+            return Err(invalid_population(format!(
+                "output {} declares complete activity, which applies to members of an explicit population only",
+                out.id
+            )));
+        }
+        if !out.allocations.is_empty() {
+            return Err(invalid_allocation(format!(
+                "output {} allocates, but allocation needs an explicit population as the output anchor",
+                out.id
+            )));
+        }
+        return Ok(());
+    }
+    if out.eligibility.is_some() {
+        return Err(invalid_population(format!(
+            "output {} anchors at population {}; declare the recipient subset in the population's filter",
+            out.id, out.anchor
+        )));
+    }
+    if out.detail || !out.aggregates.is_empty() || !out.group_by.is_empty() {
+        return Err(invalid_population(format!(
+            "output {} keeps one row per member of population {}; it is neither a detail output nor regrouped",
+            out.id, out.anchor
+        )));
+    }
+    for id in &out.complete {
+        let rel = relationship(r, id)?;
+        if rel.from != out.anchor || rel.cardinality != Cardinality::OneToMany {
+            return Err(invalid_population(format!(
+                "complete activity {id} must be a one_to_many relationship from population {}",
+                out.anchor
+            )));
+        }
+    }
+    let anchor = source(r, &out.anchor)?;
+    for a in &out.allocations {
+        let via = relationship(r, &a.via)?;
+        if via.from != out.anchor
+            || via.to != a.quantity.source
+            || via.cardinality != Cardinality::ManyToOne
+            || via.validity.is_some()
+            || via.period.is_some()
+        {
+            return Err(invalid_allocation(format!(
+                "allocation {} assigns partitions through {}, which must be a plain many_to_one relationship from population {} to quantity source {}",
+                a.name, a.via, out.anchor, a.quantity.source
+            )));
+        }
+        let coarse = source(r, &a.quantity.source)?;
+        let set = |keys: &[String]| keys.iter().cloned().collect::<BTreeSet<_>>();
+        if a.partition.is_empty()
+            || set(&a.partition).len() != a.partition.len()
+            || set(&a.partition) != set(&coarse.grain)
+            || set(&a.partition) != set(&via.to_keys)
+        {
+            return Err(invalid_allocation(format!(
+                "allocation {} partition {:?} must be the grain {:?} of {} and the target keys of {}",
+                a.name, a.partition, coarse.grain, coarse.id, via.id
+            )));
+        }
+        if let Type::Decimal { scale, .. } =
+            field(r, &a.quantity.source, &a.quantity.field)?.data_type
+        {
+            if a.scale < scale {
+                return Err(invalid_allocation(format!(
+                    "allocation {} result scale {} is below the quantity scale {scale}; assigned amounts could not conserve the quantity",
+                    a.name, a.scale
+                )));
+            }
+        }
+        check_output_paths(&a.weight, r, &out.anchor, &mut BTreeSet::new())?;
+        if let Some(filter) = &a.recipient_filter {
+            check_output_paths(filter, r, &out.anchor, &mut BTreeSet::new())?;
+        }
+        // Currency: a quantity that carries one goes only to recipients that carry
+        // one; amounts are compared per recipient at run time.
+        if has_currency(r, &coarse.id) && !anchor.projection.fields.contains_key("currency") {
+            return Err(error(
+                "GRAIN_VIOLATION",
+                format!(
+                    "allocation {} distributes {} amounts that declare a currency, but the recipients of {} declare none",
+                    a.name, coarse.id, out.anchor
+                ),
+            ));
+        }
+    }
+    // Totals of a population output are kept per currency: when members carry a
+    // currency, the output keeps it as its `currency` column.
+    if anchor.projection.fields.contains_key("currency") {
+        let keeps = out.columns.iter().any(|c| {
+            c.name == "currency"
+                && matches!(&c.expr, Expr::Field { source, field, path }
+                    if source == &out.anchor && field == "currency" && path.is_empty())
+        });
+        if !keeps {
+            return Err(error(
+                "GRAIN_VIOLATION",
+                format!(
+                    "population output {} must keep the members' currency as its currency column",
+                    out.id
+                ),
+            ));
+        }
+    } else {
+        for c in &out.columns {
+            if let Some(source) = measure_currency_source(&c.expr, r, &mut BTreeSet::new()) {
+                if r.relationships.iter().any(|rel| {
+                    rel.from == out.anchor
+                        && rel.to == source
+                        && rel.cardinality == Cardinality::OneToMany
+                }) {
+                    return Err(error(
+                        "GRAIN_VIOLATION",
+                        format!(
+                            "column {} of population output {} aggregates amounts of {source}, which declares a currency, but the members declare none",
+                            c.name, out.id
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+/// The empty-member rule of one activity relationship of a population output,
+/// and the statement explain and the run manifest give for it.
+pub(crate) fn completeness_rule(
+    r: &Recipe,
+    out: &Output,
+    rel: &Relationship,
+) -> (&'static str, String) {
+    if out.complete.contains(&rel.id) {
+        (
+            "declared_complete",
+            format!(
+                "Declared complete: a member with no {} records through {} has sum 0 and count 0. Completeness is a declared assumption, not an observation; the run does not verify it.",
+                rel.to, rel.id
+            ),
+        )
+    } else {
+        let _ = r;
+        (
+            "observed_only",
+            format!(
+                "Not declared complete: a member with no {} records through {} has a null sum, min and max and a count of 0; an absence of records is never read as zero.",
+                rel.to, rel.id
+            ),
+        )
+    }
+}
+/// One-to-many activity relationships from a population output's anchor.
+pub(crate) fn activity<'a>(r: &'a Recipe, out: &Output) -> Vec<&'a Relationship> {
+    r.relationships
+        .iter()
+        .filter(|rel| rel.from == out.anchor && rel.cardinality == Cardinality::OneToMany)
+        .collect()
+}
+fn completeness(r: &Recipe, out: &Output) -> Json {
+    Json::Object(
+        activity(r, out)
+            .into_iter()
+            .map(|rel| {
+                let (rule, statement) = completeness_rule(r, out, rel);
+                (
+                    rel.id.clone(),
+                    json!({"relationship": format!("relationship:{}", rel.id), "source": format!("source:{}", rel.to), "rule": rule, "statement": statement}),
+                )
+            })
+            .collect(),
+    )
+}
+fn population_node(r: &Recipe, p: &Population, unsupported: &mut Vec<Json>) -> Json {
+    let member = r.sources.iter().find(|s| s.id == p.id);
+    let mut depends_on = vec![format!("source:{}", p.recipients)];
+    let period = match (&p.period.values, &p.period.from) {
+        (Some(values), _) => {
+            json!({"field": p.period.field, "calendar": "month", "values": values, "source": "listed"})
+        }
+        (_, Some(from)) => {
+            depends_on.push(format!("source:{}", from.source));
+            json!({"field": p.period.field, "calendar": "month", "from": format!("source:{}/field:{}", from.source, from.field),
+                "source": "distinct values of the named field, read at run time"})
+        }
+        _ => Json::Null,
+    };
+    let filter = p.filter.as_ref().map(|f| {
+        let mut node = expression_node(
+            format!("population:{}/filter", p.id),
+            "population_stage",
+            f,
+            r,
+            unsupported,
+        );
+        node["applies"] = json!("before_population");
+        node["retains"] =
+            json!("recipient records where the predicate is true; false and unknown are excluded");
+        node
+    });
+    json!({
+        "id": format!("population:{}", p.id),
+        "kind": "population",
+        "recipients": format!("source:{}", p.recipients),
+        "filter": filter,
+        "period": period,
+        "identity": member.map(|s| &s.identity),
+        "grain": member.map(|s| &s.grain),
+        "size": "recipients that pass the filter times periods; counted against limits.anchor_rows before any member is materialized",
+        "inference": "The population is never inferred from observed activity or from the requested grain: it is exactly the declared recipients crossed with the declared periods.",
+        "depends_on": depends_on,
+        "estimates": {"rows": null, "bytes": null, "status": "unknown"},
+    })
+}
+fn allocation_node(r: &Recipe, out: &Output, a: &Allocation, unsupported: &mut Vec<Json>) -> Json {
+    let base = format!("output:{}/allocation:{}", out.id, a.name);
+    let mut node = expression_node(base.clone(), "allocation", &a.weight, r, unsupported);
+    let weight_type = node["type"].take();
+    node["type"] = json!(Type::Decimal {
+        precision: a.precision,
+        scale: a.scale
+    });
+    node["weight_type"] = weight_type;
+    node["quantity"] = json!(format!(
+        "source:{}/field:{}",
+        a.quantity.source, a.quantity.field
+    ));
+    node["partition"] = json!(a.partition);
+    node["partition_source"] = json!(format!("source:{}", a.quantity.source));
+    node["via"] = json!(format!("relationship:{}", a.via));
+    node["recipients"] = json!(format!("population:{}", out.anchor));
+    node["residual"] = json!(a.residual);
+    node["rounding"] = json!(match a.residual {
+        ResidualPolicy::LargestRemainder =>
+            "quantize toward zero, then give the remaining last-place units one each to recipients in descending fractional remainder, ties by ascending recipient identity; assigned amounts sum exactly to the quantity",
+        ResidualPolicy::Report =>
+            "quantize half-even; the residual (quantity minus assigned sum, possibly negative) is reported per partition",
+    });
+    node["null_weight"] = json!(a.null_weight.unwrap_or(NullWeight::Error));
+    node["unallocated"] = json!(a.unallocated.unwrap_or(Unallocated::Error));
+    node["share"] = json!(format!(
+        "quantity × weight ÷ sum of weights in the partition, in exact decimal arithmetic, then quantized to scale {}",
+        a.scale
+    ));
+    node["denominator"] = json!(
+        "every recipient of the partition that passes the recipient filter, including members the output filter later removes; dependency pruning never drops a recipient from the denominator"
+    );
+    node["conservation"] = json!(
+        "checked per partition after every run: assigned sum plus residual equals the quantity exactly; a violation fails the run"
+    );
+    node["missing_quantity"] = json!(
+        "a recipient whose partition has no quantity is assigned null and its row is unresolved, never zero"
+    );
+    if let Some(filter) = &a.recipient_filter {
+        let mut filter = expression_node(
+            format!("{base}/recipient_filter"),
+            "allocation_recipient_filter",
+            filter,
+            r,
+            unsupported,
+        );
+        filter["applies"] = json!("before_normalization");
+        filter["retains"] = json!(
+            "members where the predicate is true are recipients; the rest are excluded before weights are summed, so the filter changes shares"
+        );
+        node["recipient_filter"] = filter;
+    }
+    if let Some(depends_on) = node["depends_on"].as_array_mut() {
+        for id in [
+            format!("population:{}", out.anchor),
+            format!("relationship:{}", a.via),
+            format!("source:{}/field:{}", a.quantity.source, a.quantity.field),
+        ] {
+            depends_on.push(json!(id));
+        }
+    }
+    if let Some(transitions) = node["grain_transitions"].as_array_mut() {
+        transitions.push(json!({
+            "from": format!("source:{}", a.quantity.source),
+            "to": format!("population:{}", out.anchor),
+            "via": format!("relationship:{}", a.via),
+            "operation": "allocate",
+            "additive": true,
+            "validated": "partition keys unique; shares conserve the quantity per partition",
+        }));
+    }
+    node
 }

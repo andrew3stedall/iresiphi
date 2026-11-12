@@ -634,6 +634,7 @@ enum Records {
     Evidence,
     Candidates,
     Details,
+    Allocations,
 }
 impl PyRun {
     fn report(&self, py: Python<'_>) -> PyResult<Arc<RunReport>> {
@@ -655,13 +656,16 @@ impl PyRun {
             "primary" => Records::Evidence,
             "candidate" => Records::Candidates,
             "detail" => Records::Details,
+            "allocation" => Records::Allocations,
             other => {
                 return Err(iresiphi_error(
                     py,
                     &record(
                         "INVALID_ARGUMENT",
                         "python",
-                        format!("evidence kind {other:?} is not primary, candidate or detail"),
+                        format!(
+                            "evidence kind {other:?} is not primary, candidate, detail or allocation"
+                        ),
                     ),
                 ));
             }
@@ -784,10 +788,11 @@ impl PyRun {
                     index += 1;
                 }
             }
-            Records::Evidence | Records::Candidates | Records::Details => {
+            Records::Evidence | Records::Candidates | Records::Details | Records::Allocations => {
                 let evidence = match records {
                     Records::Evidence => &report.evidence,
                     Records::Candidates => &report.candidate_evidence,
+                    Records::Allocations => &report.allocation_evidence,
                     _ => &report.detail_evidence,
                 };
                 total = evidence.len();
@@ -860,6 +865,7 @@ impl PyRun {
         Ok(match Self::evidence_kind(py, kind)? {
             Records::Candidates => report.candidate_evidence.len(),
             Records::Details => report.detail_evidence.len(),
+            Records::Allocations => report.allocation_evidence.len(),
             _ => report.evidence.len(),
         })
     }
@@ -901,7 +907,8 @@ impl PyRun {
             next: Mutex::new(Some(0)),
         })
     }
-    /// Copy one batch of evidence records (`primary`, `candidate` or `detail`).
+    /// Copy one batch of evidence records (`primary`, `candidate`, `detail` or
+    /// `allocation`).
     /// Records are plain JSON; scalar values stay tagged exact text.
     #[pyo3(signature = (kind="primary", offset=0, rows=None))]
     fn evidence<'py>(

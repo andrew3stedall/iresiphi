@@ -28,7 +28,7 @@ export class Run {
   rowCount(table: string): bigint;
   batch(table: string, offset?: number, rows?: number): {[column: string]: Scalar}[];
   batches(table: string, rows?: number): Generator<{[column: string]: Scalar}[]>;
-  evidence(kind?: 'primary' | 'candidate' | 'detail'): RecordData[];
+  evidence(kind?: 'primary' | 'candidate' | 'detail' | 'allocation'): RecordData[];
   close(): void;
 }
 export function run(recipe: Recipe, bindings: Bindings, policy: Policy, settings?: {signal?: AbortSignal; destination?: string}): Promise<Run>;
