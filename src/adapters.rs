@@ -200,6 +200,7 @@ fn materialize_sources(
     bindings: &Bindings,
     policy: &Policy,
     cancel: &AtomicBool,
+    mut reads: Option<&mut BTreeMap<String, SourceRead>>,
 ) -> Result<BTreeMap<String, Vec<Row>>> {
     let mut result = BTreeMap::new();
     let mut total = 0;
@@ -210,8 +211,9 @@ fn materialize_sources(
         let binding = bindings
             .get(&source.id)
             .ok_or_else(|| err("MISSING_BINDING", format!("missing binding {}", source.id)))?;
-        check_text_settings(binding)?;
-        let bytes = read_bytes(binding, policy, &mut total, cancel)?;
+        let subject = |e: Error| tag_source(e, &source.id);
+        check_text_settings(binding).map_err(subject)?;
+        let bytes = read_bytes(binding, policy, &mut total, cancel).map_err(subject)?;
         let fingerprint = crate::validation::hex(&Sha256::digest(&bytes));
         let reference = SourceReference {
             source: source.id.clone(),
@@ -238,8 +240,8 @@ fn materialize_sources(
         admission.limits.lookup_rows = max;
         admission.limits.retained_bytes = policy.limits.retained_bytes.saturating_sub(retained);
         let mut rows = match binding.adapter.as_str() {
-            "json" => read_json(source, &bytes, &reference, &admission, cancel)?,
-            "csv" => read_csv(source, binding, &bytes, &reference, &admission, cancel)?,
+            "json" => read_json(source, &bytes, &reference, &admission, cancel),
+            "csv" => read_csv(source, binding, &bytes, &reference, &admission, cancel),
             "xlsx" => read_xlsx(
                 source,
                 binding,
@@ -248,9 +250,10 @@ fn materialize_sources(
                 &admission,
                 &mut expanded,
                 cancel,
-            )?,
+            ),
             _ => return Err(err("UNSUPPORTED_CAPABILITY", "unsupported source adapter")),
-        };
+        }
+        .map_err(subject)?;
         let max = if recipe
             .outputs
             .iter()
@@ -266,8 +269,9 @@ fn materialize_sources(
         } else {
             policy.limits.lookup_rows
         };
-        limit(rows.len() <= max, "source row count")?;
-        let mut identities = BTreeSet::new();
+        limit(rows.len() <= max, "source row count").map_err(subject)?;
+        let mut identities: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        let mut null_identities = Vec::new();
         let mut batch_bytes = 0usize;
         for (i, row) in rows.iter_mut().enumerate() {
             check_cancel(cancel)?;
@@ -277,17 +281,10 @@ fn materialize_sources(
                 .map(|id| row.fields.get(id).cloned().unwrap_or(Value::Null))
                 .collect();
             if key.iter().any(|v| matches!(v, Value::Null)) {
-                return Err(err(
-                    "NULL_IDENTITY",
-                    format!("null identity in {}", source.id),
-                ));
-            }
-            let key = serde_json::to_string(&key).map_err(io_error)?;
-            if !identities.insert(key) {
-                return Err(err(
-                    "DUPLICATE_IDENTITY",
-                    format!("duplicate identity in {}", source.id),
-                ));
+                null_identities.push(i);
+            } else {
+                let key = serde_json::to_string(&key).map_err(io_error)?;
+                identities.entry(key).or_default().push(i);
             }
             let size = serde_json::to_vec(row).map_err(io_error)?.len();
             limit(
@@ -308,9 +305,100 @@ fn materialize_sources(
                 "retained source materialization bytes",
             )?;
         }
+        let duplicates: Vec<usize> = identities
+            .into_values()
+            .filter(|rows| rows.len() > 1)
+            .flatten()
+            .collect();
+        for (code, affected, what) in [
+            (
+                "NULL_IDENTITY",
+                &null_identities,
+                "a null identity component",
+            ),
+            ("DUPLICATE_IDENTITY", &duplicates, "a duplicated identity"),
+        ] {
+            if affected.is_empty() {
+                continue;
+            }
+            let values = affected
+                .iter()
+                .take(Error::SAMPLE_CAP)
+                .map(|&i| identity_values(&rows[i], &source.identity))
+                .collect();
+            return Err(err(
+                code,
+                format!(
+                    "{} records of {} have {what}; identity must be present and unique",
+                    affected.len(),
+                    source.id
+                ),
+            )
+            .with_subject(format!("source:{}", source.id))
+            .with_check("data.identity")
+            .with_affected(affected.len(), affected.iter().map(|&i| &rows[i].reference))
+            .with_values(policy.diagnostic_values, values));
+        }
+        if let Some(reads) = reads.as_deref_mut() {
+            reads.insert(
+                source.id.clone(),
+                SourceRead {
+                    adapter: binding.adapter.clone(),
+                    binding: reference.binding.clone(),
+                    fingerprint: reference.fingerprint.clone(),
+                    bytes_read: bytes.len(),
+                    rows: rows.len(),
+                },
+            );
+        }
         result.insert(source.id.clone(), rows);
     }
     Ok(result)
+}
+
+/// What one run actually read for a source: its safe (path-free) binding identity,
+/// the fingerprint of the bytes read, the byte count and the admitted row count.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SourceRead {
+    pub adapter: String,
+    pub binding: String,
+    pub fingerprint: String,
+    pub bytes_read: usize,
+    pub rows: usize,
+}
+
+/// Attribute a diagnostic to the source being read unless it already names one.
+fn tag_source(mut e: Error, source: &str) -> Error {
+    if e.subject.is_none() {
+        e.subject = Some(format!("source:{source}"));
+    }
+    e
+}
+
+/// Identity components as plain JSON scalars, for opted-in diagnostic values.
+fn identity_values(row: &Row, keys: &[String]) -> serde_json::Value {
+    serde_json::Value::Object(
+        keys.iter()
+            .map(|k| {
+                (
+                    k.clone(),
+                    plain_value(row.fields.get(k).unwrap_or(&Value::Null)),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// A typed value as a plain JSON scalar (numbers stay exact text).
+pub fn plain_value(value: &Value) -> serde_json::Value {
+    match value {
+        Value::Null => serde_json::Value::Null,
+        Value::Boolean { value } => serde_json::Value::Bool(*value),
+        Value::Int64 { value }
+        | Value::String { value }
+        | Value::Decimal { value, .. }
+        | Value::Date { value } => serde_json::Value::String(value.clone()),
+    }
 }
 
 struct RowCollector<'a> {
@@ -1706,7 +1794,16 @@ pub fn read_batches<'a>(
     policy: &Policy,
     cancel: &'a AtomicBool,
 ) -> Result<BTreeMap<String, SourceBatches<'a>>> {
-    let rows = materialize_sources(recipe, bindings, policy, cancel)?;
+    let rows = materialize_sources(recipe, bindings, policy, cancel, None)?;
+    into_batches(recipe, policy, cancel, rows)
+}
+
+fn into_batches<'a>(
+    recipe: &Recipe,
+    policy: &Policy,
+    cancel: &'a AtomicBool,
+    rows: BTreeMap<String, Vec<Row>>,
+) -> Result<BTreeMap<String, SourceBatches<'a>>> {
     rows.into_iter()
         .map(|(id, rows)| {
             let source = recipe
@@ -1740,7 +1837,19 @@ pub fn read_sources(
     policy: &Policy,
     cancel: &AtomicBool,
 ) -> Result<BTreeMap<String, Vec<Row>>> {
-    let sources = read_batches(recipe, bindings, policy, cancel)?;
+    read_sources_observed(recipe, bindings, policy, cancel).map(|(rows, _)| rows)
+}
+
+/// [`read_sources`] plus what was read for each source, for the run manifest.
+pub fn read_sources_observed(
+    recipe: &Recipe,
+    bindings: &Bindings,
+    policy: &Policy,
+    cancel: &AtomicBool,
+) -> Result<(BTreeMap<String, Vec<Row>>, BTreeMap<String, SourceRead>)> {
+    let mut reads = BTreeMap::new();
+    let rows = materialize_sources(recipe, bindings, policy, cancel, Some(&mut reads))?;
+    let sources = into_batches(recipe, policy, cancel, rows)?;
     let mut result = BTreeMap::new();
     for (id, batches) in sources {
         let mut rows = Vec::new();
@@ -1750,5 +1859,152 @@ pub fn read_sources(
         }
         result.insert(id, rows);
     }
-    Ok(result)
+    Ok((result, reads))
+}
+
+/// Bound validation's schema inspection (`data_checks = "none"`): open every bound
+/// source under the read policy and check its structure against the declared
+/// projection without decoding records. CSV: the header record. XLSX: package
+/// safety preflight, the named sheet and its declared header row, read cell by cell
+/// up to that row. JSON: the declared array pointer and required header pointers.
+/// Record values, identities, relationships and intervals are data checks and are
+/// left to `data_checks = "full"` and to every actual run.
+pub fn inspect_schemas(recipe: &Recipe, bindings: &Bindings, policy: &Policy) -> Result<usize> {
+    let cancel = AtomicBool::new(false);
+    let mut total = 0;
+    let mut expanded = 0;
+    for source in &recipe.sources {
+        let binding = bindings
+            .get(&source.id)
+            .ok_or_else(|| err("MISSING_BINDING", format!("missing binding {}", source.id)))?;
+        inspect_schema(source, binding, policy, &mut total, &mut expanded, &cancel)
+            .map_err(|e| tag_source(e, &source.id).with_check("source_schema"))?;
+    }
+    Ok(recipe.sources.len())
+}
+
+fn inspect_schema(
+    source: &Source,
+    binding: &Binding,
+    policy: &Policy,
+    total: &mut usize,
+    expanded: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    check_text_settings(binding)?;
+    let missing = |what: &str, name: &str| {
+        err(
+            "INVALID_PROJECTION",
+            format!("declared {what} {name} is not present in the source"),
+        )
+    };
+    match binding.adapter.as_str() {
+        "csv" => {
+            let dialect = CsvDialect::from_binding(binding)?;
+            let bytes = read_bytes(binding, policy, total, cancel)?;
+            let mut reader = CsvRecords::new(&bytes, &dialect, policy.limits.field_bytes, cancel);
+            let headers = reader
+                .next_record()?
+                .ok_or_else(|| err("INVALID_CSV", "CSV header record is required"))?;
+            let mut seen = BTreeSet::new();
+            if headers.iter().any(|h| !seen.insert(h)) {
+                return Err(err("INVALID_CSV", "duplicate header"));
+            }
+            for field in source.projection.fields.values() {
+                let path = field.path.strip_prefix('/').unwrap_or(&field.path);
+                if !headers.iter().any(|h| h == path) {
+                    return Err(missing("CSV column", path));
+                }
+            }
+        }
+        "xlsx" => {
+            let settings = xlsx_settings(source, binding)?;
+            let bytes = read_bytes(binding, policy, total, cancel)?;
+            xlsx_preflight(&bytes, &policy.limits, expanded, cancel)?;
+            let mut book: Xlsx<_> = calamine::open_workbook_from_rs(Cursor::new(&bytes[..]))
+                .map_err(|e: calamine::XlsxError| err("INVALID_XLSX", e.to_string()))?;
+            if !book.sheet_names().iter().any(|n| *n == settings.sheet) {
+                return Err(err(
+                    "INVALID_BINDING",
+                    format!("declared XLSX sheet {} does not exist", settings.sheet),
+                ));
+            }
+            let mut cells = book
+                .worksheet_cells_reader(&settings.sheet)
+                .map_err(|e| err("INVALID_XLSX", e.to_string()))?;
+            let mut headers = BTreeSet::new();
+            let mut decoded = 0usize;
+            while let Some(cell) = cells
+                .next_cell()
+                .map_err(|e| err("INVALID_XLSX", e.to_string()))?
+            {
+                decoded += 1;
+                limit(
+                    decoded <= policy.limits.worksheet_cells,
+                    "decoded worksheet cells",
+                )?;
+                let (row, _) = cell.get_position();
+                if row > settings.header_row {
+                    break;
+                }
+                if row == settings.header_row {
+                    match cell.get_value() {
+                        calamine::DataRef::String(name) => {
+                            if !headers.insert(name.clone()) {
+                                return Err(err("INVALID_XLSX", "duplicate worksheet header"));
+                            }
+                        }
+                        calamine::DataRef::SharedString(name) => {
+                            if !headers.insert((*name).to_owned()) {
+                                return Err(err("INVALID_XLSX", "duplicate worksheet header"));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            for field in source.projection.fields.values() {
+                let header = field.path.strip_prefix('/').unwrap_or(&field.path);
+                if !headers.contains(header) {
+                    return Err(missing("XLSX column", header));
+                }
+            }
+        }
+        "json" => {
+            for path in source
+                .projection
+                .array
+                .iter()
+                .chain(source.projection.fields.values().map(|f| &f.path))
+            {
+                json_pointer_tokens(path)?;
+            }
+            let bytes = read_bytes(binding, policy, total, cancel)?;
+            json_preflight(&bytes, &policy.limits, cancel)?;
+            let root: serde_json::Value =
+                serde_json::from_slice(&bytes).map_err(|e| err("INVALID_JSON", e.to_string()))?;
+            if let Some(array) = &source.projection.array {
+                if !json_lookup(&root, array)?.is_some_and(|v| v.is_array()) {
+                    return Err(missing("JSON array", array));
+                }
+            }
+            // Header fields (and every field of a whole-document projection) live at
+            // document level; per-record fields are data and are not scanned here.
+            for field in source.projection.fields.values() {
+                if (field.header || source.projection.array.is_none())
+                    && !field.nullable
+                    && json_lookup(&root, &field.path)?.is_none_or(|v| v.is_null())
+                {
+                    return Err(missing("JSON field", &field.path));
+                }
+            }
+        }
+        other => {
+            return Err(err(
+                "UNSUPPORTED_ADAPTER",
+                format!("unsupported source adapter {other}"),
+            ));
+        }
+    }
+    Ok(())
 }

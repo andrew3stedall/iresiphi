@@ -802,7 +802,10 @@ fn check_identifiers(r: &Recipe) -> Result<()> {
             .map(|c| &c.name)
             .chain(out.aggregates.iter().map(|a| &a.name))
         {
-            if name.is_empty() || !names.insert(name) {
+            if name.is_empty()
+                || !names.insert(name)
+                || ["_status", "_reason", "_parent"].contains(&name.as_str())
+            {
                 return Err(error(
                     "DUPLICATE_ID",
                     format!("output {} column {name:?}", out.id),
@@ -968,6 +971,20 @@ fn check_outputs(r: &Recipe) -> Result<()> {
         for p in [&out.eligibility, &out.filter].into_iter().flatten() {
             check_output_paths(p, r, &out.anchor, &mut BTreeSet::new())?;
         }
+        if out.detail
+            && !r
+                .relationships
+                .iter()
+                .any(|rel| rel.to == out.anchor && rel.cardinality == Cardinality::OneToMany)
+        {
+            return Err(error(
+                "INVALID_DETAIL",
+                format!(
+                    "detail output {} needs a one_to_many relationship to its anchor {} that names the parent",
+                    out.id, out.anchor
+                ),
+            ));
+        }
         for g in &out.group_by {
             if !out.columns.iter().any(|c| c.name == *g) {
                 return Err(error("MISSING_REFERENCE", format!("group column {g}")));
@@ -1026,7 +1043,7 @@ fn static_report(r: &Recipe) -> Vec<Check> {
                 id: (*id).into(),
                 status: if failed { "failed" } else { "passed" }.into(),
                 coverage: (*coverage).into(),
-                diagnostic: result.err(),
+                diagnostic: result.err().map(|e| e.with_check(*id).completed()),
             }
         })
         .collect()
@@ -1551,7 +1568,8 @@ pub fn validate_bound(
         });
         return report;
     }
-    let feasibility = bound_feasibility(recipe, bindings, policy, true);
+    let feasibility = bound_feasibility(recipe, bindings, policy, true)
+        .map_err(|e| e.with_check("access").completed());
     report.valid = feasibility.is_ok();
     report.checks.push(Check {
         id: "access".into(),
@@ -1567,6 +1585,22 @@ pub fn validate_bound(
     if !report.valid {
         return report;
     }
+    let schema = crate::adapters::inspect_schemas(recipe, bindings, policy);
+    report.valid = schema.is_ok();
+    report.checks.push(Check {
+        id: "source_schema".into(),
+        status: if schema.is_ok() { "passed" } else { "failed" }.into(),
+        coverage: match &schema {
+            Ok(n) => format!(
+                "{n} bound sources: CSV headers, XLSX sheets and header rows, JSON array and required header pointers; no records decoded"
+            ),
+            Err(_) => "incomplete; stopped at the first schema mismatch".into(),
+        },
+        diagnostic: schema.err().map(Error::completed),
+    });
+    if !report.valid {
+        return report;
+    }
     if data_checks == "full" {
         let run = crate::engine::ExecutionContext::default().run(
             recipe,
@@ -1575,7 +1609,7 @@ pub fn validate_bound(
             &std::sync::atomic::AtomicBool::new(false),
         );
         let passed = run.status == "succeeded" || run.status == "succeeded_with_unresolved";
-        let diagnostic = run.diagnostics.into_iter().next();
+        let diagnostic = run.diagnostics.into_iter().find(|d| d.severity == "error");
         let rows = &run.manifest["source_rows"];
         report.valid = passed;
         report.checks.retain(|c| c.id != "data");
@@ -1622,15 +1656,6 @@ pub fn validate_bound(
                 diagnostic,
             });
         }
-    } else {
-        report.checks.push(Check {
-            id: "source_schema".into(),
-            status: "not-run".into(),
-            coverage:
-                "none; source schema probing without materialization is not available in this build"
-                    .into(),
-            diagnostic: None,
-        });
     }
     report
 }
