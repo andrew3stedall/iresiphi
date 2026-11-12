@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  x86:
+    name: x86 CI
+    # Terraform manages this repository variable. The fallback bootstraps CI
+    # before the repository settings have been applied.
+    runs-on: ${{ vars.CI_X86_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 15
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Verify x86 runner
+        shell: bash
+        run: |
+          architecture="$(uname -m)"
+          if [[ "$architecture" != "x86_64" ]]; then
+            echo "::error::x86 CI requires x86_64; received $architecture"
+            exit 1
+          fi
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: 1.17.2
+          terraform_wrapper: false
+
+      - name: Check Terraform formatting
+        run: terraform fmt -check -recursive
+
+      - name: Initialize Terraform for validation
+        run: terraform -chdir=infra/github init -backend=false -lockfile=readonly
+
+      - name: Validate repository settings
+        run: terraform -chdir=infra/github validate
+

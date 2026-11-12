@@ -62,6 +62,12 @@ The package name `iresiphi` returned no package record in direct checks of PyPI,
 - [Domain grounding](docs/research/domain-grounding.md) examines related systems, documented tradeoffs, correctness pitfalls, lineage, and execution options. It includes a worked example and distinguishes evidence from hypotheses for Iresiphi.
 - [Snowflake semantic views](docs/research/snowflake-semantic-views.md) studies reusable source mappings, relationship-aware metrics, level-of-detail calculations, and their implications for Iresiphi.
 
+## Continuous integration
+
+[CI and processor architecture](docs/ci.md) describes the GitHub-hosted x86 job,
+Terraform-managed repository settings, and where to add ARM-incompatible workloads
+as implementation begins.
+
 ## License
 
 Not selected yet.
