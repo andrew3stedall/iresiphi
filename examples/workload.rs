@@ -55,8 +55,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let running = Instant::now();
     let (report, returned) = std::thread::scope(|scope| {
         if let Some(ms) = cancel_after {
-            scope.spawn(|| {
-                let deadline = running + Duration::from_millis(ms);
+            let deadline = running + Duration::from_millis(ms);
+            let (finished, requested, cancel) = (&finished, &requested, &cancel);
+            scope.spawn(move || {
                 while Instant::now() < deadline && !finished.load(Ordering::Acquire) {
                     std::thread::sleep(Duration::from_millis(1));
                 }

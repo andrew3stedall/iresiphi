@@ -31,9 +31,31 @@ python examples/run.py /tmp/iresiphi-demo/recipe.iresiphi /tmp/iresiphi-demo/bin
   /tmp/iresiphi-demo/policy.json /tmp/iresiphi-demo/walkthrough-py rates=/tmp/iresiphi-demo/rates-2027.csv
 ```
 
-WALKTHROUGH_OUTPUT
+The Rust example printed this on the development machine (run IDs replaced with `<run id>`):
 
-The saved recipe holds no paths, data or secrets. Bindings (source ID to file, adapter and settings) and the policy (allowed roots and limits) are supplied for each run. Rebinding `rates` changes the rate source and nothing else: the original invoice JSON is not rewritten, and the recipe hash stays the same.
+```text
+saved and reopened /tmp/iresiphi-demo/walkthrough-rs/saved.iresiphi (c1ec549ae593222c62f3eee9ac31752abb49d796971e27f55c7480cdf198be1c)
+validate (static): valid=true checks=9 failed=0
+validate (bound): valid=true checks=11 failed=0
+explain: 32 nodes, feasible=true
+run <run id>: succeeded_with_unresolved into /tmp/iresiphi-demo/walkthrough-rs/bundle-1; 2 resolved and 1 unresolved lines; reconciliation "partial"
+  AUD billed: full "180.00", comparable "160.00", unresolved "20.00"
+  AUD enriched: full "22.00", comparable "15.00", unresolved "7.00"
+  AUD expected: full null, comparable "145.00", unresolved null
+  AUD variance: full null, comparable "15.00", unresolved null
+  warning LOOKUP_UNMATCHED relationship:a_mapping: 1 records
+run <run id>: succeeded_with_unresolved into /tmp/iresiphi-demo/walkthrough-rs/bundle-2; 2 resolved and 1 unresolved lines; reconciliation "partial"
+  AUD billed: full "180.00", comparable "160.00", unresolved "20.00"
+  AUD enriched: full "22.00", comparable "15.00", unresolved "7.00"
+  AUD expected: full null, comparable "149.00", unresolved null
+  AUD variance: full null, comparable "11.00", unresolved null
+  warning LOOKUP_UNMATCHED relationship:a_mapping: 1 records
+rebound run: recipe hash unchanged=true
+```
+
+The first run reproduces the agreed acceptance values: billed 180 in full, 160 comparable against 145 expected, variance 15, and 20 unresolved on the unmapped line. The second run reads `rates-2027.csv`, where supplier A's rate is 52, so A's expected charge becomes 104 and the comparable totals move to 149 and 11. The invoice inputs and the recipe hash do not change. The Python example prints the same lines, plus the first two rows of the first output as exact `Decimal` values.
+
+The saved recipe holds no paths, data or secrets. Each run takes its bindings (source ID to file, adapter and settings) and its policy (allowed roots and limits) as separate inputs. Rebinding `rates` changes the rate source and nothing else.
 
 ## Support and deferral matrix
 
@@ -137,7 +159,7 @@ Mixed currencies are rejected. A grouped output must group by the anchor's curre
 
 ## Cleanup behaviour
 
-A bundle run stages its files in a sibling directory of the destination, named `.iresiphi-` plus 32 random hex digits, with owner-only permissions (0700 directory, 0600 files). The run holds an exclusive lock on that directory. Publication is one `renameat2(RENAME_NOREPLACE)` to a destination that must not exist yet. Iresiphi never overwrites or merges, so retrying at the same destination returns `DESTINATION_EXISTS`. Filesystems without that rename primitive, and cross-device renames, are refused. The rename makes the bundle visible all at once. It is not an fsync-backed guarantee against power loss.
+A bundle run stages its files in a sibling directory of the destination, named `.iresiphi-` plus 32 random hex digits, with owner-only permissions (0700 directory, 0600 files). The run holds an exclusive lock on that directory. Publication is one `renameat2(RENAME_NOREPLACE)` to a destination that must not exist yet. Iresiphi never overwrites or merges, so retrying at the same destination returns `DESTINATION_EXISTS`. If the filesystem lacks that rename primitive the run fails with `PUBLICATION_UNSUPPORTED`, and a cross-device rename fails with `CROSS_DEVICE`; no test here exercises either path. The rename makes the bundle visible all at once. It is not an fsync-backed guarantee against power loss.
 
 - After success, failure or cancellation, the run removes its staging directory. If removal fails, the run report lists each leftover path and its error under `cleanup`.
 - Cancellation before the rename publishes nothing. After the rename the run is committed, and a later cancel request has no effect.
