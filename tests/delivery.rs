@@ -507,6 +507,9 @@ fn process_interruption_before_and_after_commit() {
         );
         unreachable!("the child process dies inside the run");
     }
+    // The parent's retries start engine workers in this process; serialize them
+    // with the tests that count live workers.
+    let _serial = serial();
     let f = fixture();
     for phase in ["write", "commit"] {
         let root = f.root().join(phase);

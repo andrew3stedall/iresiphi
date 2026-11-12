@@ -75,7 +75,7 @@ Peak RSS is the whole process's high-water mark, read from `/proc/self/status`. 
 
 ### Phase timings, run B
 
-The manifest's `phases_us` records each phase in microseconds. Delivery is added to the run report after commit.
+The manifest's `phases_us` records each phase in microseconds. Delivery time is known only after commit, so the run report carries it as a separate `delivery_us` key that the bundle's own manifest lacks. (Run B was measured before this rename, when delivery sat inside `phases_us`; the value is the same measurement.)
 
 | Phase | Time |
 | --- | ---: |
