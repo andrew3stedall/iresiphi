@@ -18,6 +18,7 @@ include = [
     "/scripts/third_party_notices.py",
     "/python/**",
     "/docs/preview.md",
+    "/docs/allocation.md",
     "/docs/measurements/**",
     "/Cargo.toml",
     "/Cargo.lock",

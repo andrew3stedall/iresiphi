@@ -177,6 +177,7 @@ fn nonlocal_fields_require_connected_to_one_paths() {
         cardinality: Cardinality::ManyToOne,
         validity: None,
         strict: false,
+        period: None,
     });
     r.outputs[0].columns[0].expr = Expr::Field {
         source: "other".into(),

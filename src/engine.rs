@@ -41,6 +41,10 @@ pub struct RunReport {
     /// One record per observed detail record linked to an output line.
     #[serde(default)]
     pub detail_evidence: Vec<serde_json::Value>,
+    /// One record per partition of each allocation: quantity, recipient count,
+    /// weight sum, assigned sum, residual and policy. Absent when nothing allocates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allocation_evidence: Vec<serde_json::Value>,
     pub diagnostics: Vec<Error>,
     pub manifest: serde_json::Value,
 }
@@ -110,7 +114,8 @@ impl ExecutionContext {
             "static",
             "version, references, types, named paths, grain and capabilities",
         );
-        match execute(recipe, bindings, policy, cancel, &mut progress) {
+        let expanded = crate::validation::expand(recipe);
+        match execute(recipe, &expanded, bindings, policy, cancel, &mut progress) {
             Ok(run) => {
                 let manifest = success_manifest(&id, recipe, policy, &progress, &run, started);
                 RunReport {
@@ -125,6 +130,7 @@ impl ExecutionContext {
                     evidence: run.evidence,
                     candidate_evidence: run.candidate_evidence,
                     detail_evidence: run.detail_evidence,
+                    allocation_evidence: run.allocation_evidence,
                     diagnostics: finalize(run.diagnostics, recipe),
                     manifest,
                 }
@@ -146,6 +152,7 @@ pub(crate) fn failed(id: String, error: Error, started: Instant) -> RunReport {
         evidence: vec![],
         candidate_evidence: vec![],
         detail_evidence: vec![],
+        allocation_evidence: vec![],
         diagnostics: vec![error],
         manifest: serde_json::json!({"run_id":id,"complete":false,"checks":{"data":"incomplete"},"elapsed_ms":started.elapsed().as_millis()}),
     }
@@ -299,6 +306,10 @@ impl Progress {
                 None => serde_json::json!({"id":id,"status":"not-run","coverage":"incomplete; the run stopped before this check"}),
             })
             .collect();
+        // Checks only some recipes need (populations, allocations), in run order.
+        for (id, coverage) in self.checks.iter().filter(|(c, _)| !RUN_CHECKS.contains(&c.as_str())) {
+            results.push(serde_json::json!({"id":id,"status":"passed","coverage":coverage}));
+        }
         if let Some(id) = failed.filter(|id| !RUN_CHECKS.contains(&id.as_str())) {
             results.push(serde_json::json!({"id":id,"status":"failed","coverage":"incomplete; the run stopped at this check"}));
         }
@@ -331,6 +342,12 @@ struct Execution {
     evidence: Vec<serde_json::Value>,
     candidate_evidence: Vec<serde_json::Value>,
     detail_evidence: Vec<serde_json::Value>,
+    allocation_evidence: Vec<serde_json::Value>,
+    /// Per population output: members, periods, activity coverage and the
+    /// empty-member rule.
+    populations: BTreeMap<String, serde_json::Value>,
+    /// Per output and allocation: policy, conservation check and partitions.
+    allocations: BTreeMap<String, serde_json::Value>,
     diagnostics: Vec<Error>,
     counts: serde_json::Map<String, serde_json::Value>,
     totals: serde_json::Value,
@@ -425,6 +442,7 @@ fn detail_parents<'a>(
 }
 
 fn execute(
+    declared: &Recipe,
     recipe: &Recipe,
     bindings: &Bindings,
     policy: &Policy,
@@ -434,8 +452,8 @@ fn execute(
     check(cancel)?;
     cancel.entered(RunPhase::Parse);
     let phase = Instant::now();
-    let (sources, reads) =
-        crate::adapters::read_sources_observed(recipe, bindings, policy, cancel)?;
+    let (mut sources, reads) =
+        crate::adapters::read_sources_observed(declared, bindings, policy, cancel)?;
     for read in reads.values() {
         for (phase, us) in [
             ("source_access", read.access_us),
@@ -459,7 +477,7 @@ fn execute(
         "data.types",
         format!("full: every projected field of every record; {rows_read} source records"),
     );
-    for source in &recipe.sources {
+    for source in &declared.sources {
         let rows = &sources[&source.id];
         let mut seen = std::collections::HashSet::new();
         for row in rows {
@@ -474,12 +492,14 @@ fn execute(
         }
         progress.nodes.push(format!("source:{}", source.id));
     }
+    check_partitions(recipe, &sources)?;
     progress.pass(
         "data.identity",
         format!("full: declared identity of every record; {rows_read} source records"),
     );
     progress.time("data_validation", validating);
     progress.timings.insert("read", phase.elapsed().as_millis());
+    let population_info = materialize_populations(recipe, &mut sources, policy, cancel, progress)?;
     let phase = Instant::now();
     let validating = Instant::now();
     let mut validated = 0;
@@ -553,6 +573,22 @@ fn execute(
         check(cancel)?;
         progress.nodes.push(format!("relationship:{}", rel.id));
         let subject = format!("relationship:{}", rel.id);
+        // A period-derived key joins on one more component: the member's period
+        // against the calendar period of the target's date.
+        let extended;
+        let period_rows;
+        let (rel, right): (&Relationship, &Vec<Row>) = match &rel.period {
+            Some(pm) => {
+                extended = Relationship {
+                    from_keys: [rel.from_keys.clone(), vec![pm.key.clone()]].concat(),
+                    to_keys: [rel.to_keys.clone(), vec![DERIVED_PERIOD.into()]].concat(),
+                    ..rel.clone()
+                };
+                period_rows = with_periods(&sources[&rel.to], &pm.date);
+                (&extended, &period_rows)
+            }
+            None => (rel, &sources[&rel.to]),
+        };
         let mut effective_left = sources[&rel.from].clone();
         let mut blocked: Vec<Option<Outcome>> = vec![None; effective_left.len()];
         for key_name in &rel.from_keys {
@@ -590,7 +626,6 @@ fn execute(
             }
         }
         let left = &effective_left;
-        let right = &sources[&rel.to];
         let mut index_by_key: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for (i, row) in right.iter().enumerate() {
             if let Some(k) = key(row, &rel.to_keys) {
@@ -827,6 +862,12 @@ fn execute(
         "detail.parent",
         "full: every detail record checked for a parent line",
     );
+    if !recipe.populations.is_empty() {
+        progress.pass(
+            "population.coverage",
+            "full: every finer record of every population activity joined one member or was counted as unmatched; unmatched records never widen a population",
+        );
+    }
     progress
         .timings
         .insert("lookups", phase.elapsed().as_millis());
@@ -836,6 +877,9 @@ fn execute(
     let mut candidate_evidence = vec![];
     let mut detail_evidence = vec![];
     let mut counts = serde_json::Map::new();
+    let mut allocation_evidence = vec![];
+    let mut allocation_summaries: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    let mut population_reports: BTreeMap<String, serde_json::Value> = BTreeMap::new();
     let mut populations: Vec<(&Output, Vec<(String, bool)>)> = vec![];
     // Distinct anchor lines of primary outputs, resolved only if resolved in every
     // output that selects them; a line read by several outputs is counted once.
@@ -856,6 +900,36 @@ fn execute(
         let mut statuses: BTreeMap<&'static str, usize> = BTreeMap::new();
         let evidence_before = evidence.len();
         let mut selected: Vec<usize> = vec![];
+        // Allocation runs over every member before any row is selected, so the
+        // output filter never changes a denominator.
+        let mut allocations = vec![];
+        for a in &output.allocations {
+            check(cancel)?;
+            let (members, weight_reasons) =
+                allocation_members(recipe, &sources, &matches, &outcomes, output, a)?;
+            let mut outcome = crate::allocation::allocate(
+                output,
+                a,
+                &sources[&a.quantity.source],
+                &members,
+                policy,
+            )?;
+            diagnostics.append(&mut outcome.warnings);
+            allocation_evidence.extend(outcome.partitions.iter().cloned());
+            allocation_summaries
+                .entry(output.id.clone())
+                .or_insert_with(|| serde_json::json!({}))[a.name.as_str()] = outcome.summary.clone();
+            allocations.push((a, outcome, weight_reasons));
+        }
+        let member_identity = crate::validation::population_output(recipe, output)
+            .then(|| {
+                recipe
+                    .sources
+                    .iter()
+                    .find(|s| s.id == output.anchor)
+                    .map(|s| s.identity.clone())
+            })
+            .flatten();
         for (row_index, row) in anchor_rows.iter().enumerate() {
             check(cancel)?;
             let mut reasons: Vec<Outcome> = vec![];
@@ -864,33 +938,15 @@ fn execute(
                            field: &str,
                            path: &[String]|
              -> Result<Value> {
-                let mut current = output.anchor.as_str();
-                let mut position = row_index;
-                for rel_id in path {
-                    let rel = recipe
-                        .relationships
-                        .iter()
-                        .find(|r| &r.id == rel_id)
-                        .ok_or_else(|| Error::new("UNKNOWN_PATH", "execution", rel_id.clone()))?;
-                    if rel.from != current {
-                        return Err(Error::new("INVALID_PATH", "execution", rel.id.clone()));
-                    }
-                    let outcome = &outcomes[&rel.id][position];
-                    if outcome.status != "matched" || matches[&rel.id][position].len() != 1 {
-                        reasons.push(outcome.clone());
-                        return Ok(Value::Null);
-                    }
-                    position = matches[&rel.id][position][0];
-                    current = &rel.to;
-                }
-                if current != source {
-                    return Err(Error::new("INVALID_PATH", "execution", source.to_string()));
-                }
-                Ok(sources[current][position]
-                    .fields
-                    .get(field)
-                    .cloned()
-                    .unwrap_or(Value::Null))
+                resolve_path(
+                    recipe,
+                    &sources,
+                    &matches,
+                    &outcomes,
+                    (&output.anchor, row_index),
+                    reasons,
+                    (source, field, path),
+                )
             };
             // Selection predicates read lookups but do not redefine the line's status.
             let select = |predicate: &Expr, values: &BTreeMap<String, Value>| -> Result<bool> {
@@ -927,6 +983,7 @@ fn execute(
                             &matches,
                             &output.anchor,
                             row_index,
+                            &output.complete,
                         )?,
                         recipe,
                         &mut |s: &str, f: &str, p: &[String]| resolve(&mut reasons, s, f, p),
@@ -997,6 +1054,18 @@ fn execute(
                 };
                 values.insert("_parent".into(), parent);
             }
+            for (a, outcome, weight_reasons) in &allocations {
+                let assignment = &outcome.members[row_index];
+                values.insert(a.name.clone(), assignment.value.clone());
+                reasons.extend(weight_reasons[row_index].iter().cloned());
+                if let Some(reason) = &assignment.unresolved {
+                    reasons.push(Outcome {
+                        status: "unmatched",
+                        reason: Some(reason.clone()),
+                        inherited: false,
+                    });
+                }
+            }
             reasons.retain(|o| o.status != "matched");
             let status = if reasons.iter().any(|o| o.status == "ambiguous") {
                 "ambiguous"
@@ -1049,7 +1118,12 @@ fn execute(
                     .or_insert(true);
                 *resolved &= status == "matched";
             }
-            let currency = match row.fields.get("currency") {
+            // A population output keeps its totals by its own currency column.
+            let currency = match if member_identity.is_some() {
+                values.get("currency")
+            } else {
+                row.fields.get("currency")
+            } {
                 Some(Value::String { value }) => value.clone(),
                 _ => "undeclared".into(),
             };
@@ -1089,6 +1163,18 @@ fn execute(
             let mut record = serde_json::json!({"output":output.id,"source":row.reference,"original":row.raw,"status":status,"reason":values["_reason"],"relationships":lookups});
             if output.detail {
                 record["parent"] = serde_json::json!(parent_reference);
+            }
+            if let Some(identity) = &member_identity {
+                record["member"] = key_values(row, identity);
+                if !allocations.is_empty() {
+                    record["allocations"] = allocations
+                        .iter()
+                        .map(|(a, outcome, _)| {
+                            (a.name.clone(), outcome.members[row_index].evidence.clone())
+                        })
+                        .collect::<serde_json::Map<_, _>>()
+                        .into();
+                }
             }
             if grouped {
                 let keys: BTreeMap<String, Value> = output
@@ -1161,6 +1247,11 @@ fn execute(
             count
         };
         counts.insert(output.id.clone(), count);
+        if let Some(p) = crate::validation::population(recipe, &output.anchor) {
+            let mut report = population_info[&p.id].clone();
+            report["activity"] = population_activity(recipe, output, &sources, &matches);
+            population_reports.insert(output.id.clone(), report);
+        }
         tables.insert(output.id.clone(), table);
     }
     progress.pass(
@@ -1172,7 +1263,14 @@ fn execute(
     );
     let resolved = lines.values().filter(|r| **r).count();
     let unresolved = lines.len() - resolved;
-    let totals = review_totals(recipe, &tables, &populations)?;
+    if !allocation_summaries.is_empty() {
+        let partitions: usize = allocation_evidence.len();
+        progress.pass(
+            "allocation.conservation",
+            format!("full: {partitions} allocation partitions; assigned sum plus residual equals the source quantity exactly in each"),
+        );
+    }
+    let totals = review_totals(recipe, &tables, &populations, &allocation_summaries)?;
     let budgeting = Instant::now();
     let evidence_rows = candidate_evidence.len() + detail_evidence.len();
     if evidence_rows > policy.limits.candidate_pairs {
@@ -1181,9 +1279,15 @@ fn execute(
             policy.limits.candidate_pairs
         )));
     }
-    let bytes = serde_json::to_vec(&(&tables, &evidence, &candidate_evidence, &detail_evidence))
+    let mut bytes = serde_json::to_vec(&(&tables, &evidence, &candidate_evidence, &detail_evidence))
         .map_err(engine_error)?
         .len();
+    // Allocation evidence counts only when present, so other runs keep their exact size.
+    if !allocation_evidence.is_empty() {
+        bytes += serde_json::to_vec(&allocation_evidence)
+            .map_err(engine_error)?
+            .len();
+    }
     if bytes > policy.limits.output_bytes || bytes > policy.limits.retained_bytes {
         // The memory result is retained only if it fits; this is a delivery budget.
         let mut error = evidence_budget(format!(
@@ -1214,6 +1318,9 @@ fn execute(
         evidence,
         candidate_evidence,
         detail_evidence,
+        allocation_evidence,
+        populations: population_reports,
+        allocations: allocation_summaries,
         diagnostics,
         counts,
         totals,
@@ -1303,11 +1410,17 @@ fn review_totals(
     recipe: &Recipe,
     tables: &BTreeMap<String, Table>,
     populations: &[(&Output, Vec<(String, bool)>)],
+    allocations: &BTreeMap<String, serde_json::Value>,
 ) -> Result<serde_json::Value> {
     let mut by_output = serde_json::Map::new();
     let mut combined: BTreeMap<String, CurrencyTotals> = BTreeMap::new();
     let mut combined_kinds: BTreeMap<String, Option<Numeric>> = BTreeMap::new();
     for (output, population) in populations {
+        // Population outputs total only what is additive at member grain: owned
+        // measures and allocated columns. Broadcast context is excluded, and
+        // population outputs stay out of the combined review totals.
+        let members = crate::validation::population_output(recipe, output);
+        let mut excluded = serde_json::Map::new();
         let mut kinds = BTreeMap::new();
         for column in &output.columns {
             let kind = match crate::validation::expression_type(&column.expr, recipe) {
@@ -1315,6 +1428,22 @@ fn review_totals(
                 Ok(Some(Type::Decimal { scale, .. })) => Numeric::Decimal(scale),
                 _ => continue,
             };
+            if members {
+                if crate::validation::additive(recipe, output, column) {
+                    kinds.insert(column.name.clone(), kind);
+                } else {
+                    let broadcast =
+                        matches!(&column.expr, Expr::Field { path, .. } if !path.is_empty());
+                    excluded.insert(
+                        column.name.clone(),
+                        serde_json::json!({
+                            "transition": if broadcast { "broadcast" } else { "not_owned" },
+                            "reason": "context repeated on each member; summing it would count one coarse value once per member",
+                        }),
+                    );
+                }
+                continue;
+            }
             kinds.insert(column.name.clone(), kind);
             let entry = combined_kinds
                 .entry(column.name.clone())
@@ -1323,12 +1452,18 @@ fn review_totals(
                 *entry = None;
             }
         }
+        if members {
+            for a in &output.allocations {
+                kinds.insert(a.name.clone(), Numeric::Decimal(a.scale));
+            }
+        }
         let mut per_currency: BTreeMap<String, CurrencyTotals> = BTreeMap::new();
         for (row, (currency, matched)) in tables[&output.id].iter().zip(population) {
-            for totals in [
-                per_currency.entry(currency.clone()).or_default(),
-                combined.entry(currency.clone()).or_default(),
-            ] {
+            let mut targets = vec![per_currency.entry(currency.clone()).or_default()];
+            if !members {
+                targets.push(combined.entry(currency.clone()).or_default());
+            }
+            for totals in targets {
                 totals.rows[0] += 1;
                 totals.rows[if *matched { 1 } else { 2 }] += 1;
                 for name in kinds.keys() {
@@ -1363,7 +1498,32 @@ fn review_totals(
         }
         let mut currencies = serde_json::Map::new();
         for (currency, totals) in &per_currency {
-            currencies.insert(currency.clone(), currency_json(totals, &kinds)?);
+            let mut json = currency_json(totals, &kinds)?;
+            if members {
+                json["excluded"] = excluded.clone().into();
+                for a in &output.allocations {
+                    let summary = &allocations[&output.id][a.name.as_str()];
+                    // A quantity that carries a currency is totalled per currency.
+                    let figures = if crate::validation::currency_amount(
+                        recipe,
+                        &a.quantity.source,
+                        &a.quantity.field,
+                    ) {
+                        &summary["by_currency"][currency.as_str()]
+                    } else {
+                        summary
+                    };
+                    json["columns"][a.name.as_str()]["allocation"] = serde_json::json!({
+                        "source": summary["quantity"],
+                        "source_total": figures["source_total"],
+                        "assigned_total": figures["assigned_total"],
+                        "residual_total": figures["residual_total"],
+                        "conserved": figures["conserved"],
+                        "scope": "every partition of the quantity source, including members the output filter removed",
+                    });
+                }
+            }
+            currencies.insert(currency.clone(), json);
         }
         by_output.insert(output.id.clone(), currencies.into());
     }
@@ -1415,7 +1575,13 @@ fn finalize(diagnostics: Vec<Error>, recipe: &Recipe) -> Vec<Error> {
                         .find(|r| r.id == id)
                         .map(|r| outputs_reading(recipe, &r.from))
                         .unwrap_or_default(),
-                    Some(("output", id)) => vec![id.to_owned()],
+                    Some(("output", id)) => vec![id.split('/').next().unwrap_or(id).to_owned()],
+                    Some(("population", id)) => recipe
+                        .outputs
+                        .iter()
+                        .filter(|o| o.anchor == id)
+                        .map(|o| o.id.clone())
+                        .collect(),
                     _ => vec![],
                 };
             }
@@ -1512,6 +1678,14 @@ fn success_manifest(
     });
     if let (Some(target), serde_json::Value::Object(fields)) = (manifest.as_object_mut(), fields) {
         target.extend(fields);
+    }
+    // Slice-2 sections appear only for recipes that declare them.
+    if !run.populations.is_empty() {
+        manifest["populations"] = serde_json::json!(run.populations);
+    }
+    if !run.allocations.is_empty() {
+        manifest["allocations"] = serde_json::json!(run.allocations);
+        manifest["evidence"]["allocation_rows"] = run.allocation_evidence.len().into();
     }
     manifest
 }
@@ -1616,18 +1790,38 @@ fn orphan_details(
             if orphans.is_empty() {
                 return None;
             }
-            let mut diagnostic = Error::new(
-                "ORPHAN_DETAIL",
-                "source",
-                format!(
-                    "{} {detail} detail records have no parent line; they are not output lines",
-                    orphans.len()
-                ),
-            )
-            .warning()
-            .with_subject(format!("source:{detail}"))
-            .with_check("detail.parent")
-            .with_affected(orphans.len(), orphans.iter().copied());
+            // Finer records of a population's activity that match no member.
+            let activity = recipe.relationships.iter().any(|r| {
+                r.to == detail
+                    && r.cardinality == Cardinality::OneToMany
+                    && crate::validation::population(recipe, &r.from).is_some()
+            });
+            let (code, phase, check, message) = if activity {
+                (
+                    "POPULATION_UNMATCHED",
+                    "population",
+                    "population.coverage",
+                    format!(
+                        "{} {detail} records match no member of the explicit population; they are counted here and never widen it",
+                        orphans.len()
+                    ),
+                )
+            } else {
+                (
+                    "ORPHAN_DETAIL",
+                    "source",
+                    "detail.parent",
+                    format!(
+                        "{} {detail} detail records have no parent line; they are not output lines",
+                        orphans.len()
+                    ),
+                )
+            };
+            let mut diagnostic = Error::new(code, phase, message)
+                .warning()
+                .with_subject(format!("source:{detail}"))
+                .with_check(check)
+                .with_affected(orphans.len(), orphans.iter().copied());
             diagnostic.context = Some(
                 serde_json::json!({"severity":"warning","source":detail,"count":orphans.len(),"samples":orphans.iter().take(Error::SAMPLE_CAP).collect::<Vec<_>>(),"truncated":orphans.len() > Error::SAMPLE_CAP})
                     .to_string(),
@@ -1824,7 +2018,15 @@ fn bind_line(
                 value: values.get(name).cloned().unwrap_or(Value::Null),
             }))
     })?;
-    prepare(&bound, recipe, sources, matches, &output.anchor, row_index)
+    prepare(
+        &bound,
+        recipe,
+        sources,
+        matches,
+        &output.anchor,
+        row_index,
+        &output.complete,
+    )
 }
 fn reduce(values: &[Value], function: &str) -> Result<Value> {
     if function == "count_records" {
@@ -1938,6 +2140,7 @@ fn prepare(
     matches: &Matches,
     anchor: &str,
     row_index: usize,
+    complete: &[String],
 ) -> Result<Expr> {
     let mut value = serde_json::to_value(expr).map_err(engine_error)?;
     fn visit(
@@ -1947,6 +2150,7 @@ fn prepare(
         matches: &Matches,
         anchor: &str,
         row_index: usize,
+        complete: &[String],
     ) -> Result<()> {
         if value.get("op").and_then(|x| x.as_str()) == Some("aggregate") {
             let expr: Expr = serde_json::from_value(value.clone()).map_err(engine_error)?;
@@ -2037,8 +2241,18 @@ fn prepare(
                     .with_check("aggregate.currency")
                     .with_affected(1, [&sources[anchor][row_index].reference]));
                 }
+                // Declared-complete activity: a member with no records has
+                // observed nothing, so its sum is zero rather than unknown.
+                let reduced = if values.is_empty()
+                    && function == "sum"
+                    && complete.contains(&relationship)
+                {
+                    zero_sum(recipe, rel, field.as_deref())
+                } else {
+                    reduce(&values, &function)?
+                };
                 *value = serde_json::to_value(Expr::Literal {
-                    value: reduce(&values, &function)?,
+                    value: reduced,
                 })
                 .map_err(engine_error)?;
                 return Ok(());
@@ -2048,23 +2262,452 @@ fn prepare(
             let id = value["id"].as_str().unwrap();
             let feature = recipe.features.iter().find(|f| f.id == id).unwrap();
             *value = serde_json::to_value(&feature.expr).map_err(engine_error)?;
-            return visit(value, recipe, sources, matches, anchor, row_index);
+            return visit(value, recipe, sources, matches, anchor, row_index, complete);
         }
         match value {
             serde_json::Value::Object(map) => {
                 for child in map.values_mut() {
-                    visit(child, recipe, sources, matches, anchor, row_index)?;
+                    visit(child, recipe, sources, matches, anchor, row_index, complete)?;
                 }
             }
             serde_json::Value::Array(array) => {
                 for child in array {
-                    visit(child, recipe, sources, matches, anchor, row_index)?;
+                    visit(child, recipe, sources, matches, anchor, row_index, complete)?;
                 }
             }
             _ => {}
         }
         Ok(())
     }
-    visit(&mut value, recipe, sources, matches, anchor, row_index)?;
+    visit(&mut value, recipe, sources, matches, anchor, row_index, complete)?;
     serde_json::from_value(value).map_err(engine_error)
+}
+
+// ---------------------------------------------------------------------------
+// Slice 2: explicit populations and allocation (docs/spec/slice-2.md).
+
+/// Field name under which a target record carries its derived period. It cannot
+/// collide with a projected field: projection names never contain U+001F.
+const DERIVED_PERIOD: &str = "\u{1f}period";
+
+/// Target records with their calendar month (`YYYY-MM`) added under
+/// [`DERIVED_PERIOD`]. Dates are business-local: the month is read from the date
+/// as recorded, with no time zone conversion. A null date has no period.
+fn with_periods(rows: &[Row], date: &str) -> Vec<Row> {
+    rows.iter()
+        .map(|row| {
+            let mut row = row.clone();
+            let period = match row.fields.get(date) {
+                Some(Value::Date { value }) => Value::String {
+                    value: value[..7].to_string(),
+                },
+                _ => Value::Null,
+            };
+            row.fields.insert(DERIVED_PERIOD.into(), period);
+            row
+        })
+        .collect()
+}
+
+/// Allocation partitions are the quantity source's grain keys. Like any identity
+/// they must be present and unique, whatever the source's declared identity.
+fn check_partitions(recipe: &Recipe, sources: &BTreeMap<String, Vec<Row>>) -> Result<()> {
+    for output in &recipe.outputs {
+        for a in &output.allocations {
+            let rows = &sources[&a.quantity.source];
+            let mut seen = std::collections::HashSet::new();
+            let (mut nulls, mut repeated) = (vec![], vec![]);
+            for row in rows {
+                match key(row, &a.partition) {
+                    None => nulls.push(&row.reference),
+                    Some(k) => {
+                        if !seen.insert(k) {
+                            repeated.push(&row.reference);
+                        }
+                    }
+                }
+            }
+            for (code, references, what) in [
+                ("NULL_IDENTITY", nulls, "have a null partition key"),
+                ("DUPLICATE_IDENTITY", repeated, "repeat the partition keys of an earlier record"),
+            ] {
+                if !references.is_empty() {
+                    return Err(Error::new(
+                        code,
+                        "data",
+                        format!(
+                            "{} {} records {what} {:?} of allocation {}; each partition must be exactly one record",
+                            references.len(),
+                            a.quantity.source,
+                            a.partition,
+                            a.name
+                        ),
+                    )
+                    .with_subject(format!("source:{}", a.quantity.source))
+                    .with_check("data.identity")
+                    .with_affected(references.len(), references));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Build every declared population: recipient records that pass the filter,
+/// crossed with the declared periods. The member count is checked against
+/// `limits.anchor_rows` before any member is created.
+fn materialize_populations(
+    recipe: &Recipe,
+    sources: &mut BTreeMap<String, Vec<Row>>,
+    policy: &Policy,
+    cancel: &RunControl<'_>,
+    progress: &mut Progress,
+) -> Result<BTreeMap<String, serde_json::Value>> {
+    let mut info = BTreeMap::new();
+    let mut total = 0usize;
+    for p in &recipe.populations {
+        check(cancel)?;
+        let subject = format!("population:{}", p.id);
+        let recipients = &sources[&p.recipients];
+        let mut eligible = vec![];
+        for row in recipients {
+            let keep = match &p.filter {
+                None => true,
+                Some(filter) => matches!(
+                    crate::eval::eval(filter, recipe, &mut |source: &str, field: &str, path: &[String]| {
+                        if source != p.recipients || !path.is_empty() {
+                            return Err(Error::new(
+                                "INVALID_PATH",
+                                "execution",
+                                "a population filter reads recipient fields only",
+                            ));
+                        }
+                        Ok(row.fields.get(field).cloned().unwrap_or(Value::Null))
+                    })?,
+                    Value::Boolean { value: true }
+                ),
+            };
+            if keep {
+                eligible.push(row);
+            }
+        }
+        let (periods, period_source) = match (&p.period.values, &p.period.from) {
+            (Some(values), _) => (values.clone(), "listed".to_string()),
+            (_, Some(from)) => {
+                let mut distinct = std::collections::BTreeSet::new();
+                let mut invalid = vec![];
+                for row in &sources[&from.source] {
+                    match row.fields.get(&from.field) {
+                        Some(Value::String { value }) if crate::validation::calendar_month(value) => {
+                            distinct.insert(value.clone());
+                        }
+                        _ => invalid.push(&row.reference),
+                    }
+                }
+                if !invalid.is_empty() {
+                    return Err(Error::new(
+                        "INVALID_PERIOD",
+                        "data",
+                        format!(
+                            "{} {} records hold a {} that is not a calendar month YYYY-MM; the period set of population {} is never guessed",
+                            invalid.len(),
+                            from.source,
+                            from.field,
+                            p.id
+                        ),
+                    )
+                    .with_subject(format!("source:{}", from.source))
+                    .with_check("population.periods")
+                    .with_affected(invalid.len(), invalid));
+                }
+                (
+                    distinct.into_iter().collect::<Vec<_>>(),
+                    format!("source:{}/field:{}", from.source, from.field),
+                )
+            }
+            _ => {
+                return Err(Error::new(
+                    "INVALID_POPULATION",
+                    "execution",
+                    format!("population {} declares no period set", p.id),
+                ));
+            }
+        };
+        let members = eligible
+            .len()
+            .checked_mul(periods.len())
+            .filter(|n| *n <= policy.limits.anchor_rows)
+            .ok_or_else(|| {
+                Error::new(
+                    "RESOURCE_LIMIT",
+                    "execution",
+                    format!(
+                        "population {} has {} recipients × {} periods = {} members, more than limits.anchor_rows ({}); counted before any member was created",
+                        p.id,
+                        eligible.len(),
+                        periods.len(),
+                        eligible.len().saturating_mul(periods.len()),
+                        policy.limits.anchor_rows
+                    ),
+                )
+                .with_subject(subject.clone())
+                .with_check("budget")
+            })?;
+        let mut rows = Vec::with_capacity(members);
+        for recipient in &eligible {
+            check(cancel)?;
+            for period in &periods {
+                let mut fields = recipient.fields.clone();
+                fields.insert(
+                    p.period.field.clone(),
+                    Value::String {
+                        value: period.clone(),
+                    },
+                );
+                rows.push(Row {
+                    fields,
+                    reference: SourceReference {
+                        source: p.id.clone(),
+                        binding: recipient.reference.binding.clone(),
+                        fingerprint: recipient.reference.fingerprint.clone(),
+                        location: format!(
+                            "{} {}={period}",
+                            recipient.reference.location, p.period.field
+                        ),
+                    },
+                    raw: BTreeMap::from([
+                        ("recipient".to_string(), serde_json::json!(recipient.reference)),
+                        ("recipient_original".to_string(), serde_json::json!(recipient.raw)),
+                        (p.period.field.clone(), serde_json::json!(period)),
+                    ]),
+                });
+            }
+        }
+        total += members;
+        info.insert(
+            p.id.clone(),
+            serde_json::json!({
+                "population": subject,
+                "recipients_source": format!("source:{}", p.recipients),
+                "recipient_records": recipients.len(),
+                "recipient_filter": p.filter.is_some(),
+                "recipients": eligible.len(),
+                "period_field": p.period.field,
+                "periods": periods,
+                "period_source": period_source,
+                "members": members,
+                "limit": {"name": "anchor_rows", "value": policy.limits.anchor_rows,
+                    "counted": "before materialization"},
+                "inference": "none: the declared recipients crossed with the declared periods",
+            }),
+        );
+        sources.insert(p.id.clone(), rows);
+        progress.nodes.push(subject);
+    }
+    if !recipe.populations.is_empty() {
+        progress.pass(
+            "population.members",
+            format!(
+                "full: {total} members across {} populations, each population counted against limits.anchor_rows before materialization; no member inferred from activity",
+                recipe.populations.len()
+            ),
+        );
+    }
+    Ok(info)
+}
+
+/// Value of `source.field` reached from anchor record `row` along the named
+/// to-one `path`. An unresolved lookup yields null and records its outcome.
+fn resolve_path(
+    recipe: &Recipe,
+    sources: &BTreeMap<String, Vec<Row>>,
+    matches: &Matches,
+    outcomes: &Outcomes,
+    (anchor, row): (&str, usize),
+    reasons: &mut Vec<Outcome>,
+    (source, field, path): (&str, &str, &[String]),
+) -> Result<Value> {
+    let mut current = anchor;
+    let mut position = row;
+    for rel_id in path {
+        let rel = recipe
+            .relationships
+            .iter()
+            .find(|r| &r.id == rel_id)
+            .ok_or_else(|| Error::new("UNKNOWN_PATH", "execution", rel_id.clone()))?;
+        if rel.from != current {
+            return Err(Error::new("INVALID_PATH", "execution", rel.id.clone()));
+        }
+        let outcome = &outcomes[&rel.id][position];
+        if outcome.status != "matched" || matches[&rel.id][position].len() != 1 {
+            reasons.push(outcome.clone());
+            return Ok(Value::Null);
+        }
+        position = matches[&rel.id][position][0];
+        current = &rel.to;
+    }
+    if current != source {
+        return Err(Error::new("INVALID_PATH", "execution", source.to_string()));
+    }
+    Ok(sources[current][position]
+        .fields
+        .get(field)
+        .cloned()
+        .unwrap_or(Value::Null))
+}
+
+/// Every member of `output`'s population as allocation `a` sees it: recipient
+/// filter result, weight, partition and currency. Also returns, per member, the
+/// lookups its weight read that did not resolve; they become part of a
+/// recipient's row status.
+fn allocation_members<'a>(
+    recipe: &Recipe,
+    sources: &'a BTreeMap<String, Vec<Row>>,
+    matches: &Matches,
+    outcomes: &Outcomes,
+    output: &Output,
+    a: &Allocation,
+) -> Result<(Vec<crate::allocation::Member<'a>>, Vec<Vec<Outcome>>)> {
+    let rows = &sources[&output.anchor];
+    let identity = recipe
+        .sources
+        .iter()
+        .find(|s| s.id == output.anchor)
+        .map(|s| s.identity.clone())
+        .unwrap_or_default();
+    let currency = recipe
+        .sources
+        .iter()
+        .find(|s| s.id == output.anchor)
+        .is_some_and(|s| s.projection.fields.contains_key("currency"));
+    let mut members = Vec::with_capacity(rows.len());
+    let mut weight_reasons = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        let evaluate = |expr: &Expr, reasons: &mut Vec<Outcome>| -> Result<Value> {
+            let prepared = prepare(
+                expr,
+                recipe,
+                sources,
+                matches,
+                &output.anchor,
+                index,
+                &output.complete,
+            )?;
+            crate::eval::eval(&prepared, recipe, &mut |s: &str, f: &str, p: &[String]| {
+                resolve_path(
+                    recipe,
+                    sources,
+                    matches,
+                    outcomes,
+                    (&output.anchor, index),
+                    reasons,
+                    (s, f, p),
+                )
+            })
+        };
+        // Recipient filter: before normalization; false and unknown exclude.
+        let recipient = match &a.recipient_filter {
+            None => true,
+            Some(filter) => {
+                evaluate(filter, &mut vec![])? == (Value::Boolean { value: true })
+            }
+        };
+        let mut reasons = vec![];
+        let weight = if recipient {
+            evaluate(&a.weight, &mut reasons)?
+        } else {
+            Value::Null
+        };
+        reasons.retain(|o| o.status != "matched");
+        let outcome = &outcomes[&a.via][index];
+        let partition = (outcome.status == "matched" && matches[&a.via][index].len() == 1)
+            .then(|| matches[&a.via][index][0]);
+        members.push(crate::allocation::Member {
+            reference: &row.reference,
+            identity: identity
+                .iter()
+                .map(|k| row.fields.get(k).cloned().unwrap_or(Value::Null))
+                .collect(),
+            recipient,
+            weight,
+            partition,
+            via: partition.is_none().then(|| {
+                outcome
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| format!("{} {}", a.via, outcome.status))
+            }),
+            currency: currency.then(|| row.fields.get("currency").cloned().unwrap_or(Value::Null)),
+        });
+        weight_reasons.push(if recipient { reasons } else { vec![] });
+    }
+    Ok((members, weight_reasons))
+}
+
+/// Coverage of each activity relationship of a population output: matched and
+/// unmatched finer records (unmatched ones never widen the population) and the
+/// rule applied to members without records.
+fn population_activity(
+    recipe: &Recipe,
+    output: &Output,
+    sources: &BTreeMap<String, Vec<Row>>,
+    matches: &Matches,
+) -> serde_json::Value {
+    let mut activity = serde_json::Map::new();
+    for rel in crate::validation::activity(recipe, output) {
+        let records = &sources[&rel.to];
+        let mut attached = vec![false; records.len()];
+        for &child in matches[&rel.id].iter().flatten() {
+            attached[child] = true;
+        }
+        let unmatched: Vec<&SourceReference> = attached
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| !**a)
+            .map(|(i, _)| &records[i].reference)
+            .collect();
+        let empty = matches[&rel.id].iter().filter(|m| m.is_empty()).count();
+        let (rule, statement) = crate::validation::completeness_rule(recipe, output, rel);
+        activity.insert(
+            rel.id.clone(),
+            serde_json::json!({
+                "relationship": format!("relationship:{}", rel.id),
+                "source": format!("source:{}", rel.to),
+                "period": rel.period.as_ref().map(|pm| serde_json::json!({"key": pm.key, "date": pm.date, "derive": "calendar_month"})),
+                "records": records.len(),
+                "matched_records": records.len() - unmatched.len(),
+                "unmatched_records": unmatched.len(),
+                "unmatched_samples": unmatched.iter().take(Error::SAMPLE_CAP).collect::<Vec<_>>(),
+                "unmatched_samples_truncated": unmatched.len() > Error::SAMPLE_CAP,
+                "empty_members": empty,
+                "empty_member_rule": rule,
+                "statement": statement,
+            }),
+        );
+    }
+    activity.into()
+}
+
+/// The sum of no records of a declared-complete activity, typed as the sum of
+/// `field` would be.
+fn zero_sum(recipe: &Recipe, rel: &Relationship, field: Option<&str>) -> Value {
+    let data_type = recipe
+        .sources
+        .iter()
+        .find(|s| s.id == rel.to)
+        .and_then(|s| field.and_then(|f| s.projection.fields.get(f)))
+        .map(|f| f.data_type.clone());
+    match data_type {
+        Some(Type::Decimal { scale, .. }) => Value::Decimal {
+            value: crate::scalar::Decimal {
+                coefficient: 0,
+                precision: 38,
+                scale,
+            }
+            .to_string(),
+            precision: 38,
+            scale,
+        },
+        _ => Value::Int64 { value: "0".into() },
+    }
 }

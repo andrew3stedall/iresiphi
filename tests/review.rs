@@ -406,6 +406,8 @@ fn with_detail_output(recipe: &mut Recipe) {
         group_by: vec![],
         detail: true,
         aggregates: vec![],
+        complete: vec![],
+        allocations: vec![],
     });
 }
 

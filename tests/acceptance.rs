@@ -379,6 +379,7 @@ fn independent_details_have_separate_aggregates_with_empty_and_null_semantics() 
         cardinality: Cardinality::OneToMany,
         validity: None,
         strict: false,
+        period: None,
     });
     for (name, relationship, function, field) in [
         ("components_sum", "a_components", "sum", Some("amount")),

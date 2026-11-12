@@ -1,0 +1,51 @@
+{
+  "format_version": "0.1",
+  "name": "customer month targets",
+  "required_capabilities": ["population", "allocation"],
+  "sources": [
+    {"id": "customers", "identity": ["CustNo"], "grain": ["CustNo"], "projection": {"fields": {
+      "CustNo": {"path": "CustNo", "data_type": {"kind": "string"}},
+      "SalesArea": {"path": "SalesArea", "data_type": {"kind": "string"}},
+      "Share": {"path": "Share", "data_type": {"kind": "int64"}}}}},
+    {"id": "transactions", "identity": ["receipt_id"], "grain": ["receipt_id"], "projection": {"fields": {
+      "receipt_id": {"path": "receipt_id", "data_type": {"kind": "string"}},
+      "buyer_ref": {"path": "buyer_ref", "data_type": {"kind": "string"}},
+      "booked_at": {"path": "booked_at", "data_type": {"kind": "date"}, "nullable": true},
+      "gross": {"path": "gross", "data_type": {"kind": "decimal", "precision": 18, "scale": 2}}}}},
+    {"id": "targets", "identity": ["Territory", "Period"], "grain": ["Territory", "Period"], "projection": {"fields": {
+      "Territory": {"path": "Territory", "data_type": {"kind": "string"}},
+      "Period": {"path": "Period", "data_type": {"kind": "string"}},
+      "Goal": {"path": "Goal", "data_type": {"kind": "decimal", "precision": 18, "scale": 2}, "nullable": true}}}}
+  ],
+  "populations": [
+    {"id": "customer_month", "recipients": "customers",
+     "period": {"field": "month", "calendar": "month", "values": ["2026-01", "2026-02"]}}
+  ],
+  "relationships": [
+    {"id": "sales", "from": "customer_month", "to": "transactions",
+     "from_keys": ["CustNo"], "to_keys": ["buyer_ref"], "cardinality": "one_to_many",
+     "period": {"key": "month", "date": "booked_at", "calendar": "month"}},
+    {"id": "region_target", "from": "customer_month", "to": "targets",
+     "from_keys": ["SalesArea", "month"], "to_keys": ["Territory", "Period"], "cardinality": "many_to_one"}
+  ],
+  "outputs": [
+    {"id": "customer_targets", "anchor": "customer_month", "complete": ["sales"],
+     "columns": [
+       {"name": "CustNo", "expr": {"op": "field", "source": "customer_month", "field": "CustNo"}},
+       {"name": "month", "expr": {"op": "field", "source": "customer_month", "field": "month"}},
+       {"name": "currency", "expr": {"op": "literal", "value": {"kind": "string", "value": "AUD"}}},
+       {"name": "sales", "expr": {"op": "aggregate", "relationship": "sales", "function": "sum", "field": "gross"}},
+       {"name": "transactions", "expr": {"op": "aggregate", "relationship": "sales", "function": "count_records"}},
+       {"name": "target_context", "expr": {"op": "field", "source": "targets", "field": "Goal", "path": ["region_target"]}}
+     ],
+     "allocations": [
+       {"name": "allocated_target",
+        "quantity": {"source": "targets", "field": "Goal"},
+        "partition": ["Territory", "Period"],
+        "via": "region_target",
+        "weight": {"op": "field", "source": "customer_month", "field": "Share"},
+        "precision": 18, "scale": 2,
+        "residual": "largest_remainder"}
+     ]}
+  ]
+}

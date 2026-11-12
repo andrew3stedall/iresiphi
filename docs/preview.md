@@ -73,7 +73,7 @@ The saved recipe holds no paths, data or secrets. Each run takes its bindings (s
 | Scalars | Boolean, Int64, UTF-8 string, Decimal128 (precision 1 to 38), calendar date | Floating point, timestamps and time zones |
 | Expressions | Literals, field and path references, casts, add, subtract, multiply, comparisons, AND/OR/NOT, is-null, coalesce, case, quantize (`half_even`, `toward_zero`), rate validity | Division, regex, user-defined functions, Python callbacks |
 | Relationships | Typed equality on composite keys; one-to-one, many-to-one, one-to-many; invoice-date validity (`valid_from <= date < valid_to`, null `valid_to` open) | Many-to-many, fuzzy or normalized matching, automatic as-of selection, general temporal joins |
-| Grain | `count_records`, `count_non_null`, `sum`, `min`, `max` at declared group keys; broadcast along a validated to-one path; context `min`/`max` | Average, distinct count, windows, semi-additive measures, allocation |
+| Grain | `count_records`, `count_non_null`, `sum`, `min`, `max` at declared group keys; broadcast along a validated to-one path; context `min`/`max`; explicit populations of recipients crossed with calendar months; allocation onto a population ([allocation.md](allocation.md)) | Average, distinct count, windows, semi-additive measures, other calendars, allocation across several coarse sources |
 | Business rules | One explicit currency per amount; mixed currencies are rejected | Currency conversion, tax, tiered pricing, credits, discounts |
 | Outputs | Typed memory results; local directory bundles (CSV tables, `schema.json`, `manifest.json`) | Other sinks |
 | XLSX formulas | Stored cached values only | Formula evaluation |
@@ -112,6 +112,10 @@ A run that exceeds a limit fails with `RESOURCE_LIMIT` and publishes nothing. Ea
 
 These limits do not cap process memory. DataFusion does not track every allocation, the adapters hold each source's rows in memory, and Python owns any values it copies out. The manifest reports the tracked engine reservation peak (`engine_peak_reservation`) separately from the process's peak resident set (`peak_rss`, read from `/proc/self/status`). That peak covers the whole process lifetime, not one run. If you need a hard memory ceiling, run Iresiphi in an OS-isolated process with its own limits. [The 100,000-line measurement](measurements/workload-100k.md) shows what one complete run used on one machine. At that size the default `output_bytes` and `retained_bytes` are too small for the evidence the run produces (757 MB), so that run raised both to 1 GiB.
 
+## Explicit populations and allocation
+
+An output can anchor at an explicit population: the records of a recipient source crossed with a declared set of calendar months. Finer records join members by declared keys and the calendar month of a date. A declared allocation splits a coarse quantity, such as a regional target, across members by weight. Shares are exact, and each partition is checked for conservation. [allocation.md](allocation.md) describes the declarations, the runnable `customer_month` example and the exact semantics. Recipes that declare neither keep their canonical JSON and hash.
+
 ## XLSX: quantization, cached values and limits
 
 An XLSX binding must name its sheet and its 1-based header row:
@@ -148,7 +152,7 @@ Bundle CSV tables use UTF-8, commas, RFC 4180 quoting, LF line endings and one h
 
 Every non-null value whose text starts with a backslash gets one more backslash before CSV quoting. To read a field back: exact `\N` is null; otherwise remove one backslash only from a doubled-backslash prefix, then parse the text by the column type in `schema.json`. `schema.json` documents this rule. Spreadsheet programs and generic CSV readers do not apply it, so open bundle tables with `iresiphi::sink::read_bundle` (Rust) or `iresiphi.read_bundle` (Python), or apply the rule yourself.
 
-A bundle holds one CSV file per output, three evidence tables (`_evidence`, `_candidate_evidence`, `_detail_evidence`, each one JSON record per row) and `_reconciliation`, a table of full-population, comparable and unresolved totals per output, currency and numeric column. `schema.json` gives each table's typed columns, and `manifest.json` carries the complete run record.
+A bundle holds one CSV file per output, three evidence tables (`_evidence`, `_candidate_evidence`, `_detail_evidence`, each one JSON record per row), `_allocation_evidence` when the recipe allocates, and `_reconciliation`, a table of full-population, comparable and unresolved totals per output, currency and numeric column. `schema.json` gives each table's typed columns, and `manifest.json` carries the complete run record.
 
 ## Snapshot limitations
 

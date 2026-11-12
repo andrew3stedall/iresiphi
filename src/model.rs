@@ -49,6 +49,10 @@ pub struct Recipe {
     pub bundled_definitions: BTreeMap<String, BundledDefinition>,
     #[serde(default)]
     pub annotations: BTreeMap<String, serde_json::Value>,
+    /// Explicit output populations (slice 2). Omitted when empty, so recipes that
+    /// declare none keep their canonical JSON and hash.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub populations: Vec<Population>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -88,6 +92,10 @@ pub struct Relationship {
     pub validity: Option<Validity>,
     #[serde(default)]
     pub strict: bool,
+    /// Period derivation: a population's period key matches a period derived
+    /// from a date of the target record. Only on relationships from a population.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period: Option<PeriodMatch>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -218,6 +226,13 @@ pub struct Output {
     pub detail: bool,
     #[serde(default)]
     pub aggregates: Vec<GroupAggregate>,
+    /// One-to-many relationships from the anchor population whose activity is
+    /// declared complete: a member with no records sums to zero instead of null.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub complete: Vec<String>,
+    /// Allocations of a coarse quantity onto the anchor population.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allocations: Vec<Allocation>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -451,6 +466,12 @@ pub fn default_check(code: &str, phase: &str) -> String {
         "LOOKUP_UNMATCHED" => "lookup.coverage".into(),
         "ORPHAN_DETAIL" => "detail.parent".into(),
         "MIXED_CURRENCY" => "aggregate.currency".into(),
+        "ALLOCATION_NULL_WEIGHT" | "ALLOCATION_NEGATIVE_WEIGHT" => "allocation.weights".into(),
+        "ALLOCATION_ZERO_WEIGHT" | "ALLOCATION_NO_RECIPIENTS" => "allocation.partitions".into(),
+        "ALLOCATION_MISSING_QUANTITY" => "allocation.coverage".into(),
+        "ALLOCATION_CONSERVATION" => "allocation.conservation".into(),
+        "POPULATION_UNMATCHED" => "population.coverage".into(),
+        "INVALID_PERIOD" => "population.periods".into(),
         "CONTEXT_NOT_CONSTANT" => "aggregate.context".into(),
         "INVALID_PROJECTION" | "INVALID_BINDING" => "source_schema".into(),
         "POLICY_DENIED" | "SOURCE_ACCESS" | "MISSING_BINDING" | "SOURCE_CHANGED" => "access".into(),
@@ -505,6 +526,28 @@ pub fn default_remediation(code: &str) -> &'static str {
             "Align the declared projection and binding settings with the source's actual headers, sheets and paths."
         }
         "POLICY_DENIED" => "Move the file under an allowed root or extend the policy explicitly.",
+        "UNDECLARED_CAPABILITY" => {
+            "List the capability the declaration needs in required_capabilities."
+        }
+        "INVALID_POPULATION" | "INVALID_PERIOD" => {
+            "Declare the population's recipients and a finite set of calendar months (YYYY-MM) explicitly; nothing infers them."
+        }
+        "POPULATION_UNMATCHED" => {
+            "Correct the keys or dates of the unmatched records, or extend the declared recipients or periods; the population is never widened implicitly."
+        }
+        "INVALID_ALLOCATION" => {
+            "Declare the quantity, its source grain as the partition, a many_to_one relationship from the population to that source, the weight, scale and residual policy."
+        }
+        "ALLOCATION_NULL_WEIGHT" => {
+            "Supply the missing weights, or declare null_weight \"zero\" to treat them as weight 0."
+        }
+        "ALLOCATION_NEGATIVE_WEIGHT" => "Correct the weights; allocation weights are never negative.",
+        "ALLOCATION_ZERO_WEIGHT" | "ALLOCATION_NO_RECIPIENTS" => {
+            "Supply recipients with positive weight, or declare unallocated \"report\" to report the whole quantity as residual."
+        }
+        "ALLOCATION_MISSING_QUANTITY" => {
+            "Add the missing quantity records; affected recipients keep a null allocation and are unresolved."
+        }
         "RESOURCE_LIMIT" => {
             "Raise the named policy limit explicitly or reduce the selected population; results are never truncated."
         }
@@ -567,4 +610,116 @@ pub struct Catalog {
     pub relationships: Vec<Relationship>,
     #[serde(default)]
     pub features: Vec<Feature>,
+}
+
+// ---------------------------------------------------------------------------
+// Slice 2: explicit populations and allocation.
+
+/// The calendar a period set and a period derivation use. Format 0.1 knows
+/// calendar months only, written `YYYY-MM`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Calendar {
+    Month,
+}
+
+/// An explicit output population: every record of `recipients` that passes
+/// `filter`, crossed with a finite, declared period set. Outputs anchor at its ID.
+/// Members carry the recipient's fields plus the period field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Population {
+    pub id: String,
+    pub recipients: String,
+    /// Recipient subset, applied to recipient records before crossing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<Expr>,
+    pub period: PeriodSet,
+}
+
+/// A finite period set: listed `values`, or the distinct values of a named field
+/// of a named source (`from`). Exactly one of the two is declared.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeriodSet {
+    /// Name of the period field on each member.
+    pub field: String,
+    pub calendar: Calendar,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub values: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<FieldRef>,
+}
+
+/// A field of a named source.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FieldRef {
+    pub source: String,
+    pub field: String,
+}
+
+/// Period key of a relationship from a population: the member's period `key`
+/// equals the `calendar` period of the target's `date` field. Dates are
+/// business-local; there is no time zone conversion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeriodMatch {
+    pub key: String,
+    pub date: String,
+    pub calendar: Calendar,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResidualPolicy {
+    /// Quantize toward zero, then hand the remaining last-place units one each to
+    /// recipients by descending remainder, ties by ascending recipient identity.
+    LargestRemainder,
+    /// Quantize half-even and report quantity minus assigned sum per partition.
+    Report,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NullWeight {
+    Error,
+    Zero,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Unallocated {
+    Error,
+    Report,
+}
+
+/// Allocation of a coarse quantity onto the members of an output's population
+/// (contract: docs/spec/slice-2.md). It is never derived from a join or a broadcast.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Allocation {
+    /// Output column that receives each recipient's assigned amount.
+    pub name: String,
+    /// The quantity: a decimal field of the coarse source.
+    pub quantity: FieldRef,
+    /// The source partition: the coarse source's grain keys.
+    pub partition: Vec<String>,
+    /// Many-to-one relationship from the population to the coarse source whose
+    /// target keys are the partition keys; it assigns each recipient its partition.
+    pub via: String,
+    /// Weight at recipient grain: Int64 or decimal, never negative.
+    pub weight: Expr,
+    /// Recipient subset, applied before normalization; it changes shares.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_filter: Option<Expr>,
+    pub precision: u8,
+    pub scale: u8,
+    pub residual: ResidualPolicy,
+    /// Absent means `error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub null_weight: Option<NullWeight>,
+    /// Absent means `error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unallocated: Option<Unallocated>,
 }
