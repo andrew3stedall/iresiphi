@@ -81,7 +81,7 @@ impl ExecutionContext {
             );
         }
         match execute(recipe, bindings, policy, cancel) {
-            Ok((tables, evidence, unresolved, counts)) => {
+            Ok((tables, evidence, unresolved, counts, diagnostics)) => {
                 let manifest = serde_json::json!({"run_id":id,"format_version":"0.1","package_version":env!("CARGO_PKG_VERSION"),"recipe_hash":recipe.hash().ok(),"policy":policy,"source_rows":counts,"elapsed_ms":started.elapsed().as_millis(),"peak_rss":null,"engine_peak_reservation":null,"checks":{"static":"passed","data":"passed"},"unresolved_rows":unresolved,"complete":true});
                 RunReport {
                     run_id: id,
@@ -93,7 +93,7 @@ impl ExecutionContext {
                     .into(),
                     tables,
                     evidence,
-                    diagnostics: vec![],
+                    diagnostics,
                     manifest,
                 }
             }
@@ -211,6 +211,7 @@ fn execute(
     Vec<serde_json::Value>,
     usize,
     BTreeMap<String, usize>,
+    Vec<Error>,
 )> {
     check(cancel)?;
     let sources = crate::adapters::read_sources(recipe, bindings, policy, cancel)?;
@@ -398,6 +399,7 @@ fn execute(
         }
         matches.insert(rel.id.clone(), found);
     }
+    let diagnostics = orphan_details(recipe, &sources, &matches);
     let mut tables = BTreeMap::new();
     let mut evidence = vec![];
     let mut unresolved = 0;
@@ -575,7 +577,56 @@ fn execute(
         evidence,
         unresolved,
         sources.iter().map(|(k, v)| (k.clone(), v.len())).collect(),
+        diagnostics,
     ))
+}
+/// Detail records that no one-to-many relationship attaches to any parent are reported
+/// as source diagnostics (bounded reference samples, no values); they never become lines.
+fn orphan_details(
+    recipe: &Recipe,
+    sources: &BTreeMap<String, Vec<Row>>,
+    matches: &Matches,
+) -> Vec<Error> {
+    const SAMPLES: usize = 20;
+    let mut attached: BTreeMap<&str, Vec<bool>> = BTreeMap::new();
+    for rel in &recipe.relationships {
+        if rel.cardinality != Cardinality::OneToMany {
+            continue;
+        }
+        let seen = attached
+            .entry(rel.to.as_str())
+            .or_insert_with(|| vec![false; sources[&rel.to].len()]);
+        for &child in matches[&rel.id].iter().flatten() {
+            seen[child] = true;
+        }
+    }
+    attached
+        .into_iter()
+        .filter_map(|(detail, seen)| {
+            let orphans: Vec<_> = seen
+                .iter()
+                .enumerate()
+                .filter(|(_, attached)| !**attached)
+                .map(|(i, _)| &sources[detail][i].reference)
+                .collect();
+            if orphans.is_empty() {
+                return None;
+            }
+            let mut diagnostic = Error::new(
+                "ORPHAN_DETAIL",
+                "source",
+                format!(
+                    "{} {detail} detail records have no parent line; they are not output lines",
+                    orphans.len()
+                ),
+            );
+            diagnostic.context = Some(
+                serde_json::json!({"severity":"warning","source":detail,"count":orphans.len(),"samples":orphans.iter().take(SAMPLES).collect::<Vec<_>>(),"truncated":orphans.len() > SAMPLES})
+                    .to_string(),
+            );
+            Some(diagnostic)
+        })
+        .collect()
 }
 impl ExecutionContext {
     pub fn run_bundle(
