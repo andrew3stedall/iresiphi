@@ -146,7 +146,8 @@ class Handles(unittest.TestCase):
         self.assertEqual(len(first), 10)
         self.assertEqual(manifest["run_id"], run_id)
         self.assertEqual(diagnostics, [])
-        self.assertEqual(schema[1], {"name": "amount", "type": {"kind": "decimal", "precision": 20, "scale": 2}})
+        self.assertEqual({k: schema[1][k] for k in ("name", "type")}, {"name": "amount", "type": {"kind": "decimal", "precision": 20, "scale": 2}})
+        self.assertEqual(schema[1]["ownership"], "owned")
         self.assertEqual(repr(result), "<iresiphi.RunResult closed>")
 
     def test_recipe_and_catalog_close(self):

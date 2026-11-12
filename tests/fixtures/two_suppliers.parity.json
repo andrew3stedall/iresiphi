@@ -43,9 +43,36 @@
     },
     "schema": {
       "a_review": {
+        "anchor": "source:a",
+        "anchor_grain": [
+          "supplier",
+          "invoice",
+          "id"
+        ],
         "columns": [
           {
+            "grain": [
+              "supplier",
+              "invoice",
+              "id"
+            ],
             "name": "enriched",
+            "origins": [
+              {
+                "field": "amount",
+                "origin_grain": [
+                  "supplier",
+                  "id"
+                ],
+                "path": [
+                  "a_enrichment"
+                ],
+                "source": "source:enrichment",
+                "transition": "broadcast"
+              }
+            ],
+            "ownership": "broadcast",
+            "role": "column",
             "type": {
               "kind": "decimal",
               "precision": 18,
@@ -53,19 +80,79 @@
             }
           },
           {
+            "grain": [
+              "supplier",
+              "invoice",
+              "id"
+            ],
             "name": "id",
+            "origins": [
+              {
+                "field": "id",
+                "origin_grain": [
+                  "supplier",
+                  "invoice",
+                  "id"
+                ],
+                "path": [],
+                "source": "source:a",
+                "transition": "owned"
+              }
+            ],
+            "ownership": "owned",
+            "role": "column",
             "type": {
               "kind": "string"
             }
           },
           {
+            "grain": [
+              "supplier",
+              "invoice",
+              "id"
+            ],
             "name": "supplier",
+            "origins": [
+              {
+                "field": "supplier",
+                "origin_grain": [
+                  "supplier",
+                  "invoice",
+                  "id"
+                ],
+                "path": [],
+                "source": "source:a",
+                "transition": "owned"
+              }
+            ],
+            "ownership": "owned",
+            "role": "column",
             "type": {
               "kind": "string"
             }
           },
           {
+            "grain": [
+              "supplier",
+              "invoice",
+              "id"
+            ],
             "name": "billed",
+            "origins": [
+              {
+                "field": "billed",
+                "origin_grain": [
+                  "supplier",
+                  "invoice",
+                  "id"
+                ],
+                "path": [],
+                "source": "source:a",
+                "transition": "owned"
+              }
+            ],
+            "ownership": "owned",
+            "role": "column",
             "type": {
               "kind": "decimal",
               "precision": 18,
@@ -73,7 +160,38 @@
             }
           },
           {
+            "grain": [
+              "supplier",
+              "invoice",
+              "id"
+            ],
             "name": "expected",
+            "origins": [
+              {
+                "field": "quantity",
+                "origin_grain": [
+                  "supplier",
+                  "invoice",
+                  "id"
+                ],
+                "path": [],
+                "source": "source:a",
+                "transition": "owned"
+              },
+              {
+                "field": "rate",
+                "origin_grain": [
+                  "id"
+                ],
+                "path": [
+                  "a_rate"
+                ],
+                "source": "source:rates",
+                "transition": "broadcast"
+              }
+            ],
+            "ownership": "owned",
+            "role": "column",
             "type": {
               "kind": "decimal",
               "precision": 18,
@@ -81,7 +199,49 @@
             }
           },
           {
+            "grain": [
+              "supplier",
+              "invoice",
+              "id"
+            ],
             "name": "variance",
+            "origins": [
+              {
+                "field": "billed",
+                "origin_grain": [
+                  "supplier",
+                  "invoice",
+                  "id"
+                ],
+                "path": [],
+                "source": "source:a",
+                "transition": "owned"
+              },
+              {
+                "field": "quantity",
+                "origin_grain": [
+                  "supplier",
+                  "invoice",
+                  "id"
+                ],
+                "path": [],
+                "source": "source:a",
+                "transition": "owned"
+              },
+              {
+                "field": "rate",
+                "origin_grain": [
+                  "id"
+                ],
+                "path": [
+                  "a_rate"
+                ],
+                "source": "source:rates",
+                "transition": "broadcast"
+              }
+            ],
+            "ownership": "owned",
+            "role": "column",
             "type": {
               "kind": "decimal",
               "precision": 19,
@@ -89,23 +249,69 @@
             }
           },
           {
+            "grain": [
+              "supplier",
+              "invoice",
+              "id"
+            ],
             "name": "_status",
+            "role": "status",
             "type": {
               "kind": "string"
             }
           },
           {
+            "grain": [
+              "supplier",
+              "invoice",
+              "id"
+            ],
             "name": "_reason",
+            "role": "reason",
             "type": {
               "kind": "string"
             }
           }
-        ]
+        ],
+        "grain": [
+          "supplier",
+          "invoice",
+          "id"
+        ],
+        "grouped": false,
+        "line_inputs": []
       },
       "b_review": {
+        "anchor": "source:b",
+        "anchor_grain": [
+          "supplier",
+          "invoice",
+          "id"
+        ],
         "columns": [
           {
+            "grain": [
+              "supplier",
+              "invoice",
+              "id"
+            ],
             "name": "enriched",
+            "origins": [
+              {
+                "field": "amount",
+                "origin_grain": [
+                  "supplier",
+                  "id"
+                ],
+                "path": [
+                  "b_enrichment"
+                ],
+                "source": "source:enrichment",
+                "transition": "broadcast"
+              }
+            ],
+            "ownership": "broadcast",
+            "role": "column",
             "type": {
               "kind": "decimal",
               "precision": 18,
@@ -113,19 +319,79 @@
             }
           },
           {
+            "grain": [
+              "supplier",
+              "invoice",
+              "id"
+            ],
             "name": "id",
+            "origins": [
+              {
+                "field": "id",
+                "origin_grain": [
+                  "supplier",
+                  "invoice",
+                  "id"
+                ],
+                "path": [],
+                "source": "source:b",
+                "transition": "owned"
+              }
+            ],
+            "ownership": "owned",
+            "role": "column",
             "type": {
               "kind": "string"
             }
           },
           {
+            "grain": [
+              "supplier",
+              "invoice",
+              "id"
+            ],
             "name": "supplier",
+            "origins": [
+              {
+                "field": "supplier",
+                "origin_grain": [
+                  "supplier",
+                  "invoice",
+                  "id"
+                ],
+                "path": [],
+                "source": "source:b",
+                "transition": "owned"
+              }
+            ],
+            "ownership": "owned",
+            "role": "column",
             "type": {
               "kind": "string"
             }
           },
           {
+            "grain": [
+              "supplier",
+              "invoice",
+              "id"
+            ],
             "name": "billed",
+            "origins": [
+              {
+                "field": "billed",
+                "origin_grain": [
+                  "supplier",
+                  "invoice",
+                  "id"
+                ],
+                "path": [],
+                "source": "source:b",
+                "transition": "owned"
+              }
+            ],
+            "ownership": "owned",
+            "role": "column",
             "type": {
               "kind": "decimal",
               "precision": 18,
@@ -133,7 +399,38 @@
             }
           },
           {
+            "grain": [
+              "supplier",
+              "invoice",
+              "id"
+            ],
             "name": "expected",
+            "origins": [
+              {
+                "field": "quantity",
+                "origin_grain": [
+                  "supplier",
+                  "invoice",
+                  "id"
+                ],
+                "path": [],
+                "source": "source:b",
+                "transition": "owned"
+              },
+              {
+                "field": "rate",
+                "origin_grain": [
+                  "id"
+                ],
+                "path": [
+                  "b_rate"
+                ],
+                "source": "source:rates",
+                "transition": "broadcast"
+              }
+            ],
+            "ownership": "owned",
+            "role": "column",
             "type": {
               "kind": "decimal",
               "precision": 18,
@@ -141,7 +438,49 @@
             }
           },
           {
+            "grain": [
+              "supplier",
+              "invoice",
+              "id"
+            ],
             "name": "variance",
+            "origins": [
+              {
+                "field": "billed",
+                "origin_grain": [
+                  "supplier",
+                  "invoice",
+                  "id"
+                ],
+                "path": [],
+                "source": "source:b",
+                "transition": "owned"
+              },
+              {
+                "field": "quantity",
+                "origin_grain": [
+                  "supplier",
+                  "invoice",
+                  "id"
+                ],
+                "path": [],
+                "source": "source:b",
+                "transition": "owned"
+              },
+              {
+                "field": "rate",
+                "origin_grain": [
+                  "id"
+                ],
+                "path": [
+                  "b_rate"
+                ],
+                "source": "source:rates",
+                "transition": "broadcast"
+              }
+            ],
+            "ownership": "owned",
+            "role": "column",
             "type": {
               "kind": "decimal",
               "precision": 19,
@@ -149,18 +488,37 @@
             }
           },
           {
+            "grain": [
+              "supplier",
+              "invoice",
+              "id"
+            ],
             "name": "_status",
+            "role": "status",
             "type": {
               "kind": "string"
             }
           },
           {
+            "grain": [
+              "supplier",
+              "invoice",
+              "id"
+            ],
             "name": "_reason",
+            "role": "reason",
             "type": {
               "kind": "string"
             }
           }
-        ]
+        ],
+        "grain": [
+          "supplier",
+          "invoice",
+          "id"
+        ],
+        "grouped": false,
+        "line_inputs": []
       }
     },
     "status": "succeeded_with_unresolved",
