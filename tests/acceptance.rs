@@ -216,7 +216,15 @@ fn rebind_saved_recipe_uses_new_rates_without_editing_invoices() {
 fn bound_validation_reports_coverage_without_implicitly_scanning() {
     let root = tempfile::tempdir().unwrap();
     let (recipe, bindings, policy) = fixture(root.path());
-    std::fs::write(root.path().join("a.json"), "not json").unwrap();
+    // Decision #9: bound validation inspects source schemas but scans no data, so a
+    // malformed record value passes none-mode and fails only the full scan.
+    let path = root.path().join("a.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        text.replace(r#""quantity":"2""#, r#""quantity":"two""#),
+    )
+    .unwrap();
     let report = iresiphi::validation::validate_bound(&recipe, &bindings, &policy, "none");
     assert!(report.valid);
     assert!(
@@ -229,7 +237,7 @@ fn bound_validation_reports_coverage_without_implicitly_scanning() {
         report
             .checks
             .iter()
-            .any(|c| c.id == "source_schema" && c.status == "not-run")
+            .any(|c| c.id == "source_schema" && c.status == "passed")
     );
     let report = iresiphi::validation::validate_bound(&recipe, &bindings, &policy, "full");
     assert!(!report.valid);

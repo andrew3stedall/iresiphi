@@ -297,21 +297,214 @@ pub struct Policy {
     #[serde(default)]
     pub diagnostic_values: bool,
 }
+/// A structured diagnostic record (decision #9). `code`, `phase` and `message`
+/// are always present; the remaining fields locate and bound the problem. Values
+/// are omitted unless `Policy::diagnostic_values` opts in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Error {
+    /// Stable machine-readable code.
     pub code: String,
     pub phase: String,
+    /// Human message. Never contains source data values.
     pub message: String,
     pub context: Option<String>,
+    /// `error` (fails the run) or `warning` (recorded; the run continues).
+    #[serde(default = "default_severity")]
+    pub severity: String,
+    /// Stable declaration ID the problem belongs to, such as `source:rates`,
+    /// `relationship:a_rate`, `output:a_review` or `expression:<output>.<column>`.
+    #[serde(default)]
+    pub subject: Option<String>,
+    /// ID of the check that established the problem, such as `data.identity`.
+    #[serde(default)]
+    pub check: Option<String>,
+    /// Outputs whose population or values the problem affects.
+    #[serde(default)]
+    pub affected_outputs: Vec<String>,
+    /// Number of affected records when known.
+    #[serde(default)]
+    pub affected_count: Option<u64>,
+    /// `exact` when `affected_count` is the complete count, otherwise `unknown`.
+    #[serde(default = "default_count_status")]
+    pub count_status: String,
+    /// At most [`Error::SAMPLE_CAP`] source references of affected records.
+    #[serde(default)]
+    pub samples: Vec<SourceReference>,
+    /// True when more affected records exist than `samples` lists.
+    #[serde(default)]
+    pub samples_truncated: bool,
+    /// What a user can do about it.
+    #[serde(default)]
+    pub remediation: Option<String>,
+    /// Offending values, present only when the policy opted in to diagnostic values.
+    #[serde(default)]
+    pub values: Option<Vec<serde_json::Value>>,
+}
+fn default_severity() -> String {
+    "error".into()
+}
+fn default_count_status() -> String {
+    "unknown".into()
 }
 impl Error {
+    /// Default cap on source-reference samples per diagnostic.
+    pub const SAMPLE_CAP: usize = 20;
     pub fn new(code: &str, phase: &str, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
             phase: phase.into(),
             message: message.into(),
             context: None,
+            severity: default_severity(),
+            subject: None,
+            check: None,
+            affected_outputs: Vec::new(),
+            affected_count: None,
+            count_status: default_count_status(),
+            samples: Vec::new(),
+            samples_truncated: false,
+            remediation: None,
+            values: None,
         }
+    }
+    pub fn warning(mut self) -> Self {
+        self.severity = "warning".into();
+        self
+    }
+    pub fn with_subject(mut self, subject: impl Into<String>) -> Self {
+        self.subject = Some(subject.into());
+        self
+    }
+    pub fn with_check(mut self, check: impl Into<String>) -> Self {
+        self.check = Some(check.into());
+        self
+    }
+    pub fn with_outputs(mut self, outputs: Vec<String>) -> Self {
+        self.affected_outputs = outputs;
+        self
+    }
+    /// Record an exact affected count and its first [`Error::SAMPLE_CAP`] references.
+    pub fn with_affected<'a>(
+        mut self,
+        count: usize,
+        references: impl IntoIterator<Item = &'a SourceReference>,
+    ) -> Self {
+        self.affected_count = Some(count as u64);
+        self.count_status = "exact".into();
+        self.samples = references
+            .into_iter()
+            .take(Self::SAMPLE_CAP)
+            .cloned()
+            .collect();
+        self.samples_truncated = count > self.samples.len();
+        self
+    }
+    pub fn with_remediation(mut self, remediation: impl Into<String>) -> Self {
+        self.remediation = Some(remediation.into());
+        self
+    }
+    /// Attach values only when `enabled` (the policy's explicit opt-in).
+    pub fn with_values(mut self, enabled: bool, values: Vec<serde_json::Value>) -> Self {
+        if enabled {
+            self.values = Some(values);
+        }
+        self
+    }
+    /// Fill the check ID and remediation from the stable code when a producer
+    /// did not set them, so every published diagnostic is a complete record.
+    pub fn completed(mut self) -> Self {
+        if self.check.is_none() {
+            self.check = Some(default_check(&self.code, &self.phase).into());
+        }
+        if self.remediation.is_none() {
+            self.remediation = Some(default_remediation(&self.code).into());
+        }
+        if self.samples.len() > Self::SAMPLE_CAP {
+            self.samples.truncate(Self::SAMPLE_CAP);
+            self.samples_truncated = true;
+        }
+        self
+    }
+}
+/// The check that establishes a failure with this code.
+pub fn default_check(code: &str, phase: &str) -> String {
+    match code {
+        "INVALID_VALUE"
+        | "INVALID_DECIMAL"
+        | "INVALID_DATE"
+        | "TYPE_MISMATCH"
+        | "NULL_REQUIRED"
+        | "UNKNOWN_PATH"
+        | "INVALID_JSON"
+        | "DUPLICATE_JSON_KEY"
+        | "INVALID_CSV"
+        | "INVALID_XLSX"
+        | "XLSX_QUANTIZATION_REQUIRED"
+        | "XLSX_CELL_ERROR"
+        | "FORMULA_CACHE_MISSING"
+        | "FORMULA_CACHE_UNCERTAIN"
+        | "ARITHMETIC_OVERFLOW" => "data.types".into(),
+        "NULL_IDENTITY" | "DUPLICATE_IDENTITY" => "data.identity".into(),
+        "CARDINALITY_VIOLATION" => "data.relationships".into(),
+        "INVALID_INTERVAL" => "data.rate_validity".into(),
+        "LOOKUP_AMBIGUOUS" => "lookup.cardinality".into(),
+        "LOOKUP_UNMATCHED" => "lookup.coverage".into(),
+        "ORPHAN_DETAIL" => "detail.parent".into(),
+        "INVALID_PROJECTION" | "INVALID_BINDING" => "source_schema".into(),
+        "POLICY_DENIED" | "SOURCE_ACCESS" | "MISSING_BINDING" | "SOURCE_CHANGED" => "access".into(),
+        "RESOURCE_LIMIT" => "budget".into(),
+        "CANCELLED" => "cancellation".into(),
+        _ => phase.into(),
+    }
+}
+/// Generic remediation for a stable code.
+pub fn default_remediation(code: &str) -> &'static str {
+    match code {
+        "UNSUPPORTED_OPERATION"
+        | "UNSUPPORTED_TYPE"
+        | "UNSUPPORTED_VERSION"
+        | "UNSUPPORTED_CAPABILITY"
+        | "UNSUPPORTED_ADAPTER" => {
+            "Remove or replace the unsupported declaration; this build does not implement it."
+        }
+        "INVALID_PATH" => {
+            "Name the relationship path from the output anchor to the field explicitly; competing routes are never chosen implicitly."
+        }
+        "GRAIN_VIOLATION" => {
+            "Use an explicit aggregate or a separate detail output for finer-grained records."
+        }
+        "MISSING_REFERENCE" => "Declare the referenced source, field, feature or relationship.",
+        "TYPE_MISMATCH" | "PRECISION_OVERFLOW" => {
+            "Declare matching types or add an explicit cast or quantization."
+        }
+        "NULL_IDENTITY" | "DUPLICATE_IDENTITY" => {
+            "Correct the source records so every declared identity is present and unique, or declare a different identity."
+        }
+        "INVALID_INTERVAL" => {
+            "Correct the validity interval so valid_from is before valid_to, or leave valid_to null for an open upper bound."
+        }
+        "CARDINALITY_VIOLATION" => {
+            "Remove the duplicate or overlapping candidates, or drop `strict` to quarantine affected lines as ambiguous."
+        }
+        "LOOKUP_AMBIGUOUS" => {
+            "Inspect the candidate evidence and remove duplicate or overlapping lookup records; affected lines keep null dependent values."
+        }
+        "LOOKUP_UNMATCHED" => {
+            "Add the missing lookup records or correct the key values; affected lines keep null dependent values."
+        }
+        "ORPHAN_DETAIL" => "Correct the detail parent keys or supply the missing parent lines.",
+        "INVALID_PROJECTION" | "INVALID_BINDING" => {
+            "Align the declared projection and binding settings with the source's actual headers, sheets and paths."
+        }
+        "POLICY_DENIED" => "Move the file under an allowed root or extend the policy explicitly.",
+        "RESOURCE_LIMIT" => {
+            "Raise the named policy limit explicitly or reduce the selected population; results are never truncated."
+        }
+        "CANCELLED" => "Re-run when cancellation is no longer requested.",
+        "MISSING_BINDING" | "SOURCE_ACCESS" | "SOURCE_CHANGED" => {
+            "Bind every source to a readable, stable local file and run again."
+        }
+        _ => "Correct the declaration or source data identified by this diagnostic and run again.",
     }
 }
 impl std::fmt::Display for Error {
