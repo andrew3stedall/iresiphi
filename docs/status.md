@@ -35,6 +35,11 @@ passes at the same commit, and declares the workload's 1 GiB byte limits during
 fixture generation. Its own architecture passes gate completion; issue states
 and workflow results record the current acceptance outcome.
 
+Both architectures have hosted CI jobs at the exact PR head. Native ARM CI
+provides the full workload verification when a local run cannot finish; local
+ARM development remains available. Neither interrupted local workload attempt
+at `72ffd6c` is counted as a pass.
+
 ## Remaining scope
 
 The broad product specification

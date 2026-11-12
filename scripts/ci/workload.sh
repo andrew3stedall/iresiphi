@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$(uname -m)" == x86_64 ]]
+[[ "$(uname -m)" == "${IRESIPHI_EXPECTED_ARCH:-x86_64}" ]]
 mkdir -p ci-artifacts/workload
 evidence="$(pwd)/ci-artifacts/workload"
 {
