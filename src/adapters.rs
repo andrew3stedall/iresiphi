@@ -157,6 +157,42 @@ fn read_bytes(
     Ok(bytes)
 }
 
+/// A stable, path-free identity for one binding: a digest of its adapter, supplied
+/// location and declared settings. Rebinding the same bytes elsewhere yields a new identity.
+fn binding_identity(binding: &Binding) -> Result<String> {
+    let declared = serde_json::to_vec(&(
+        &binding.adapter,
+        binding.path.as_os_str().as_encoded_bytes(),
+        &binding.settings,
+    ))
+    .map_err(io_error)?;
+    Ok(format!(
+        "binding:{}",
+        &crate::validation::hex(&Sha256::digest(&declared))[..32]
+    ))
+}
+
+/// JSON and CSV dialects are explicit: an unknown (for example misspelt) setting fails
+/// rather than silently falling back to a default.
+fn check_text_settings(binding: &Binding) -> Result<()> {
+    let allowed: &[&str] = match binding.adapter.as_str() {
+        "json" => &[],
+        "csv" => &["delimiter", "quote", "null_tokens"],
+        _ => return Ok(()),
+    };
+    match binding
+        .settings
+        .keys()
+        .find(|k| !allowed.contains(&k.as_str()))
+    {
+        Some(key) => Err(err(
+            "INVALID_BINDING",
+            format!("unsupported {} setting {key}", binding.adapter),
+        )),
+        None => Ok(()),
+    }
+}
+
 /// Read immutable materializations. The public executor converts these owned rows to typed batches.
 /// This adapter boundary is bounded materialization, not a zero-copy or streaming guarantee.
 fn materialize_sources(
@@ -174,11 +210,12 @@ fn materialize_sources(
         let binding = bindings
             .get(&source.id)
             .ok_or_else(|| err("MISSING_BINDING", format!("missing binding {}", source.id)))?;
+        check_text_settings(binding)?;
         let bytes = read_bytes(binding, policy, &mut total, cancel)?;
         let fingerprint = crate::validation::hex(&Sha256::digest(&bytes));
         let reference = SourceReference {
             source: source.id.clone(),
-            binding: source.id.clone(),
+            binding: binding_identity(binding)?,
             fingerprint,
             location: String::new(),
         };
@@ -507,6 +544,78 @@ fn json_preflight(bytes: &[u8], limits: &Limits, cancel: &AtomicBool) -> Result<
     }
     Ok(())
 }
+/// Split an RFC 6901 pointer into unescaped reference tokens. A path that is not a
+/// pointer is a projection error, never a silently missing (null) field.
+fn json_pointer_tokens(pointer: &str) -> Result<Vec<String>> {
+    if pointer.is_empty() {
+        return Ok(vec![]);
+    }
+    let invalid = || {
+        err(
+            "INVALID_PROJECTION",
+            format!("{pointer:?} is not a JSON pointer"),
+        )
+    };
+    let rest = pointer.strip_prefix('/').ok_or_else(invalid)?;
+    rest.split('/')
+        .map(|token| {
+            let mut out = String::with_capacity(token.len());
+            let mut chars = token.chars();
+            while let Some(c) = chars.next() {
+                out.push(match c {
+                    '~' => match chars.next() {
+                        Some('0') => '~',
+                        Some('1') => '/',
+                        _ => return Err(invalid()),
+                    },
+                    c => c,
+                });
+            }
+            Ok(out)
+        })
+        .collect()
+}
+/// Resolve a pointer. `None` means absent: an object lacks the key, an array lacks the
+/// index, or an ancestor is null. Descending into a present scalar is malformed data.
+fn json_lookup<'v>(
+    root: &'v serde_json::Value,
+    pointer: &str,
+) -> Result<Option<&'v serde_json::Value>> {
+    let mut current = root;
+    for token in json_pointer_tokens(pointer)? {
+        current = match current {
+            serde_json::Value::Object(map) => match map.get(&token) {
+                Some(next) => next,
+                None => return Ok(None),
+            },
+            serde_json::Value::Array(items) => {
+                let index = (!token.is_empty()
+                    && token.bytes().all(|b| b.is_ascii_digit())
+                    && (token == "0" || !token.starts_with('0')))
+                .then(|| token.parse::<usize>().ok())
+                .flatten()
+                .ok_or_else(|| {
+                    err(
+                        "INVALID_VALUE",
+                        format!("{pointer} indexes an array with {token:?}"),
+                    )
+                })?;
+                match items.get(index) {
+                    Some(next) => next,
+                    None => return Ok(None),
+                }
+            }
+            serde_json::Value::Null => return Ok(None),
+            _ => {
+                return Err(err(
+                    "INVALID_VALUE",
+                    format!("{pointer} descends into a JSON scalar"),
+                ));
+            }
+        };
+    }
+    Ok(Some(current))
+}
 fn read_json(
     source: &Source,
     bytes: &[u8],
@@ -514,6 +623,14 @@ fn read_json(
     policy: &Policy,
     cancel: &AtomicBool,
 ) -> Result<Vec<Row>> {
+    for path in source
+        .projection
+        .array
+        .iter()
+        .chain(source.projection.fields.values().map(|f| &f.path))
+    {
+        json_pointer_tokens(path)?;
+    }
     json_preflight(bytes, &policy.limits, cancel)?;
     serde_json::from_slice::<UniqueJson>(bytes).map_err(|e| {
         err(
@@ -528,8 +645,7 @@ fn read_json(
     let root: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|e| err("INVALID_JSON", e.to_string()))?;
     let records: Vec<&serde_json::Value> = match &source.projection.array {
-        Some(path) => root
-            .pointer(path)
+        Some(path) => json_lookup(&root, path)?
             .and_then(|v| v.as_array())
             .ok_or_else(|| {
                 err(
@@ -556,8 +672,7 @@ fn read_json(
             .map(|p| format!("{p}/{index}"))
             .unwrap_or_default();
         for (name, field) in &source.projection.fields {
-            let raw = if field.header { &root } else { record }
-                .pointer(&field.path)
+            let raw = json_lookup(if field.header { &root } else { record }, &field.path)?
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
             let text = match &raw {
@@ -600,6 +715,159 @@ fn setting_byte(binding: &Binding, key: &str, default: u8) -> Result<u8> {
         )),
     }
 }
+
+/// Explicit CSV dialect: UTF-8, one header record, RFC 4180 quoting, LF or CRLF endings.
+struct CsvDialect {
+    delimiter: u8,
+    quote: u8,
+    nulls: Vec<String>,
+}
+impl CsvDialect {
+    fn from_binding(binding: &Binding) -> Result<Self> {
+        let delimiter = setting_byte(binding, "delimiter", b',')?;
+        let quote = setting_byte(binding, "quote", b'"')?;
+        let reserved = [b'\r', b'\n', b'\\'];
+        if delimiter == quote || reserved.contains(&delimiter) || reserved.contains(&quote) {
+            return Err(err(
+                "INVALID_BINDING",
+                "CSV delimiter and quote must differ and must not be a line ending or backslash",
+            ));
+        }
+        let nulls = match binding.settings.get("null_tokens") {
+            None => vec!["\\N".to_owned()],
+            Some(serde_json::Value::Array(tokens)) => tokens
+                .iter()
+                .map(|t| match t.as_str() {
+                    Some(t) if !t.is_empty() => Ok(t.to_owned()),
+                    _ => Err(err(
+                        "INVALID_BINDING",
+                        "null_tokens must be non-empty strings; empty text is never null",
+                    )),
+                })
+                .collect::<Result<_>>()?,
+            Some(_) => {
+                return Err(err(
+                    "INVALID_BINDING",
+                    "null_tokens must be an array of strings",
+                ));
+            }
+        };
+        Ok(Self {
+            delimiter,
+            quote,
+            nulls,
+        })
+    }
+}
+
+/// Strict RFC 4180 record reader. Unlike lenient readers it rejects unterminated or
+/// stray quotes, text after a closing quote and bare carriage returns, and it never
+/// skips blank lines (they are one-field records, so they fail the width check).
+/// Field bytes are bounded while scanning and cancellation is checked between chunks.
+struct CsvRecords<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    dialect: &'a CsvDialect,
+    field_bytes: usize,
+    cancel: &'a AtomicBool,
+    next_check: usize,
+}
+impl<'a> CsvRecords<'a> {
+    fn new(
+        bytes: &'a [u8],
+        dialect: &'a CsvDialect,
+        field_bytes: usize,
+        cancel: &'a AtomicBool,
+    ) -> Self {
+        Self {
+            bytes: bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes),
+            pos: 0,
+            dialect,
+            field_bytes,
+            cancel,
+            next_check: 0,
+        }
+    }
+    fn invalid(&self, what: &str) -> Error {
+        err("INVALID_CSV", format!("{what} at byte {}", self.pos))
+    }
+    fn push(&self, field: &mut Vec<u8>, b: u8) -> Result<()> {
+        limit(field.len() < self.field_bytes, "CSV field bytes")?;
+        field.push(b);
+        Ok(())
+    }
+    fn next_record(&mut self) -> Result<Option<Vec<String>>> {
+        if self.pos >= self.bytes.len() {
+            return Ok(None);
+        }
+        let (delimiter, quote) = (self.dialect.delimiter, self.dialect.quote);
+        let mut record = Vec::new();
+        loop {
+            let mut field = Vec::new();
+            let mut quoted = false;
+            if self.bytes.get(self.pos) == Some(&quote) {
+                quoted = true;
+                self.pos += 1;
+                loop {
+                    if self.pos >= self.next_check {
+                        check_cancel(self.cancel)?;
+                        self.next_check = self.pos + 65536;
+                    }
+                    match self.bytes.get(self.pos) {
+                        None => return Err(self.invalid("unterminated quoted field")),
+                        Some(&b) if b == quote => {
+                            if self.bytes.get(self.pos + 1) == Some(&quote) {
+                                self.push(&mut field, quote)?;
+                                self.pos += 2;
+                            } else {
+                                self.pos += 1;
+                                break;
+                            }
+                        }
+                        Some(&b) => {
+                            self.push(&mut field, b)?;
+                            self.pos += 1;
+                        }
+                    }
+                }
+            }
+            // After an unquoted run or a closing quote: delimiter, line ending or EOF.
+            let end_of_record = loop {
+                if self.pos >= self.next_check {
+                    check_cancel(self.cancel)?;
+                    self.next_check = self.pos + 65536;
+                }
+                match self.bytes.get(self.pos) {
+                    None => break true,
+                    Some(&b) if b == delimiter => {
+                        self.pos += 1;
+                        break false;
+                    }
+                    Some(b'\n') => {
+                        self.pos += 1;
+                        break true;
+                    }
+                    Some(b'\r') if self.bytes.get(self.pos + 1) == Some(&b'\n') => {
+                        self.pos += 2;
+                        break true;
+                    }
+                    Some(b'\r') => return Err(self.invalid("bare carriage return")),
+                    Some(_) if quoted => return Err(self.invalid("text after closing quote")),
+                    Some(&b) if b == quote => return Err(self.invalid("quote in unquoted field")),
+                    Some(&b) => {
+                        self.push(&mut field, b)?;
+                        self.pos += 1;
+                    }
+                }
+            };
+            record.push(String::from_utf8(field).map_err(|_| self.invalid("invalid UTF-8"))?);
+            if end_of_record {
+                return Ok(Some(record));
+            }
+        }
+    }
+}
+
 fn read_csv(
     source: &Source,
     binding: &Binding,
@@ -608,16 +876,11 @@ fn read_csv(
     policy: &Policy,
     cancel: &AtomicBool,
 ) -> Result<Vec<Row>> {
-    let mut reader = csv::ReaderBuilder::new()
-        .delimiter(setting_byte(binding, "delimiter", b',')?)
-        .quote(setting_byte(binding, "quote", b'"')?)
-        .has_headers(true)
-        .flexible(false)
-        .from_reader(bytes);
+    let dialect = CsvDialect::from_binding(binding)?;
+    let mut reader = CsvRecords::new(bytes, &dialect, policy.limits.field_bytes, cancel);
     let headers = reader
-        .headers()
-        .map_err(|e| err("INVALID_CSV", e.to_string()))?
-        .clone();
+        .next_record()?
+        .ok_or_else(|| err("INVALID_CSV", "CSV header record is required"))?;
     let mut seen = BTreeSet::new();
     if headers.iter().any(|h| !seen.insert(h)) {
         return Err(err("INVALID_CSV", "duplicate header"));
@@ -635,33 +898,36 @@ fn read_csv(
                 .ok_or_else(|| err("INVALID_PROJECTION", format!("missing CSV column {path}")))
         })
         .collect::<Result<_>>()?;
-    let nulls = binding
-        .settings
-        .get("null_tokens")
-        .and_then(|v| v.as_array())
-        .map(|v| v.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
-        .unwrap_or_else(|| vec!["\\N"]);
     let mut rows = RowCollector::new(policy);
-    for (index, record) in reader.records().enumerate() {
+    let mut index = 0usize;
+    while let Some(record) = reader.next_record()? {
         check_cancel(cancel)?;
-        let record = record.map_err(|e| err("INVALID_CSV", e.to_string()))?;
-        for text in &record {
-            limit(text.len() <= policy.limits.field_bytes, "CSV field bytes")?;
+        let number = index + 2;
+        index += 1;
+        if record.len() != headers.len() {
+            return Err(err(
+                "INVALID_CSV",
+                format!(
+                    "record {number} has {} fields; header declares {}",
+                    record.len(),
+                    headers.len()
+                ),
+            ));
         }
         let mut row = Row {
             fields: BTreeMap::new(),
             raw: BTreeMap::new(),
             reference: reference.clone(),
         };
-        row.reference.location = format!("record:{}", index + 2);
+        row.reference.location = format!("record:{number}");
         for (name, field, col) in &columns {
-            let original = &record[*col];
+            let original = record[*col].as_str();
             let decoded = if original.starts_with("\\\\") {
                 &original[1..]
             } else {
                 original
             };
-            let text = if nulls.contains(&original) {
+            let text = if dialect.nulls.iter().any(|n| n == original) {
                 None
             } else {
                 Some(decoded)
