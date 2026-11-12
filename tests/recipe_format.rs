@@ -253,18 +253,19 @@ fn save_reload_preserves_identity_and_is_stable() {
 #[test]
 fn saved_recipes_carry_no_bindings_paths_or_secrets() {
     let dir = tempfile::tempdir().unwrap();
-    let input = dir.path().join("secret-input.json");
-    std::fs::write(&input, r#"[{"id":"a"}]"#).unwrap();
+    let input = dir.path().join("secret-input.csv");
+    std::fs::write(&input, "id\na\n").unwrap();
     let recipe = Recipe::from_json(
-        r#"{"format_version":"0.1","name":"secret free","sources":[{"id":"lines","identity":["id"],"grain":["id"],"projection":{"array":"","fields":{"id":{"path":"/id","data_type":{"kind":"string"}}}}}],"outputs":[{"id":"review","anchor":"lines","columns":[{"name":"id","expr":{"op":"field","source":"lines","field":"id"}}]}]}"#,
+        r#"{"format_version":"0.1","name":"secret free","sources":[{"id":"lines","identity":["id"],"grain":["id"],"projection":{"fields":{"id":{"path":"id","data_type":{"kind":"string"}}}}}],"outputs":[{"id":"review","anchor":"lines","columns":[{"name":"id","expr":{"op":"field","source":"lines","field":"id"}}]}]}"#,
     )
     .unwrap();
     let bindings = BTreeMap::from([(
         "lines".into(),
         Binding {
             path: input.clone(),
-            adapter: "json".into(),
-            settings: BTreeMap::from([("token".into(), json!("hunter2"))]),
+            adapter: "csv".into(),
+            // A valid setting carrying a sentinel value: settings must never be persisted.
+            settings: BTreeMap::from([("null_tokens".into(), json!(["hunter2"]))]),
         },
     )]);
     let policy = Policy {
@@ -285,7 +286,7 @@ fn saved_recipes_carry_no_bindings_paths_or_secrets() {
     }
     // Bindings are not a recipe property.
     let mut doc: Json = serde_json::from_str(&saved).unwrap();
-    doc["bindings"] = json!({"lines":{"path":input,"adapter":"json"}});
+    doc["bindings"] = json!({"lines":{"path":input,"adapter":"csv"}});
     assert_eq!(load_code(&doc), "INVALID_RECIPE");
 }
 
