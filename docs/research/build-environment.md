@@ -39,3 +39,51 @@ Use explicit interpreter paths. Initially `python` resolved to an Android/Termux
 This machine is **aarch64**, running Ubuntu 26.04.1 through PRoot, glibc 2.43. It is not the supported release target Linux x86_64 manylinux_2_28. Docker, Podman, qemu-x86_64 and an x86_64 cross compiler were not present. Local GNU aarch64 tests can establish semantic and binding behavior, but cannot certify x86_64 wheels, minimum glibc compatibility, clean container installation or a pinned build-image digest. Those remain explicit release gates; do not relabel a local artifact as a supported distribution.
 
 Build with `CARGO_BUILD_JOBS=1`, development debug information disabled and incremental compilation disabled to reduce memory pressure. No application build, dependency audit, performance, wheel audit or test result is asserted by this note.
+
+## Python bindings build and test (ticket #23, 2026-11-12)
+
+Observed on the same aarch64 PRoot machine (4 cores, ~2 GB free RAM). These are local semantic results only; no Linux x86_64 manylinux_2_28 wheel was built, audited or installed on a clean image here.
+
+Tools reused from the earlier session, still present and version-checked (`maturin 1.16.0`, `uv 0.13.7 (aarch64-unknown-linux-musl)`):
+
+- `/tmp/iresiphi-tools/maturin/maturin-1.16.0.data/scripts/maturin` (sha256 `ac34e9599a28f134712dd70e53078624e9d786efde1b8fcfd1bbbe7f48f30baf`)
+- `/tmp/iresiphi-tools/uv/uv-0.13.7.data/scripts/uv` (sha256 `f4752297fa474760b9db6586501db3ee5dd226ce49d9c0c23d6f47930d44f30e`)
+
+`/tmp` does not survive a reboot. If the tools are gone, download the published GNU aarch64 wheels from PyPI, check them against the sha256 in `https://pypi.org/pypi/<name>/<version>/json`, and unzip the executable.
+
+Shared build environment. Every cargo or maturin command needs the codegen-units override, which keeps this worktree's `iresiphi` artifacts apart from other worktrees that use the same target directory:
+
+```sh
+export PATH=$HOME/.cargo/bin:$PATH CARGO_BUILD_JOBS=2 \
+  CARGO_TARGET_DIR=/home/t3/.t3/worktrees/iresiphi/t3-f0588568/target
+CFG='profile.dev.package.iresiphi.codegen-units=204'   # reserved per worktree
+```
+
+Virtual environments without pip. `uv venv` works, and so does `python3.13 -m venv --without-pip`:
+
+```sh
+uv venv --python /home/t3/.local/share/uv/python/cpython-3.12-linux-aarch64-gnu/bin/python3.12 venv312
+/home/t3/.local/share/uv/python/cpython-3.13-linux-aarch64-gnu/bin/python3.13 -m venv --without-pip venv313
+```
+
+Wheels are built with the dev profile. A release-profile DataFusion build was not attempted because of the memory risk on this machine. Use `--auditwheel skip` and the plain `linux` tag, since nothing here can certify manylinux:
+
+```sh
+maturin build --profile dev -i venv312/bin/python --out wheels \
+  --compatibility linux --auditwheel skip --config "$CFG"
+uv pip install --python venv312/bin/python --offline --no-index --reinstall \
+  wheels/iresiphi-0.1.0-cp312-cp312-linux_aarch64.whl
+```
+
+Tests run from `tests/` against the installed wheel, using only the stdlib `unittest`, with no pytest dependency:
+
+```sh
+cd tests && ../venv312/bin/python -m unittest -v python_acceptance python_handles python_cancellation
+```
+
+The Rust half of the parity golden is `cargo test --test python_parity --config "$CFG"`. Regenerate it with `IRESIPHI_BLESS=1` only when a Rust change is intended to alter results.
+
+Notes for workload measurement (#24):
+
+- The dev-profile extension processes about 11 ms per generated invoice line here: 2,000 lines took about 23 s and 20,000 lines about 254 s, measured while a parallel cargo build was running. Optimized-build timings would need a release-profile wheel, which this machine did not build.
+- `cargo test --features python` cannot link test binaries, because pyo3's `extension-module` feature leaves libpython unlinked. Python behaviour is tested through the wheel, and `cargo check --features python` is the compile gate.

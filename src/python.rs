@@ -54,9 +54,7 @@ fn raise(py: Python<'_>, class: &str, error: &Error, report: Option<Py<PyRun>>) 
         let report_id = report.as_ref().and_then(|r| r.get().run_id_unchecked());
         value["report_id"] = report_id.clone().map(Json::String).unwrap_or(Json::Null);
         let record = json_to_py(py, &value)?;
-        let instance = classes
-            .getattr(class)?
-            .call1((record, report, report_id))?;
+        let instance = classes.getattr(class)?.call1((record, report, report_id))?;
         Ok(PyErr::from_value(instance))
     };
     build().unwrap_or_else(|failure| {
@@ -229,7 +227,11 @@ fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny
             let parsed: i64 = value.parse().map_err(|_| {
                 iresiphi_error(
                     py,
-                    &record("INVALID_VALUE", "python", "Int64 text is not a signed 64-bit integer"),
+                    &record(
+                        "INVALID_VALUE",
+                        "python",
+                        "Int64 text is not a signed 64-bit integer",
+                    ),
                 )
             })?;
             parsed.into_pyobject(py)?.into_any()
@@ -237,7 +239,10 @@ fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny
         Value::Decimal { value, .. } => decimal(py, value)?,
         Value::Date { value } => {
             let date = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| {
-                iresiphi_error(py, &record("INVALID_VALUE", "python", "invalid calendar date"))
+                iresiphi_error(
+                    py,
+                    &record("INVALID_VALUE", "python", "invalid calendar date"),
+                )
             })?;
             use chrono::Datelike;
             if !(1..=9999).contains(&date.year()) {
@@ -339,7 +344,9 @@ impl PyRecipe {
         Ok(Self::owned(recipe))
     }
     fn to_json(&self, py: Python<'_>) -> PyResult<String> {
-        self.with(py, |r| r.to_json().map_err(|e| iresiphi_error(py, &e.completed())))
+        self.with(py, |r| {
+            r.to_json().map_err(|e| iresiphi_error(py, &e.completed()))
+        })
     }
     fn canonical_json(&self, py: Python<'_>) -> PyResult<String> {
         self.with(py, |r| {
@@ -350,7 +357,9 @@ impl PyRecipe {
     /// SHA-256 of the canonical JSON: the recipe's semantic identity.
     #[getter]
     fn hash(&self, py: Python<'_>) -> PyResult<String> {
-        self.with(py, |r| r.hash().map_err(|e| iresiphi_error(py, &e.completed())))
+        self.with(py, |r| {
+            r.hash().map_err(|e| iresiphi_error(py, &e.completed()))
+        })
     }
     #[getter]
     fn name(&self, py: Python<'_>) -> PyResult<String> {
@@ -457,7 +466,12 @@ impl PyRecipe {
         })
     }
     #[pyo3(signature = (id, provenance=None))]
-    fn bundle_definition(&self, py: Python<'_>, id: &str, provenance: Option<String>) -> PyResult<()> {
+    fn bundle_definition(
+        &self,
+        py: Python<'_>,
+        id: &str,
+        provenance: Option<String>,
+    ) -> PyResult<()> {
         self.with(py, |r| {
             let mut updated = r.clone();
             updated
@@ -501,8 +515,8 @@ fn arguments(
     bindings: &Bound<'_, PyAny>,
     policy: &Bound<'_, PyAny>,
 ) -> PyResult<(Bindings, Policy)> {
-    let bindings: Bindings =
-        parse_argument(bindings, "INVALID_BINDING", "binding").map_err(|e| iresiphi_error(py, &e))?;
+    let bindings: Bindings = parse_argument(bindings, "INVALID_BINDING", "binding")
+        .map_err(|e| iresiphi_error(py, &e))?;
     let policy: Policy =
         parse_argument(policy, "INVALID_POLICY", "policy").map_err(|e| iresiphi_error(py, &e))?;
     Ok((bindings, policy))
@@ -526,8 +540,8 @@ impl PyCatalog {
 impl PyCatalog {
     #[new]
     fn new(py: Python<'_>, document: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let catalog: Catalog =
-            parse_argument(document, "INVALID_CATALOG", "catalog").map_err(|e| iresiphi_error(py, &e))?;
+        let catalog: Catalog = parse_argument(document, "INVALID_CATALOG", "catalog")
+            .map_err(|e| iresiphi_error(py, &e))?;
         Ok(Self {
             inner: Mutex::new(Some(catalog)),
         })
@@ -590,7 +604,11 @@ impl PyToken {
             other => {
                 return Err(iresiphi_error(
                     py,
-                    &record("INVALID_ARGUMENT", "cancellation", format!("unknown run phase {other:?}")),
+                    &record(
+                        "INVALID_ARGUMENT",
+                        "cancellation",
+                        format!("unknown run phase {other:?}"),
+                    ),
                 ));
             }
         };
@@ -669,7 +687,11 @@ impl PyRun {
             Some(rows) => Ok(rows),
         }
     }
-    fn table<'a>(py: Python<'_>, report: &'a RunReport, name: &str) -> PyResult<&'a crate::engine::Table> {
+    fn table<'a>(
+        py: Python<'_>,
+        report: &'a RunReport,
+        name: &str,
+    ) -> PyResult<&'a crate::engine::Table> {
         report.tables.get(name).ok_or_else(|| {
             iresiphi_error(
                 py,
@@ -683,12 +705,14 @@ impl PyRun {
         })
     }
     fn columns(report: &RunReport, name: &str) -> Option<Vec<String>> {
-        report.manifest["schema"][name]["columns"].as_array().map(|columns| {
-            columns
-                .iter()
-                .filter_map(|c| c["name"].as_str().map(str::to_owned))
-                .collect()
-        })
+        report.manifest["schema"][name]["columns"]
+            .as_array()
+            .map(|columns| {
+                columns
+                    .iter()
+                    .filter_map(|c| c["name"].as_str().map(str::to_owned))
+                    .collect()
+            })
     }
     /// Copy at most `rows` records starting at `offset`, stopping before the
     /// batch's decoded size would exceed the policy's per-batch byte budget.
@@ -728,10 +752,7 @@ impl PyRun {
                 let order = Self::columns(&report, name);
                 while index < total && index - offset < rows {
                     let row = &table[index];
-                    let size: usize = row
-                        .iter()
-                        .map(|(k, v)| k.len() + 16 + value_bytes(v))
-                        .sum();
+                    let size: usize = row.iter().map(|(k, v)| k.len() + 16 + value_bytes(v)).sum();
                     if size > self.batch_bytes {
                         return Err(over(py, size));
                     }
@@ -860,7 +881,12 @@ impl PyRun {
     }
     /// Iterate over copied batches of `table`; each step copies one batch.
     #[pyo3(signature = (table, rows=None))]
-    fn batches(slf: Py<Self>, py: Python<'_>, table: &str, rows: Option<usize>) -> PyResult<PyBatches> {
+    fn batches(
+        slf: Py<Self>,
+        py: Python<'_>,
+        table: &str,
+        rows: Option<usize>,
+    ) -> PyResult<PyBatches> {
         {
             let this = slf.get();
             this.limit(py, rows)?;
@@ -934,7 +960,12 @@ impl PyRun {
         false
     }
     fn __repr__(&self) -> String {
-        match self.inner.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        match self
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
             Some(r) => format!("<iresiphi.RunResult {} {}>", r.run_id, r.status),
             None => "<iresiphi.RunResult closed>".into(),
         }
@@ -1014,17 +1045,18 @@ impl PyContext {
         let worker = std::thread::Builder::new()
             .name("iresiphi-run".into())
             .spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    match destination {
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match destination {
                         Some(path) => {
                             context.run_bundle(&recipe, &bindings, &policy, &path, &worker_token)
                         }
                         None => context.run(&recipe, &bindings, &policy, &worker_token),
-                    }
-                }));
+                    }));
                 let _ = sender.send(result);
             })
-            .map_err(|e| iresiphi_error(py, &record("INTERNAL_ERROR", "execution", e.to_string())))?;
+            .map_err(|e| {
+                iresiphi_error(py, &record("INTERNAL_ERROR", "execution", e.to_string()))
+            })?;
         let mut receiver = Some(receiver);
         let mut signal: Option<PyErr> = None;
         let outcome = loop {
@@ -1086,7 +1118,9 @@ impl PyContext {
             if !signal.is_instance_of::<PyKeyboardInterrupt>(py) {
                 // A user signal handler raised something else: keep its type and
                 // attach the report so the run is not lost.
-                let _ = signal.value(py).setattr("iresiphi_report", handle.clone_ref(py));
+                let _ = signal
+                    .value(py)
+                    .setattr("iresiphi_report", handle.clone_ref(py));
                 return Err(signal);
             }
             let error = match (status.as_str(), primary) {
@@ -1106,13 +1140,13 @@ impl PyContext {
         match status.as_str() {
             "succeeded" | "succeeded_with_unresolved" => Ok(handle),
             "cancelled" => {
-                let error = primary
-                    .unwrap_or_else(|| record("CANCELLED", "execution", "run cancelled"));
+                let error =
+                    primary.unwrap_or_else(|| record("CANCELLED", "execution", "run cancelled"));
                 Err(raise(py, "RunCancelled", &error, Some(handle)))
             }
             _ => {
-                let error = primary
-                    .unwrap_or_else(|| record("EXECUTION_ERROR", "execution", "run failed"));
+                let error =
+                    primary.unwrap_or_else(|| record("EXECUTION_ERROR", "execution", "run failed"));
                 Err(raise(py, "IresiphiError", &error, Some(handle)))
             }
         }
@@ -1146,7 +1180,8 @@ fn from_tagged(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> 
     let json = py_to_json(value, "").map_err(|e| iresiphi_error(py, &e))?;
     let tagged: Value = serde_json::from_value(json)
         .map_err(|e| iresiphi_error(py, &record("INVALID_VALUE", "python", e.to_string())))?;
-    let tagged = crate::validation::canonical_value(&tagged).map_err(|e| iresiphi_error(py, &e.completed()))?;
+    let tagged = crate::validation::canonical_value(&tagged)
+        .map_err(|e| iresiphi_error(py, &e.completed()))?;
     Ok(value_to_py(py, &tagged)?.unbind())
 }
 

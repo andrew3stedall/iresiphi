@@ -86,8 +86,12 @@ fn parity() -> Json {
     let outputs = document["outputs"].as_array_mut().unwrap();
     let a_review = outputs.iter_mut().find(|o| o["id"] == "a_review").unwrap();
     let columns = a_review["columns"].as_array_mut().unwrap();
-    let variance = columns.iter_mut().find(|c| c["name"] == "variance").unwrap();
-    variance["expr"] = json!({"op":"divide","left":field("a","billed",&[]),"right":field("a","quantity",&[])});
+    let variance = columns
+        .iter_mut()
+        .find(|c| c["name"] == "variance")
+        .unwrap();
+    variance["expr"] =
+        json!({"op":"divide","left":field("a","billed",&[]),"right":field("a","quantity",&[])});
     let division = match Recipe::from_json(&document.to_string()) {
         Err(error) => json!({"stage":"load","code":error.code,"phase":error.phase}),
         Ok(divided) => {
@@ -134,5 +138,8 @@ fn rust_matches_the_shared_python_parity_golden() {
             .expect("golden missing: run with IRESIPHI_BLESS=1 to create it"),
     )
     .unwrap();
-    assert_eq!(actual, golden, "Rust results drifted from the shared parity golden");
+    assert_eq!(
+        actual, golden,
+        "Rust results drifted from the shared parity golden"
+    );
 }

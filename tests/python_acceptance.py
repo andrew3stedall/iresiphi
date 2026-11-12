@@ -194,7 +194,7 @@ class SaveReopenRebind(unittest.TestCase):
 
 
 def literal_recipe(columns, name="python exact values"):
-    return b.recipe(name, [b.source("lines", {"id": b.field("/id", b.string_type())}, ["id"])],
+    return b.recipe(name, [b.source("lines", {"id": b.field("/id", b.string_type())}, ["id"], array="/lines")],
                     [b.output("values", "lines", [b.column(n, e) for n, e in columns])])
 
 
@@ -205,7 +205,7 @@ class ExactValues(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.root = Path(self.directory.name)
-        (self.root / "lines.json").write_text('[{"id":"a"}]', encoding="utf-8")
+        (self.root / "lines.json").write_text('{"lines":[{"id":"a"}]}', encoding="utf-8")
         self.bindings = {"lines": b.binding(self.root / "lines.json", "json")}
         self.policy = b.policy([self.root], [self.root])
 
