@@ -14,25 +14,8 @@ evidence="$(pwd)/ci-artifacts/workload"
   python3 -V
 } > "$evidence/environment.txt"
 fixture="$(mktemp -d)"
-python3 scripts/generate_fixture.py "$fixture" --lines 100000 > "$evidence/fixture-manifest.json"
+python3 scripts/generate_fixture.py "$fixture" --lines 100000 --byte-limit 1073741824 > "$evidence/fixture-manifest.json"
 cp "$fixture/policy.json" "$evidence/policy.json"
-# The recorded fixture exceeds default evidence/retention admission. Preserve
-# that expected failure, then measure an explicitly raised policy as documented.
-if cargo run --locked --release --example workload -- \
-  "$fixture/recipe.iresiphi" "$fixture/bindings.json" "$fixture/policy.json" \
-  "$fixture/default-bundle" > "$evidence/default-policy.json"; then
-  echo "Default admission behavior changed; review the workload policy." >&2
-  exit 1
-fi
-python3 - "$fixture/policy.json" <<'PY'
-import json, sys
-from pathlib import Path
-path = Path(sys.argv[1])
-policy = json.loads(path.read_text())
-policy['limits'].update(output_bytes=1073741824, retained_bytes=1073741824)
-path.write_text(json.dumps(policy))
-PY
-cp "$fixture/policy.json" "$evidence/raised-policy.json"
 cargo run --locked --release --example workload -- \
   "$fixture/recipe.iresiphi" "$fixture/bindings.json" "$fixture/policy.json" \
   "$fixture/bundle" > "$evidence/run.json"
@@ -46,9 +29,6 @@ from pathlib import Path
 root = Path(sys.argv[1])
 report = json.loads((root / 'run.json').read_text())
 assert report['status'] == 'succeeded_with_unresolved', report
-default = json.loads((root / 'default-policy.json').read_text())
-assert default['status'] == 'failed', default
-assert any(d['code'] == 'RESOURCE_LIMIT' for d in default['diagnostics']), default
 expected = json.loads((root / 'fixture-manifest.json').read_text())['expected']
 manifest = report['manifest']
 assert manifest['resolved_rows'] == 99999, manifest

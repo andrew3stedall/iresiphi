@@ -4,6 +4,8 @@ This preview runs one workflow: an auditable invoice review. It reads two suppli
 
 Nothing has been published to crates.io or PyPI. The supported wheel target, Linux x86_64 manylinux_2_28, has not been built or audited yet; see [Packaging](#packaging).
 
+Every acceptance and release check must pass on both ARM (aarch64) and x86 (x86_64) at the same commit. ARM passes run locally; x86 passes run in GitHub Actions. See [Required passes](ci.md#required-passes-arm-and-x86).
+
 ## Walkthrough: save, reopen, rebind, validate, explain and run
 
 `examples/run.rs` and `examples/run.py` run the same steps through the public API:

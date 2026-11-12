@@ -34,13 +34,14 @@ Later commits rerun the gates.
 ## Workload evidence
 
 The `x86-workload-<commit>` artifact records hardware/software, immutable fixture
-seed and hashes, both default and raised policies, full run manifests, phase
+seed and hashes, the workload policy, full run manifests, phase
 times, tracked memory, measured process RSS, I/O and cancellation latency.
 The script verifies exact expected totals and resolved/unresolved populations.
 
-The default profile intentionally refuses this fixture's evidence volume. The
-measurement reruns with explicit 1 GiB output and retained-buffer limits, leaving
-other limits at their defaults. [The ARM measurement](workload-100k.md) describes
+The library's default profile refuses this fixture's evidence volume, so the
+workload's policy declares 1 GiB output and retained-buffer limits
+(`generate_fixture.py --byte-limit 1073741824`), leaving other limits at their
+defaults. [The ARM measurement](workload-100k.md) describes
 the same admission limitation; neither it nor the x86 measurement promises a
 hard RSS ceiling or a fixed latency.
 

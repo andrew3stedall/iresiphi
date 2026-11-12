@@ -4,6 +4,8 @@ Recorded 2026-11-12 for ticket #24. These are observations of a few runs on one 
 
 ## Summary
 
+The workload's policy now declares `output_bytes` and `retained_bytes` of 1 GiB (`generate_fixture.py --byte-limit 1073741824`). Run B below is the passing ARM run under that policy. The library defaults stay at 256 MiB, and run A records why the workload needs the higher limits.
+
 - Under the default resource profile the complete workflow does not succeed. All data and population checks pass, then the run fails with `RESOURCE_LIMIT` (`budget.evidence`): the results and evidence serialize to 757,303,499 bytes, about 2.8 times the 256 MiB `output_bytes` and `retained_bytes` defaults. Nothing is published.
 - With `output_bytes` and `retained_bytes` raised explicitly to 1 GiB, the run succeeds with unresolved lines, publishes an 815,129,474-byte bundle, and reproduces the generator's expected totals exactly. `run_bundle` took 110.6 s, and the process peak resident set was 5.14 GB.
 - Evidence building and bundle delivery take most of the time. Evidence volume, not input size (13.5 MB), drives both the byte budget and memory.
@@ -24,7 +26,7 @@ The machine was not idle: other sessions were compiling and running tests. Treat
 
 ## Fixture
 
-Generated with `python3 scripts/generate_fixture.py DIR --lines 100000`. Generation is deterministic arithmetic with no random numbers; regenerating it gives the same hash.
+Generated with `python3 scripts/generate_fixture.py DIR --lines 100000 --byte-limit 1073741824`. The byte limit only changes `policy.json`, which the fixture hash excludes. Generation is deterministic arithmetic with no random numbers; regenerating it gives the same hash.
 
 | Item | Value |
 | --- | --- |
@@ -144,11 +146,11 @@ Neither run published anything or left staging behind, and both marked unfinishe
 ## Reproducing
 
 ```sh
-python3 scripts/generate_fixture.py /tmp/w100k --lines 100000
+python3 scripts/generate_fixture.py /tmp/w100k --lines 100000 --byte-limit 1073741824
 cargo build --locked --release --examples
 target/release/examples/workload /tmp/w100k/recipe.iresiphi /tmp/w100k/bindings.json \
-  /tmp/w100k/policy.json /tmp/w100k/bundle-a
-# Run B: the same with a policy whose limits raise output_bytes and retained_bytes to 1073741824.
+  /tmp/w100k/policy.json /tmp/w100k/bundle-b
+# Run A (default limits): generate without --byte-limit.
 IRESIPHI_CANCEL_AFTER_MS=2000 target/release/examples/workload ... /tmp/w100k/bundle-cancel
 ```
 
