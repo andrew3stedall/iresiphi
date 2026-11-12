@@ -268,7 +268,6 @@ fn overlapping_rates_remain_ambiguous_and_ending_interval_is_excluded() {
     assert_eq!(report.tables["a_review"].len(), 2);
 }
 #[test]
-#[ignore = "ticket #21: grouped aggregation over an output is not implemented yet"]
 fn currency_safe_grouping_retains_owned_totals_and_filters_after_sum() {
     let root = tempfile::tempdir().unwrap();
     let (mut recipe, bindings, policy) = fixture(root.path());
@@ -290,6 +289,8 @@ fn currency_safe_grouping_retains_owned_totals_and_filters_after_sum() {
             field: "billed".into(),
             path: vec![],
         },
+        filter: None,
+        context: false,
     }];
     out.filter = Some(Expr::Less {
         left: Box::new(Expr::Literal {
@@ -332,6 +333,8 @@ fn summing_broadcast_rates_or_discarding_currency_is_rejected() {
             field: "rate".into(),
             path: vec!["a_rate".into()],
         },
+        filter: None,
+        context: false,
     }];
     assert!(!iresiphi::validate(&recipe).valid);
     recipe.outputs[0].aggregates[0].expr = Expr::Field {

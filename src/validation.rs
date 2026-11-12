@@ -346,9 +346,6 @@ fn infer(e: &Expr, r: &Recipe, visiting: &mut BTreeSet<String>) -> Result<Option
             filter,
         } => {
             let rel = relationship(r, relationship_id)?;
-            if let Some(p) = filter {
-                boolean(infer(p, r, visiting)?)?;
-            }
             let aggregate_field = || {
                 field(
                     r,
@@ -357,7 +354,7 @@ fn infer(e: &Expr, r: &Recipe, visiting: &mut BTreeSet<String>) -> Result<Option
                         .ok_or_else(|| error("MISSING_REFERENCE", "aggregate field"))?,
                 )
             };
-            match function.as_str() {
+            let result = match function.as_str() {
                 "count_records" => Ok(Some(Type::Int64)),
                 "count_non_null" => {
                     aggregate_field()?;
@@ -379,8 +376,323 @@ fn infer(e: &Expr, r: &Recipe, visiting: &mut BTreeSet<String>) -> Result<Option
                     }
                 }
                 other => Err(unsupported_aggregate(other)),
+            }?;
+            // Only an observed detail collection is reduced per anchor; reducing the
+            // candidates of a to-one lookup would select among ambiguous context.
+            if rel.cardinality != Cardinality::OneToMany {
+                return Err(error(
+                    "GRAIN_VIOLATION",
+                    format!(
+                        "aggregate over {} requires a one_to_many detail relationship; a to-one lookup is broadcast context",
+                        rel.id
+                    ),
+                ));
+            }
+            if let Some(p) = filter {
+                boolean(infer(p, r, visiting)?)?;
+                detail_predicate(p, r, rel, &mut BTreeSet::new())?;
+            }
+            Ok(result)
+        }
+    }
+}
+/// An aggregate input predicate reads only the detail record being reduced.
+fn detail_predicate(
+    e: &Expr,
+    r: &Recipe,
+    rel: &Relationship,
+    seen: &mut BTreeSet<String>,
+) -> Result<()> {
+    match e {
+        Expr::Field { source, path, .. } => {
+            if *source != rel.to || !path.is_empty() {
+                return Err(error(
+                    "INVALID_PATH",
+                    format!(
+                        "aggregate input predicate over {} may read only {} fields; add other values as output columns",
+                        rel.id, rel.to
+                    ),
+                ));
             }
         }
+        Expr::Aggregate { .. } => {
+            return Err(error(
+                "GRAIN_VIOLATION",
+                "aggregate input predicates cannot contain nested aggregates",
+            ));
+        }
+        Expr::Feature { id } => {
+            if seen.insert(id.clone()) {
+                if let Some(f) = r.features.iter().find(|f| f.id == *id) {
+                    detail_predicate(&f.expr, r, rel, seen)?;
+                }
+            }
+        }
+        _ => {
+            for child in children(e) {
+                detail_predicate(child, r, rel, seen)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Output-scoped references and measure ownership (decision #7).
+
+/// Rewrite every reference to an output's own columns
+/// (`{"op":"field","source":<output id>,"field":<name>}`) with `resolve(name)`.
+/// Aggregate input predicates are detail-scoped and left untouched.
+pub(crate) fn rewrite_output_refs(
+    e: &Expr,
+    output: &str,
+    resolve: &mut dyn FnMut(&str) -> Result<Expr>,
+) -> Result<Expr> {
+    fn walk(
+        value: &mut Json,
+        output: &str,
+        resolve: &mut dyn FnMut(&str) -> Result<Expr>,
+    ) -> Result<()> {
+        match value {
+            Json::Object(map) => {
+                match map.get("op").and_then(Json::as_str) {
+                    Some("aggregate") => return Ok(()),
+                    Some("field") if map.get("source").and_then(Json::as_str) == Some(output) => {
+                        if map
+                            .get("path")
+                            .and_then(Json::as_array)
+                            .is_some_and(|p| !p.is_empty())
+                        {
+                            return Err(error(
+                                "INVALID_PATH",
+                                format!(
+                                    "a reference to output {output}'s own columns has no relationship path"
+                                ),
+                            ));
+                        }
+                        let name = map.get("field").and_then(Json::as_str).unwrap_or_default();
+                        *value =
+                            serde_json::to_value(resolve(name)?).expect("expressions serialize");
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+                for child in map.values_mut() {
+                    walk(child, output, resolve)?;
+                }
+            }
+            Json::Array(items) => {
+                for child in items {
+                    walk(child, output, resolve)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    let mut value = serde_json::to_value(e).map_err(|x| error("INVALID_RECIPE", x.to_string()))?;
+    walk(&mut value, output, resolve)?;
+    serde_json::from_value(value).map_err(|x| error("INVALID_RECIPE", x.to_string()))
+}
+fn typed_null(t: Option<Type>) -> Expr {
+    let null = Expr::Literal { value: Value::Null };
+    match t {
+        Some(data_type) => Expr::Cast {
+            expr: Box::new(null),
+            data_type,
+        },
+        None => null,
+    }
+}
+const STATUS_COLUMNS: [&str; 2] = ["_status", "_reason"];
+/// Line-grain scope of an output: its own columns (by their expressions) and the
+/// line `_status`/`_reason`. Grouped measures do not exist yet at this grain.
+fn line_scope(e: &Expr, out: &Output, lineage: bool) -> Result<Expr> {
+    rewrite_output_refs(e, &out.id, &mut |name| {
+        if STATUS_COLUMNS.contains(&name) {
+            return Ok(if lineage {
+                Expr::Literal { value: Value::Null }
+            } else {
+                typed_null(Some(Type::String))
+            });
+        }
+        if let Some(c) = out.columns.iter().find(|c| c.name == name) {
+            return Ok(c.expr.clone());
+        }
+        Err(if out.aggregates.iter().any(|a| a.name == name) {
+            error(
+                "GRAIN_VIOLATION",
+                format!(
+                    "measure {name} of output {} exists only after grouping",
+                    out.id
+                ),
+            )
+        } else {
+            error(
+                "MISSING_REFERENCE",
+                format!("output {} column {name}", out.id),
+            )
+        })
+    })
+}
+/// Group-grain scope of a grouped output: only its group keys, measures and
+/// `_status` exist after grouping. For typing they become typed nulls; for lineage
+/// they become the expressions that produce them.
+fn group_scope(e: &Expr, r: &Recipe, out: &Output, lineage: bool) -> Result<Expr> {
+    if line_values(e, r, &out.id, &mut BTreeSet::new()) {
+        return Err(error(
+            "GRAIN_VIOLATION",
+            format!(
+                "after grouping, output {} has one row per group; a final predicate may read only its group keys, measures and _status",
+                out.id
+            ),
+        ));
+    }
+    rewrite_output_refs(e, &out.id, &mut |name| {
+        if name == "_status" {
+            return Ok(if lineage {
+                Expr::Literal { value: Value::Null }
+            } else {
+                typed_null(Some(Type::String))
+            });
+        }
+        if out.group_by.iter().any(|g| g == name) {
+            if let Some(c) = out.columns.iter().find(|c| c.name == name) {
+                return Ok(if lineage {
+                    c.expr.clone()
+                } else {
+                    typed_null(expression_type(&c.expr, r)?)
+                });
+            }
+        }
+        if let Some(a) = out.aggregates.iter().find(|a| a.name == name) {
+            return Ok(if lineage {
+                line_scope(&a.expr, out, true)?
+            } else {
+                typed_null(aggregate_type(a, r, out)?)
+            });
+        }
+        Err(error(
+            "GRAIN_VIOLATION",
+            format!(
+                "{name} is not a group key or measure of grouped output {}",
+                out.id
+            ),
+        ))
+    })
+}
+/// True when an expression reads line-grain values: a source field or a per-line
+/// aggregate rather than one of the output's own columns.
+fn line_values(e: &Expr, r: &Recipe, output: &str, seen: &mut BTreeSet<String>) -> bool {
+    match e {
+        Expr::Field { source, .. } => source != output,
+        Expr::Aggregate { .. } => true,
+        Expr::Feature { id } => {
+            seen.insert(id.clone())
+                && r.features
+                    .iter()
+                    .find(|f| f.id == *id)
+                    .is_some_and(|f| line_values(&f.expr, r, output, seen))
+        }
+        _ => children(e)
+            .into_iter()
+            .any(|child| line_values(child, r, output, seen)),
+    }
+}
+/// Result type of a grouped measure.
+pub(crate) fn aggregate_type(a: &GroupAggregate, r: &Recipe, out: &Output) -> Result<Option<Type>> {
+    let input = expression_type(&line_scope(&a.expr, out, false)?, r)?;
+    match a.function.as_str() {
+        "count_records" | "count_non_null" => Ok(Some(Type::Int64)),
+        "sum" => match input {
+            Some(Type::Decimal { scale, .. }) => Ok(Some(Type::Decimal {
+                precision: 38,
+                scale,
+            })),
+            Some(Type::Int64) | None => Ok(input),
+            _ => Err(error("TYPE_MISMATCH", "sum requires numeric input")),
+        },
+        "min" | "max" => Ok(input),
+        other => Err(unsupported_aggregate(other)),
+    }
+}
+/// The grain a value belongs to, relative to an output anchor.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Ownership {
+    /// A literal: no grain.
+    Constant,
+    /// Owned by the recipient (anchor) record, including per-anchor detail aggregates.
+    Owned,
+    /// Repeated context from a coarser record along a to-one path.
+    Broadcast,
+}
+impl Ownership {
+    fn name(self) -> &'static str {
+        match self {
+            Ownership::Constant => "constant",
+            Ownership::Owned => "owned",
+            Ownership::Broadcast => "broadcast",
+        }
+    }
+}
+/// Ownership of an expression. Any additive broadcast term makes the result
+/// broadcast (summing it would count the context once per recipient), while a
+/// product with a recipient-owned factor is owned by the recipient, such as a line
+/// quantity times a broadcast unit rate.
+fn ownership(e: &Expr, r: &Recipe, anchor: &str, seen: &mut BTreeSet<String>) -> Ownership {
+    let combine = |parts: Vec<Ownership>, product: bool| {
+        let has = |o| parts.contains(&o);
+        match (product, has(Ownership::Owned), has(Ownership::Broadcast)) {
+            (true, true, _) | (false, true, false) => Ownership::Owned,
+            (_, _, true) => Ownership::Broadcast,
+            _ => Ownership::Constant,
+        }
+    };
+    match e {
+        Expr::Literal { .. } => Ownership::Constant,
+        Expr::Field { source, path, .. } => {
+            if path.is_empty() && source == anchor {
+                Ownership::Owned
+            } else {
+                Ownership::Broadcast
+            }
+        }
+        Expr::Aggregate { .. } => Ownership::Owned,
+        Expr::Feature { id } => {
+            if !seen.insert(id.clone()) {
+                return Ownership::Constant;
+            }
+            let result = r
+                .features
+                .iter()
+                .find(|f| f.id == *id)
+                .map_or(Ownership::Constant, |f| ownership(&f.expr, r, anchor, seen));
+            seen.remove(id);
+            result
+        }
+        Expr::Multiply { left, right } => combine(
+            vec![
+                ownership(left, r, anchor, seen),
+                ownership(right, r, anchor, seen),
+            ],
+            true,
+        ),
+        Expr::Case {
+            then, otherwise, ..
+        } => combine(
+            vec![
+                ownership(then, r, anchor, seen),
+                ownership(otherwise, r, anchor, seen),
+            ],
+            false,
+        ),
+        _ => combine(
+            children(e)
+                .into_iter()
+                .map(|child| ownership(child, r, anchor, seen))
+                .collect(),
+            false,
+        ),
     }
 }
 fn check_output_paths(
@@ -450,21 +762,6 @@ fn children(e: &Expr) -> Vec<&Expr> {
             filter: Some(f), ..
         } => vec![f],
         _ => vec![],
-    }
-}
-fn foreign_field(e: &Expr, r: &Recipe, anchor: &str, seen: &mut BTreeSet<String>) -> bool {
-    match e {
-        Expr::Field { source, .. } => source != anchor,
-        Expr::Feature { id } => {
-            seen.insert(id.clone())
-                && r.features
-                    .iter()
-                    .find(|f| f.id == *id)
-                    .is_some_and(|f| foreign_field(&f.expr, r, anchor, seen))
-        }
-        _ => children(e)
-            .into_iter()
-            .any(|child| foreign_field(child, r, anchor, seen)),
     }
 }
 
@@ -950,14 +1247,36 @@ fn check_expressions(r: &Recipe) -> Result<()> {
         for c in &out.columns {
             expression_type(&c.expr, r)?;
         }
-        for p in [&out.eligibility, &out.filter].into_iter().flatten() {
+        if let Some(p) = &out.eligibility {
             boolean(expression_type(p, r)?)?;
         }
         for aggregate in &out.aggregates {
             if !AGGREGATES.contains(&aggregate.function.as_str()) {
                 return Err(unsupported_aggregate(&aggregate.function));
             }
-            expression_type(&aggregate.expr, r)?;
+            if aggregate.context && !["min", "max"].contains(&aggregate.function.as_str()) {
+                return Err(error(
+                    "UNSUPPORTED_OPERATION",
+                    format!(
+                        "context reduction {} must be min or max; a broadcast value is never added up",
+                        aggregate.name
+                    ),
+                ));
+            }
+            aggregate_type(aggregate, r, out)?;
+            if let Some(p) = &aggregate.filter {
+                boolean(expression_type(&line_scope(p, out, false)?, r)?)?;
+            }
+        }
+        // The final predicate runs after grouping on grouped outputs, otherwise on
+        // each line; either way it may read the output's own columns.
+        if let Some(p) = &out.filter {
+            let scoped = if out.aggregates.is_empty() {
+                line_scope(p, out, false)?
+            } else {
+                group_scope(p, r, out, false)?
+            };
+            boolean(expression_type(&scoped, r)?)?;
         }
     }
     Ok(())
@@ -968,8 +1287,16 @@ fn check_outputs(r: &Recipe) -> Result<()> {
         for c in &out.columns {
             check_output_paths(&c.expr, r, &out.anchor, &mut BTreeSet::new())?;
         }
-        for p in [&out.eligibility, &out.filter].into_iter().flatten() {
+        if let Some(p) = &out.eligibility {
             check_output_paths(p, r, &out.anchor, &mut BTreeSet::new())?;
+        }
+        if let (Some(p), true) = (&out.filter, out.aggregates.is_empty()) {
+            check_output_paths(
+                &line_scope(p, out, false)?,
+                r,
+                &out.anchor,
+                &mut BTreeSet::new(),
+            )?;
         }
         if out.detail
             && !r
@@ -990,19 +1317,70 @@ fn check_outputs(r: &Recipe) -> Result<()> {
                 return Err(error("MISSING_REFERENCE", format!("group column {g}")));
             }
         }
+        if out.detail && !out.aggregates.is_empty() {
+            return Err(error(
+                "INVALID_GROUPING",
+                format!(
+                    "detail output {} keeps one row per detail record; aggregate it in a separate output anchored at {}",
+                    out.id, out.anchor
+                ),
+            ));
+        }
+        if !out.group_by.is_empty() && out.aggregates.is_empty() {
+            return Err(error(
+                "INVALID_GROUPING",
+                format!(
+                    "output {} declares group_by without measures; declare at least one aggregate",
+                    out.id
+                ),
+            ));
+        }
         for aggregate in &out.aggregates {
-            let ty = expression_type(&aggregate.expr, r)?;
-            check_output_paths(&aggregate.expr, r, &out.anchor, &mut BTreeSet::new())?;
-            if aggregate.function == "sum" {
-                if !matches!(ty, None | Some(Type::Int64) | Some(Type::Decimal { .. })) {
-                    return Err(error("TYPE_MISMATCH", "sum requires numeric input"));
+            // A measure's value is part of its line's status, so it cannot read it.
+            rewrite_output_refs(&aggregate.expr, &out.id, &mut |name| {
+                if STATUS_COLUMNS.contains(&name) {
+                    Err(error(
+                        "MISSING_REFERENCE",
+                        format!(
+                            "measure {} cannot read {name}; line status is available to aggregate input predicates and final predicates",
+                            aggregate.name
+                        ),
+                    ))
+                } else {
+                    Ok(Expr::Literal { value: Value::Null })
                 }
-                if foreign_field(&aggregate.expr, r, &out.anchor, &mut BTreeSet::new()) {
+            })?;
+            let expr = line_scope(&aggregate.expr, out, false)?;
+            check_output_paths(&expr, r, &out.anchor, &mut BTreeSet::new())?;
+            if let Some(p) = &aggregate.filter {
+                check_output_paths(
+                    &line_scope(p, out, false)?,
+                    r,
+                    &out.anchor,
+                    &mut BTreeSet::new(),
+                )?;
+            }
+            let owner = ownership(&expr, r, &out.anchor, &mut BTreeSet::new());
+            match aggregate.function.as_str() {
+                "sum" if owner == Ownership::Broadcast => {
                     return Err(error(
                         "GRAIN_VIOLATION",
-                        "cannot sum broadcast measure at recipient grain",
+                        format!(
+                            "measure {} sums a value broadcast along a to-one path; it is context, not additive at {} grain; aggregate it from its original source",
+                            aggregate.name, out.anchor
+                        ),
                     ));
                 }
+                "min" | "max" if owner == Ownership::Broadcast && !aggregate.context => {
+                    return Err(error(
+                        "GRAIN_VIOLATION",
+                        format!(
+                            "measure {} reduces a broadcast value; declare it a context reduction (\"context\": true) so equality is validated, or aggregate it from its original source",
+                            aggregate.name
+                        ),
+                    ));
+                }
+                _ => {}
             }
         }
         let keeps_currency = out.group_by.iter().any(|g| {
@@ -1019,7 +1397,13 @@ fn check_outputs(r: &Recipe) -> Result<()> {
                 .contains_key("currency")
             && !keeps_currency
         {
-            return Err(error("GRAIN_VIOLATION", "grouping must retain currency"));
+            return Err(error(
+                "GRAIN_VIOLATION",
+                format!(
+                    "grouped output {} must retain currency: group by the anchor's currency column",
+                    out.id
+                ),
+            ));
         }
     }
     Ok(())
@@ -1103,6 +1487,27 @@ fn trace(e: &Expr, r: &Recipe, direct: bool, seen: &mut BTreeSet<String>, out: &
             }
             out.origins
                 .insert((source.clone(), field.clone(), path.clone()));
+            // A field reached along a to-one path is broadcast context from a
+            // coarser record; it keeps that record's grain as its origin.
+            let rels: Vec<_> = path
+                .iter()
+                .filter_map(|id| r.relationships.iter().find(|x| x.id == *id))
+                .collect();
+            if let (Some(first), true) = (
+                rels.first(),
+                !rels.is_empty() && rels.iter().all(|x| x.cardinality != Cardinality::OneToMany),
+            ) {
+                let transition = json!({
+                    "from":format!("source:{source}"),"to":format!("source:{}",first.from),
+                    "via":path.iter().map(|p| format!("relationship:{p}")).collect::<Vec<_>>(),
+                    "operation":"broadcast",
+                    "validated":"to-one lookup; unmatched or ambiguous candidates broadcast null with a status, never a selected value",
+                    "additive":false,
+                });
+                if !out.grain_transitions.contains(&transition) {
+                    out.grain_transitions.push(transition);
+                }
+            }
         }
         Expr::Feature { id } => {
             if direct {
@@ -1165,9 +1570,114 @@ fn expression_node(id: String, kind: &str, e: &Expr, r: &Recipe, all: &mut Vec<J
         "type": expression_type(e, r).ok().flatten(),
         "depends_on": lineage.depends_on,
         "operations": lineage.operations,
-        "measure_origins": lineage.origins.iter().map(|(s,f,p)| json!({"source":format!("source:{s}"),"field":f,"path":p})).collect::<Vec<_>>(),
+        "measure_origins": lineage.origins.iter().map(|o| origin_json(r, o)).collect::<Vec<_>>(),
         "grain_transitions": lineage.grain_transitions,
         "unsupported": lineage.unsupported,
+    })
+}
+/// A contributing source field with the grain it originates at and how it reached
+/// the expression: `owned` (read directly), `broadcast` (along a to-one path) or
+/// `aggregated` (reduced from a one-to-many detail collection).
+fn origin_json(r: &Recipe, (s, f, p): &(String, String, Vec<String>)) -> Json {
+    let grain = r.sources.iter().find(|x| x.id == *s).map(|x| &x.grain);
+    let transition = match p
+        .last()
+        .and_then(|id| r.relationships.iter().find(|x| x.id == *id))
+    {
+        _ if p.is_empty() => "owned",
+        Some(rel) if rel.cardinality == Cardinality::OneToMany => "aggregated",
+        _ => "broadcast",
+    };
+    json!({"source":format!("source:{s}"),"field":f,"path":p,"origin_grain":grain,"transition":transition})
+}
+fn origins(e: &Expr, r: &Recipe) -> Vec<Json> {
+    let mut lineage = Lineage::default();
+    trace(e, r, true, &mut BTreeSet::new(), &mut lineage);
+    lineage.origins.iter().map(|o| origin_json(r, o)).collect()
+}
+/// Published columns of every output with their types and measure ownership:
+/// the grain each value belongs to, the grain each contributing field originates
+/// at, and how it got there.
+pub fn output_schema(r: &Recipe) -> Json {
+    Json::Object(
+        r.outputs
+            .iter()
+            .map(|out| (out.id.clone(), output_columns(r, out)))
+            .collect(),
+    )
+}
+fn output_columns(r: &Recipe, out: &Output) -> Json {
+    let anchor_grain = r
+        .sources
+        .iter()
+        .find(|s| s.id == out.anchor)
+        .map(|s| s.grain.clone())
+        .unwrap_or_default();
+    let grouped = !out.aggregates.is_empty();
+    let grain = if grouped {
+        out.group_by.clone()
+    } else {
+        anchor_grain.clone()
+    };
+    let column = |c: &Column, role: &str| {
+        json!({
+            "name": c.name,
+            "type": expression_type(&c.expr, r).ok().flatten(),
+            "role": role,
+            "ownership": ownership(&c.expr, r, &out.anchor, &mut BTreeSet::new()).name(),
+            "grain": grain,
+            "origins": origins(&c.expr, r),
+        })
+    };
+    let mut columns = vec![];
+    if grouped {
+        for g in &out.group_by {
+            if let Some(c) = out.columns.iter().find(|c| c.name == *g) {
+                columns.push(column(c, "group_key"));
+            }
+        }
+        for a in &out.aggregates {
+            let input = line_scope(&a.expr, out, true).unwrap_or_else(|_| a.expr.clone());
+            columns.push(json!({
+                "name": a.name,
+                "type": aggregate_type(a, r, out).ok().flatten(),
+                "role": "aggregate",
+                "function": a.function,
+                "context_reduction": a.context,
+                "input_filter": a.filter.is_some(),
+                "ownership": "aggregated",
+                "grain": grain,
+                "input_grain": anchor_grain,
+                "origins": origins(&input, r),
+            }));
+        }
+    } else {
+        for c in &out.columns {
+            columns.push(column(c, "column"));
+        }
+    }
+    columns.push(json!({"name":"_status","type":{"kind":"string"},"role":"status","grain":grain}));
+    if !grouped {
+        columns
+            .push(json!({"name":"_reason","type":{"kind":"string"},"role":"reason","grain":grain}));
+    }
+    if out.detail && !grouped {
+        columns
+            .push(json!({"name":"_parent","type":{"kind":"string"},"role":"parent","grain":grain}));
+    }
+    let line_inputs: Vec<_> = out
+        .columns
+        .iter()
+        .filter(|c| grouped && !out.group_by.contains(&c.name))
+        .map(|c| &c.name)
+        .collect();
+    json!({
+        "anchor": format!("source:{}", out.anchor),
+        "anchor_grain": anchor_grain,
+        "grain": grain,
+        "grouped": grouped,
+        "columns": columns,
+        "line_inputs": line_inputs,
     })
 }
 fn sorted<'a, T>(items: &'a [T], id: impl Fn(&T) -> &str) -> Vec<&'a T> {
@@ -1231,18 +1741,30 @@ pub fn explain(r: &Recipe) -> Json {
             .find(|s| s.id == out.anchor)
             .map(|s| s.grain.clone())
             .unwrap_or_default();
+        let grouped = !out.aggregates.is_empty();
         let mut stages = vec![];
         for (name, predicate) in [("eligibility", &out.eligibility), ("filter", &out.filter)] {
             if let Some(p) = predicate {
+                // Lineage of output-column references is the lineage of their values.
+                let (lineage, applies) = match (name, grouped) {
+                    ("eligibility", true) => (Ok(p.clone()), "before_grouping"),
+                    ("eligibility", false) => (Ok(p.clone()), "population_eligibility"),
+                    (_, true) => (group_scope(p, r, out, true), "after_grouping"),
+                    _ => (line_scope(p, out, true), "final_selection"),
+                };
                 let mut node = expression_node(
                     format!("{base}/{name}"),
                     "population_stage",
-                    p,
+                    &lineage.unwrap_or_else(|_| p.clone()),
                     r,
                     &mut unsupported,
                 );
-                node["retains"] =
-                    json!("rows where the predicate is true; false and unknown are excluded");
+                node["applies"] = json!(applies);
+                node["retains"] = json!(if applies == "after_grouping" {
+                    "group rows where the predicate is true; it changes no measure and no group population"
+                } else {
+                    "rows where the predicate is true; false and unknown are excluded"
+                });
                 stages.push(node["id"].clone());
                 nodes.push(node);
             }
@@ -1264,11 +1786,29 @@ pub fn explain(r: &Recipe) -> Json {
             let mut node = expression_node(
                 format!("{base}/aggregate:{}", a.name),
                 "grouped_aggregate",
-                &a.expr,
+                &line_scope(&a.expr, out, true).unwrap_or_else(|_| a.expr.clone()),
                 r,
                 &mut unsupported,
             );
+            node["type"] = json!(aggregate_type(a, r, out).ok().flatten());
             node["function"] = json!(a.function);
+            node["context_reduction"] = json!(a.context);
+            node["input_grain"] = json!(anchor_grain);
+            node["grain"] = json!(out.group_by);
+            if let Some(p) = &a.filter {
+                let mut filter = expression_node(
+                    format!("{base}/aggregate:{}/filter", a.name),
+                    "aggregate_input_filter",
+                    &line_scope(p, out, true).unwrap_or_else(|_| p.clone()),
+                    r,
+                    &mut unsupported,
+                );
+                filter["applies"] = json!("before_grouping");
+                filter["retains"] = json!(
+                    "lines where the predicate is true contribute to this measure only; the group population is unchanged"
+                );
+                node["input_filter"] = filter;
+            }
             if !AGGREGATES.contains(&a.function.as_str()) {
                 let item = json!({"node":node["id"],"code":"UNSUPPORTED_OPERATION","operation":a.function,"reason":"aggregate function is not supported in format 0.1"});
                 node["unsupported"]
@@ -1292,6 +1832,7 @@ pub fn explain(r: &Recipe) -> Json {
             "grain_transitions": transitions,
             "population_stages": stages,
             "columns": columns,
+            "schema": output_columns(r, out),
             "detail": out.detail,
             "output_order": "unspecified",
         }));
@@ -1304,6 +1845,7 @@ pub fn explain(r: &Recipe) -> Json {
         "data_checks": "not-run",
         "output_order": "unspecified",
         "nodes": nodes,
+        "output_schema": output_schema(r),
         "unsupported": unsupported,
     })
 }

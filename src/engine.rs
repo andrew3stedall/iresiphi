@@ -811,21 +811,29 @@ fn execute(
     let mut detail_evidence = vec![];
     let mut counts = serde_json::Map::new();
     let mut populations: Vec<(&Output, Vec<(String, bool)>)> = vec![];
-    let (mut resolved, mut unresolved) = (0, 0);
+    // Distinct anchor lines of primary outputs, resolved only if resolved in every
+    // output that selects them; a line read by several outputs is counted once.
+    let mut lines: BTreeMap<(&str, usize), bool> = BTreeMap::new();
     for output in &recipe.outputs {
         progress.nodes.push(format!("output:{}", output.id));
         let parents = output
             .detail
             .then(|| detail_parents(recipe, &sources, &matches, &output.anchor));
         let anchor_rows = &sources[&output.anchor];
+        let grouped = !output.aggregates.is_empty();
         let mut table = vec![];
         let mut population = vec![];
+        let mut members: Vec<Member> = vec![];
         let mut eligible = 0usize;
         let mut statuses: BTreeMap<&'static str, usize> = BTreeMap::new();
         for (row_index, row) in anchor_rows.iter().enumerate() {
             check(cancel)?;
             let mut reasons: Vec<Outcome> = vec![];
-            let mut resolver = |source: &str, field: &str, path: &[String]| -> Result<Value> {
+            let resolve = |reasons: &mut Vec<Outcome>,
+                           source: &str,
+                           field: &str,
+                           path: &[String]|
+             -> Result<Value> {
                 let mut current = output.anchor.as_str();
                 let mut position = row_index;
                 for rel_id in path {
@@ -854,9 +862,23 @@ fn execute(
                     .cloned()
                     .unwrap_or(Value::Null))
             };
+            // Selection predicates read lookups but do not redefine the line's status.
+            let select = |predicate: &Expr, values: &BTreeMap<String, Value>| -> Result<bool> {
+                let bound = bind_line(
+                    predicate, recipe, &sources, &matches, output, row_index, values,
+                )?;
+                Ok(matches!(
+                    crate::eval::eval(&bound, recipe, &mut |s: &str, f: &str, p: &[String]| {
+                        resolve(&mut vec![], s, f, p)
+                    })?,
+                    Value::Boolean { value: true }
+                ))
+            };
             if let Some(predicate) = &output.eligibility {
                 if !matches!(
-                    crate::eval::eval(predicate, recipe, &mut resolver)?,
+                    crate::eval::eval(predicate, recipe, &mut |s: &str, f: &str, p: &[String]| {
+                        resolve(&mut reasons, s, f, p)
+                    })?,
                     Value::Boolean { value: true }
                 ) {
                     continue;
@@ -877,34 +899,28 @@ fn execute(
                             row_index,
                         )?,
                         recipe,
-                        &mut resolver,
+                        &mut |s: &str, f: &str, p: &[String]| resolve(&mut reasons, s, f, p),
                     )?,
                 );
             }
+            // Measure inputs at line grain; the lookups they read are part of the
+            // line's status.
+            let mut inputs = Vec::with_capacity(output.aggregates.len());
             for aggregate in &output.aggregates {
-                values.insert(
-                    format!("__aggregate_{}", aggregate.name),
-                    crate::eval::eval(
-                        &prepare(
-                            &aggregate.expr,
-                            recipe,
-                            &sources,
-                            &matches,
-                            &output.anchor,
-                            row_index,
-                        )?,
-                        recipe,
-                        &mut resolver,
-                    )?,
-                );
-            }
-            if let Some(predicate) = &output.filter {
-                if !matches!(
-                    crate::eval::eval(predicate, recipe, &mut resolver)?,
-                    Value::Boolean { value: true }
-                ) {
-                    continue;
-                }
+                let bound = bind_line(
+                    &aggregate.expr,
+                    recipe,
+                    &sources,
+                    &matches,
+                    output,
+                    row_index,
+                    &values,
+                )?;
+                inputs.push(Some(crate::eval::eval(
+                    &bound,
+                    recipe,
+                    &mut |s: &str, f: &str, p: &[String]| resolve(&mut reasons, s, f, p),
+                )?));
             }
             let mut parent_reference = None;
             if let Some(parents) = &parents {
@@ -952,14 +968,6 @@ fn execute(
                     texts.push(text);
                 }
             }
-            *statuses.entry(status).or_default() += 1;
-            if !output.detail {
-                if status == "matched" {
-                    resolved += 1;
-                } else {
-                    unresolved += 1;
-                }
-            }
             values.insert(
                 "_status".into(),
                 Value::String {
@@ -976,6 +984,28 @@ fn execute(
                     }
                 },
             );
+            if grouped {
+                // Aggregate input predicates apply before grouping, per measure.
+                for (input, aggregate) in inputs.iter_mut().zip(&output.aggregates) {
+                    if let Some(predicate) = &aggregate.filter {
+                        if !select(predicate, &values)? {
+                            *input = None;
+                        }
+                    }
+                }
+            } else if let Some(predicate) = &output.filter {
+                // Final selection of lines.
+                if !select(predicate, &values)? {
+                    continue;
+                }
+            }
+            *statuses.entry(status).or_default() += 1;
+            if !output.detail {
+                let resolved = lines
+                    .entry((output.anchor.as_str(), row_index))
+                    .or_insert(true);
+                *resolved &= status == "matched";
+            }
             let currency = match row.fields.get("currency") {
                 Some(Value::String { value }) => value.clone(),
                 _ => "undeclared".into(),
@@ -1016,73 +1046,69 @@ fn execute(
             if output.detail {
                 record["parent"] = serde_json::json!(parent_reference);
             }
+            if grouped {
+                let keys: BTreeMap<String, Value> = output
+                    .group_by
+                    .iter()
+                    .map(|k| (k.clone(), values.get(k).cloned().unwrap_or(Value::Null)))
+                    .collect();
+                record["group"] = keys
+                    .iter()
+                    .map(|(k, v)| (k.clone(), crate::adapters::plain_value(v)))
+                    .collect::<serde_json::Map<_, _>>()
+                    .into();
+                record["aggregate_inputs"] = output
+                    .aggregates
+                    .iter()
+                    .zip(&inputs)
+                    .map(|(a, input)| (a.name.clone(), input.is_some().into()))
+                    .collect::<serde_json::Map<_, _>>()
+                    .into();
+                members.push(Member {
+                    key: serde_json::to_string(&keys.values().collect::<Vec<_>>())
+                        .map_err(engine_error)?,
+                    keys,
+                    matched: status == "matched",
+                    inputs,
+                    reference: row.reference.clone(),
+                });
+            } else {
+                table.push(values);
+            }
             evidence.push(record);
-            table.push(values);
         }
-        let output_rows = table.len();
-        let mut count = serde_json::json!({"source_rows":anchor_rows.len(),"eligible_rows":eligible,"output_rows":output_rows});
         let tally = |s: &str| statuses.get(s).copied().unwrap_or(0);
-        if output.detail {
-            count["parented_rows"] = tally("matched").into();
-            count["orphan_rows"] = tally("unmatched").into();
-            count["ambiguous_parent_rows"] = tally("ambiguous").into();
+        let count = if grouped {
+            let grouping = group(recipe, output, &members, policy)?;
+            table = grouping.rows;
+            serde_json::json!({
+                "source_rows": anchor_rows.len(),
+                "eligible_rows": eligible,
+                "output_rows": table.len(),
+                "group_rows": grouping.groups,
+                "resolved_rows": tally("matched"),
+                "unresolved_rows": members.len() - tally("matched"),
+                "aggregate_null_inputs": grouping.null_inputs,
+            })
         } else {
-            count["resolved_rows"] = tally("matched").into();
-            count["unresolved_rows"] = (output_rows - tally("matched")).into();
-        }
+            let output_rows = table.len();
+            let mut count = serde_json::json!({"source_rows":anchor_rows.len(),"eligible_rows":eligible,"output_rows":output_rows});
+            if output.detail {
+                count["parented_rows"] = tally("matched").into();
+                count["orphan_rows"] = tally("unmatched").into();
+                count["ambiguous_parent_rows"] = tally("ambiguous").into();
+            } else {
+                count["resolved_rows"] = tally("matched").into();
+                count["unresolved_rows"] = (output_rows - tally("matched")).into();
+                populations.push((output, population));
+            }
+            count
+        };
         counts.insert(output.id.clone(), count);
-        if !output.aggregates.is_empty() {
-            let mut groups: BTreeMap<String, Vec<BTreeMap<String, Value>>> = BTreeMap::new();
-            for row in table {
-                let key = serde_json::to_string(
-                    &output
-                        .group_by
-                        .iter()
-                        .map(|k| row.get(k).cloned().unwrap_or(Value::Null))
-                        .collect::<Vec<_>>(),
-                )
-                .map_err(engine_error)?;
-                groups.entry(key).or_default().push(row);
-            }
-            table = vec![];
-            for rows in groups.values() {
-                let mut result = BTreeMap::new();
-                for key in &output.group_by {
-                    result.insert(key.clone(), rows[0][key].clone());
-                }
-                for aggregate in &output.aggregates {
-                    let values = rows
-                        .iter()
-                        .map(|r| r[&format!("__aggregate_{}", aggregate.name)].clone())
-                        .collect::<Vec<_>>();
-                    result.insert(
-                        aggregate.name.clone(),
-                        reduce(&values, &aggregate.function)?,
-                    );
-                }
-                result.insert(
-                    "_status".into(),
-                    Value::String {
-                        value: if rows.iter().any(|r| {
-                            r["_status"]
-                                != (Value::String {
-                                    value: "matched".into(),
-                                })
-                        }) {
-                            "unresolved"
-                        } else {
-                            "matched"
-                        }
-                        .into(),
-                    },
-                );
-                table.push(result);
-            }
-        } else if !output.detail {
-            populations.push((output, population));
-        }
         tables.insert(output.id.clone(), table);
     }
+    let resolved = lines.values().filter(|r| **r).count();
+    let unresolved = lines.len() - resolved;
     let totals = review_totals(recipe, &tables, &populations)?;
     let evidence_rows = candidate_evidence.len() + detail_evidence.len();
     if evidence_rows > policy.limits.candidate_pairs {
@@ -1393,6 +1419,7 @@ fn success_manifest(
         "unresolved_rows": run.unresolved,
         "totals": run.totals,
         "reconciliation": reconciliation,
+        "output_schema": crate::validation::output_schema(recipe),
         "evidence": {
             "primary_rows": run.evidence.len(),
             "candidate_rows": run.candidate_evidence.len(),
@@ -1513,6 +1540,166 @@ impl ExecutionContext {
         crate::admission::deliver(&mut report, recipe, policy, destination, &control);
         report
     }
+}
+/// One eligible anchor line of a grouped output.
+struct Member {
+    /// Canonical text of the group key values.
+    key: String,
+    keys: BTreeMap<String, Value>,
+    matched: bool,
+    /// Per measure: the line's input value, or `None` when the aggregate input
+    /// predicate excluded the line from that measure.
+    inputs: Vec<Option<Value>>,
+    reference: SourceReference,
+}
+struct Grouping {
+    rows: Table,
+    groups: usize,
+    null_inputs: BTreeMap<String, usize>,
+}
+/// Reduce eligible lines to one row per present group (decision #7). Groups are
+/// never manufactured; measure input predicates have already been applied; the
+/// final predicate selects group rows afterwards and changes no measure.
+fn group(
+    recipe: &Recipe,
+    output: &Output,
+    members: &[Member],
+    policy: &Policy,
+) -> Result<Grouping> {
+    let mut groups: BTreeMap<&str, Vec<&Member>> = BTreeMap::new();
+    for member in members {
+        groups.entry(member.key.as_str()).or_default().push(member);
+    }
+    let mut null_inputs = BTreeMap::new();
+    let mut rows = vec![];
+    for lines in groups.values() {
+        let mut result = lines[0].keys.clone();
+        let mut skipped_nulls = false;
+        for (i, aggregate) in output.aggregates.iter().enumerate() {
+            let values: Vec<Value> = lines.iter().filter_map(|m| m.inputs[i].clone()).collect();
+            if ["sum", "min", "max"].contains(&aggregate.function.as_str()) {
+                let nulls = values.iter().filter(|v| **v == Value::Null).count();
+                if nulls > 0 {
+                    skipped_nulls = true;
+                    *null_inputs.entry(aggregate.name.clone()).or_default() += nulls;
+                }
+            }
+            if aggregate.context {
+                check_context(output, aggregate, lines, i, &values, policy)?;
+            }
+            result.insert(
+                aggregate.name.clone(),
+                reduce(&values, &aggregate.function)?,
+            );
+        }
+        // A measure that skipped null inputs is never labelled complete.
+        let status = if lines.iter().any(|m| !m.matched) {
+            "unresolved"
+        } else if skipped_nulls {
+            "incomplete"
+        } else {
+            "matched"
+        };
+        result.insert(
+            "_status".into(),
+            Value::String {
+                value: status.into(),
+            },
+        );
+        if let Some(predicate) = &output.filter {
+            let bound =
+                crate::validation::rewrite_output_refs(predicate, &output.id, &mut |name| {
+                    Ok(Expr::Literal {
+                        value: result.get(name).cloned().unwrap_or(Value::Null),
+                    })
+                })?;
+            let keep = crate::eval::eval(&bound, recipe, &mut |source, _, _| {
+                Err(Error::new(
+                    "GRAIN_VIOLATION",
+                    "execution",
+                    format!("{source} has no single value after grouping"),
+                ))
+            })?;
+            if keep != (Value::Boolean { value: true }) {
+                continue;
+            }
+        }
+        rows.push(result);
+    }
+    Ok(Grouping {
+        rows,
+        groups: groups.len(),
+        null_inputs,
+    })
+}
+/// A named context reduction is valid only when every non-null value of the
+/// broadcast context in the group is equal.
+fn check_context(
+    output: &Output,
+    aggregate: &GroupAggregate,
+    lines: &[&Member],
+    index: usize,
+    values: &[Value],
+    policy: &Policy,
+) -> Result<()> {
+    let present: Vec<&Value> = values.iter().filter(|v| **v != Value::Null).collect();
+    let mut distinct: Vec<&Value> = vec![];
+    for value in &present {
+        if !distinct.iter().any(|d| {
+            crate::eval::compare(d, value).ok().flatten() == Some(std::cmp::Ordering::Equal)
+        }) {
+            distinct.push(value);
+        }
+    }
+    if distinct.len() <= 1 {
+        return Ok(());
+    }
+    let affected: Vec<&Member> = lines
+        .iter()
+        .copied()
+        .filter(|m| m.inputs[index].is_some())
+        .collect();
+    Err(Error::new(
+        "CONTEXT_NOT_CONSTANT",
+        "aggregate",
+        format!(
+            "context reduction {} of output {} found {} different values in one group of {} lines; broadcast context is not additive and has no single value here",
+            aggregate.name,
+            output.id,
+            distinct.len(),
+            affected.len()
+        ),
+    )
+    .with_subject(format!("output:{}/aggregate:{}", output.id, aggregate.name))
+    .with_check("aggregate.context")
+    .with_outputs(vec![output.id.clone()])
+    .with_affected(affected.len(), affected.iter().map(|m| &m.reference))
+    .with_values(
+        policy.diagnostic_values,
+        distinct
+            .iter()
+            .take(Error::SAMPLE_CAP)
+            .map(|v| crate::adapters::plain_value(v))
+            .collect(),
+    ))
+}
+/// Bind an output's own column references to this line's values, then resolve
+/// per-line detail aggregates and features.
+fn bind_line(
+    expr: &Expr,
+    recipe: &Recipe,
+    sources: &BTreeMap<String, Vec<Row>>,
+    matches: &Matches,
+    output: &Output,
+    row_index: usize,
+    values: &BTreeMap<String, Value>,
+) -> Result<Expr> {
+    let bound = crate::validation::rewrite_output_refs(expr, &output.id, &mut |name| {
+        Ok(Expr::Literal {
+            value: values.get(name).cloned().unwrap_or(Value::Null),
+        })
+    })?;
+    prepare(&bound, recipe, sources, matches, &output.anchor, row_index)
 }
 fn reduce(values: &[Value], function: &str) -> Result<Value> {
     if function == "count_records" {
@@ -1658,6 +1845,30 @@ fn prepare(
                     ));
                 }
                 let mut values = vec![];
+                // Observations that contribute an amount, by currency where the
+                // detail declares one; the anchor's own currency joins the set.
+                let monetary = ["sum", "min", "max"].contains(&function.as_str())
+                    && recipe
+                        .sources
+                        .iter()
+                        .find(|s| s.id == rel.to)
+                        .is_some_and(|s| s.projection.fields.contains_key("currency"));
+                let mut currencies: Vec<Value> = vec![];
+                if monetary
+                    && recipe
+                        .sources
+                        .iter()
+                        .find(|s| s.id == anchor)
+                        .is_some_and(|s| s.projection.fields.contains_key("currency"))
+                {
+                    currencies.push(
+                        sources[anchor][row_index]
+                            .fields
+                            .get("currency")
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                    );
+                }
                 for candidate in &matches[&relationship][row_index] {
                     let row = &sources[&rel.to][*candidate];
                     if let Some(p) = &filter {
@@ -1675,13 +1886,31 @@ fn prepare(
                             continue;
                         }
                     }
-                    values.push(
-                        field
-                            .as_ref()
-                            .and_then(|f| row.fields.get(f))
-                            .cloned()
-                            .unwrap_or(Value::Null),
-                    );
+                    let value = field
+                        .as_ref()
+                        .and_then(|f| row.fields.get(f))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    if monetary && value != Value::Null {
+                        let currency = row.fields.get("currency").cloned().unwrap_or(Value::Null);
+                        if !currencies.contains(&currency) {
+                            currencies.push(currency);
+                        }
+                    }
+                    values.push(value);
+                }
+                if currencies.len() > 1 {
+                    return Err(Error::new(
+                        "MIXED_CURRENCY",
+                        "aggregate",
+                        format!(
+                            "{function} over {relationship} would combine amounts in {} currencies for one {anchor} record; amounts in different currencies are never summed or compared",
+                            currencies.len()
+                        ),
+                    )
+                    .with_subject(format!("relationship:{relationship}"))
+                    .with_check("aggregate.currency")
+                    .with_affected(1, [&sources[anchor][row_index].reference]));
                 }
                 *value = serde_json::to_value(Expr::Literal {
                     value: reduce(&values, &function)?,
