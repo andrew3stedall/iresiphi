@@ -3,7 +3,9 @@
 All existing implementation and research branches were consolidated into `main`.
 The Rust/Python 0.1.0 invoice-review preview is implemented; no packages have been
 published. [CI](ci.md) governs processor placement: x86 work runs in GitHub
-Actions, while ARM-compatible development work may run locally on ARM.
+Actions, while ARM-compatible development work may run locally on ARM. A change
+counts as passing only when it passes on both ARM and x86 at the same commit; see
+[Required passes](ci.md#required-passes-arm-and-x86).
 
 ## Implementation tickets
 
@@ -52,6 +54,7 @@ preview.
 Before any package publication, recheck crate/PyPI names and account ownership,
 retain the exact release commit's CI artifacts durably, and review its dependency
 inventory. Publication is outside the current implementation request. The
-100,000-line workload needs explicit 1 GiB output/retention limits; the default
-256 MiB profile correctly refuses its evidence volume. Process RSS remains a
+100,000-line workload's policy declares 1 GiB output/retention limits
+(`generate_fixture.py --byte-limit 1073741824`); the default 256 MiB profile
+refuses its evidence volume. Process RSS remains a
 measurement, not a hard memory bound.
