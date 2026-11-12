@@ -17,6 +17,7 @@ substitute for the required workflow evidence.
 A change is accepted, and a release gate is met, only when it passes on both architectures at the same commit:
 
 - **ARM (aarch64):** the full Rust suite (`cargo test --locked`), the Python suites on CPython 3.12 and 3.13 against installed wheels, the Rust/Python parity golden, and the 100,000-line workload. These run on the native `ubuntu-24.04-arm` GitHub runner; they may also run locally on native ARM.
+- **Node:** build the napi-rs addon and run the Node and strict TypeScript suites on Node 22 and 24 on each architecture, at the same commit.
 - **x86 (x86_64):** the same suites and workload, plus the manylinux_2_28 wheel build, `auditwheel`, and clean-image installs. These run in the GitHub Actions x86 job.
 
 A pass on one architecture does not stand in for the other. Record each pass with its commit; evidence for an earlier commit does not carry forward. PR workflows check out the PR head SHA explicitly, so local ARM and x86 jobs test the same commit rather than different synthetic merge commits.
@@ -31,7 +32,7 @@ in its [runner reference](https://docs.github.com/en/actions/reference/runners/g
 
 The repository includes the Rust/Python invoice-review preview. CI validates
 Terraform and runs the Rust suite, Python packaging checks and workload evidence
-on x86. TypeScript and ARM release wheels remain deferred by the preview scope.
+on x86. Node addon checks run on both architectures for Node 22 and 24 (see [Node bindings](node.md)). ARM Python release wheels remain deferred by the preview scope.
 
 The [x86 evidence record](measurements/ci-x86.md) identifies verified runs,
 artifact contents and the immutable manylinux image. Workflow artifacts are

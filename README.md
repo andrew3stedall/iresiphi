@@ -4,7 +4,7 @@
 
 Instead of repeatedly reshaping every source into a standard schema, define reusable recipes over the raw fields. A recipe can describe relationships, transformations, changes in granularity, lineage, and the output you need.
 
-The planned implementation has a Rust core with Python and TypeScript interfaces. A developer preview, version 0.1.0, implements one workflow in Rust and Python: an auditable invoice review over local JSON, CSV and XLSX files. [docs/preview.md](docs/preview.md) describes what it supports, its limits, and an example you can run. TypeScript and the broader design below are not implemented.
+The planned implementation has a Rust core with Python and TypeScript interfaces. A developer preview, version 0.1.0, implements one workflow in Rust and Python: an auditable invoice review over local JSON, CSV and XLSX files. [docs/preview.md](docs/preview.md) describes what it supports, its limits, and an example you can run. Source-built Node.js bindings with TypeScript declarations are available; the broader design below remains illustrative.
 
 Rust is preferred for validation, planning, and local execution, with thin language bindings. Performance work will cover complete recipes, including data movement and memory use, while retaining execution in databases or Spark where the plan calls for it. No performance advantage has been measured yet.
 
@@ -43,9 +43,11 @@ const recipe = new rsp.Recipe("customer_summary");
 ```
 
 `rsp` is the preferred shorthand in both languages. The preview saves `.iresiphi`
-documents using recipe format `0.1`; the TypeScript interface remains deferred.
+documents using recipe format `0.1`; the Node package provides a lower-level portable recipe interface ([Node guide](docs/node.md)).
 
 ## Project status
+
+Node.js 22/24 source bindings: [build and use the Node package](docs/node.md).
 
 The 0.1.0 Rust/Python developer preview is implemented but has not been published
 to crates.io or PyPI. Its scope and remaining limitations are described in the

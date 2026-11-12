@@ -1,0 +1,5 @@
+id,supplier,invoice,line,amount
+c1,A,A1,1,1
+c2,A,A1,1,2
+c3,A,A1,1,3
+c4,B,B1,1,4
