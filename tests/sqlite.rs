@@ -1295,3 +1295,52 @@ fn reduction_aliases_and_decimal_from_identity_are_exact() {
         serde_json::to_value(local).unwrap()
     );
 }
+
+#[test]
+fn reduction_materializes_keys_and_preserves_unfiltered_lookup_coverage() {
+    let mut f = colocated_fixture().placed(Placement::PreferSource);
+    f.doc["outputs"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("eligibility");
+    let plan = iresiphi::placement::plan(&f.recipe(), &f.bindings, &f.policy).unwrap();
+    let conn = rusqlite::Connection::open(&f.bindings["orders"].path).unwrap();
+    let sql = format!(
+        "EXPLAIN QUERY PLAN SELECT rowid FROM customers AS iresiphi_target WHERE {}",
+        plan.pushed["customers"].sql
+    );
+    let details = conn
+        .prepare(&sql)
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap()
+        .join("\n");
+    assert!(details.contains("LIST SUBQUERY"), "{details}");
+    assert!(!details.contains("CORRELATED"), "{details}");
+    let run = f.succeeded();
+    let checks = &run.manifest["sources"]["customers"]["placement"]["checks"];
+    assert!(
+        checks["lookups"]
+            .as_str()
+            .unwrap()
+            .contains("every delivered from record")
+    );
+    assert!(
+        checks["boolean_values"]
+            .as_str()
+            .unwrap()
+            .contains("every record")
+    );
+    for check in run.manifest["check_results"].as_array().unwrap() {
+        if check["id"] == "lookup.coverage" || check["id"] == "data.relationships" {
+            assert!(
+                !check["coverage"]
+                    .as_str()
+                    .unwrap()
+                    .contains("scanned records only")
+            );
+        }
+    }
+}

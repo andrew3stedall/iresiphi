@@ -93,7 +93,7 @@ qualification stay local. The target must have no decimal identity and no other
 use: another output anchor, relationship target or from source, population
 recipient or period source, or allocation quantity source.
 
-SQLite returns target records in rowid order using an existence condition; it
+SQLite returns target records in rowid order using a materialized key membership condition; it
 preserves duplicate keys and compares without declared affinity or collation.
 Null key components match nothing. Matching, ambiguity, strict cardinality,
 candidates and evidence remain in the executor. For the same delivered from
@@ -115,6 +115,11 @@ with its placement and first unsupported reason. `require_source` rejects an
 unsupported candidate before opening any source. A relationship between files
 with different declared path spellings is not a candidate and imposes no such
 requirement. Encoding infeasibility is detectable only after opening a snapshot.
+SQLite progress callbacks interrupt scans and source checks even when no record
+is delivered; cancellation remains `CANCELLED`. Snapshots are opened before
+per-record decoding, so admission or schema failures can precede errors in an
+earlier-declared source. Error precedence across independent faults is not
+preserved from slice 3.
 Capabilities declare `relationship_target_reduction` and equal-path co-location.
 Placement does not alter canonical recipe JSON or its hash.
 

@@ -134,8 +134,15 @@ Native ARM verification at `288b244`: `cargo test --locked` passed 310 tests;
 the installed CPython 3.12.16 wheel passed 42 tests; the Node 24.22.2 addon
 passed 13 tests and strict TypeScript. A first Node build attempt failed with
 host ENOSYS/libuv errors; a subsequent native build and tests passed.
-A review follow-up adds cancellation inside decimal-identity preflight and
-typed encoding fallback reasons; its final Rust verification is pending.
+Review follow-ups add cancellation inside decimal-identity preflight, typed
+encoding fallback reasons, a scoped SQLite query progress callback, materialized
+key membership, and separate text/lookup coverage. Focused verification passed
+27 SQLite integration tests and two deterministic cancellation unit tests. A
+query-plan regression verifies LIST SUBQUERY without a correlated subquery.
+The first full Rust rerun after review hit host ENOSYS/futex failures; it is not
+counted as a pass. Final full Rust and rebuilt binding verification remain in
+progress. Error precedence across independent faults is now explicitly
+disclosed in the slice 4 contract and guide.
 These local results do not establish hosted acceptance at the final commit.
 Hosted ARM and x86 at the same commit, CPython 3.12/3.13, Node 22/24, the workload,
 and x86 wheel audits and clean-image installs remain unverified for slice 4.

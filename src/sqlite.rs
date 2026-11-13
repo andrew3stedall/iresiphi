@@ -21,7 +21,54 @@ pub(super) struct Scan {
 }
 
 fn sql_error(e: rusqlite::Error) -> Error {
-    err("INVALID_SQLITE", e.to_string())
+    if e.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted) {
+        err("CANCELLED", "SQLite query cancelled")
+    } else {
+        err("INVALID_SQLITE", e.to_string())
+    }
+}
+
+/// Keep the borrowed cancellation flag alive until SQLite's callback is removed.
+/// The connection executes synchronously and is never shared across threads.
+struct QueryCancellation<'a> {
+    conn: &'a Connection,
+    _cancel: &'a AtomicBool,
+}
+impl<'a> QueryCancellation<'a> {
+    fn install(conn: &'a Connection, cancel: &'a AtomicBool) -> Self {
+        unsafe extern "C" fn cancelled(data: *mut std::ffi::c_void) -> std::ffi::c_int {
+            // SAFETY: install borrows the flag for the guard's lifetime; Drop
+            // removes the callback before either borrow can end.
+            unsafe { (&*data.cast::<AtomicBool>()).load(Ordering::Relaxed) as _ }
+        }
+        // SAFETY: the callback does not unwind, and the flag remains borrowed
+        // until the callback is removed in Drop. These guards are not nested.
+        unsafe {
+            rusqlite::ffi::sqlite3_progress_handler(
+                conn.handle(),
+                1000,
+                Some(cancelled),
+                std::ptr::from_ref(cancel).cast_mut().cast(),
+            );
+        }
+        Self {
+            conn,
+            _cancel: cancel,
+        }
+    }
+}
+impl Drop for QueryCancellation<'_> {
+    fn drop(&mut self) {
+        // SAFETY: the connection is still borrowed and no query outlives this guard.
+        unsafe {
+            rusqlite::ffi::sqlite3_progress_handler(
+                self.conn.handle(),
+                0,
+                None,
+                std::ptr::null_mut(),
+            );
+        }
+    }
 }
 
 /// Open the bytes read as a read-only in-memory database.
@@ -153,7 +200,7 @@ pub(super) fn inspect_connection(
             .query_row("PRAGMA encoding", [], |r| r.get(0))
             .map_err(sql_error)?;
         if encoding != "UTF-8" {
-            return Err(Error::new("PLACEMENT_INFEASIBLE", "source", format!("policy placement require_source cannot be met for {}: the database stores text as {encoding}", pushed.stage)).with_subject(pushed.stage.clone()));
+            return Err(Error::new("PLACEMENT_INFEASIBLE", "source", format!("policy placement require_source cannot be met for {}: the database stores text as {encoding}", pushed.stage)).with_subject(pushed.stage.clone()).with_remediation("Use placement prefer_source or local; the policy is not overridden."));
         }
     }
     Ok(())
@@ -377,6 +424,7 @@ pub(super) fn read(
     pushed: Option<&Pushed>,
     group_fallback: Option<&Fallback>,
 ) -> Result<Scan> {
+    let _cancellation = QueryCancellation::install(conn, cancel);
     let table = table(&conn, source, binding)?;
     let name = quoted(&table.name);
     let fallback = match group_fallback {
@@ -477,8 +525,9 @@ pub(super) fn read(
                 "nullability": "full: every record, at the source",
                 "storage_classes": "full: every record, at the source",
                 "field_bytes": "full: every record, at the source",
+                "boolean_values": "full: every record, at the source",
                 "text_formats": "date text, decimal text, and valid UTF-8: scanned records only",
-                "lookups": "scanned records only",
+                "lookups": if p.stage.starts_with("relationship:") { "full: every delivered from record; target reduction preserves all candidates" } else { "scanned records only" },
             },
         }),
         Some(reason) => serde_json::json!({
@@ -502,6 +551,7 @@ pub(super) fn preflight(
     policy: &Policy,
     cancel: &AtomicBool,
 ) -> Result<Option<Fallback>> {
+    let _cancellation = QueryCancellation::install(conn, cancel);
     let table = table(conn, source, binding)?;
     source_checks(conn, source, &table, &policy.limits, cancel)
 }
@@ -509,6 +559,26 @@ pub(super) fn preflight(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_interrupts_a_query_before_it_delivers_a_record() {
+        let conn = Connection::open_in_memory().unwrap();
+        let cancel = AtomicBool::new(true);
+        let query = "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000) SELECT sum(x) FROM n";
+        {
+            let _guard = QueryCancellation::install(&conn, &cancel);
+            let error = conn
+                .query_row(query, [], |row| row.get::<_, i64>(0))
+                .unwrap_err();
+            assert_eq!(sql_error(error).code, "CANCELLED");
+        }
+        // The callback must not retain its borrowed flag after the guard ends.
+        assert_eq!(
+            conn.query_row(query, [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            50_005_000
+        );
+    }
 
     #[test]
     fn decimal_identity_preflight_observes_cancellation() {

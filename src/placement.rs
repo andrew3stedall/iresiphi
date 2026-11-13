@@ -437,26 +437,33 @@ pub fn plan(recipe: &Recipe, bindings: &Bindings, policy: &Policy) -> Result<Pla
             }
             plan.decisions.push(json!({"operation":stage,"source":format!("source:{}",r.to),"policy":policy.placement,"placement":"local","reason":reason}));
         } else {
-            // EXISTS preserves duplicates and rowids of the target. Unary plus and
-            // BINARY remove declared affinity and collation on both operands.
-            let equal = r
+            // IN materializes the from keys once instead of rescanning them for
+            // each target. Unary plus and BINARY retain exact key semantics.
+            let from_keys = r
                 .from_keys
                 .iter()
-                .zip(&r.to_keys)
-                .map(|(f, t)| {
+                .map(|f| {
                     format!(
-                        "+iresiphi_from.{} COLLATE BINARY = +{}.{} COLLATE BINARY",
-                        quoted(column(&from.projection.fields[f])),
-                        quoted("iresiphi_target"),
+                        "+iresiphi_from.{} COLLATE BINARY",
+                        quoted(column(&from.projection.fields[f]))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let target_keys = r
+                .to_keys
+                .iter()
+                .map(|t| {
+                    format!(
+                        "+iresiphi_target.{} COLLATE BINARY",
                         quoted(column(&to.projection.fields[t]))
                     )
                 })
                 .collect::<Vec<_>>()
-                .join(" AND ");
+                .join(", ");
             let filter = plan.pushed.get(&r.from);
-            // Qualify eligibility columns by wrapping the from table in a subquery.
             let sql = format!(
-                "EXISTS (SELECT 1 FROM (SELECT * FROM {}{}) AS iresiphi_from WHERE {equal})",
+                "({target_keys}) IN (SELECT {from_keys} FROM (SELECT * FROM {}{}) AS iresiphi_from)",
                 quoted(a.settings["table"].as_str().unwrap_or("")),
                 filter
                     .map(|p| format!(" WHERE {}", p.sql))

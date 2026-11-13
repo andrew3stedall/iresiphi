@@ -301,14 +301,23 @@ fn materialize_sources(
                 .map_err(|e| tag_source(e, &source.id))?
             {
                 if policy.placement == Placement::RequireSource && reason.is_encoding() {
-                    let pushed = group.iter().find_map(|id| plan.pushed.get(id)).unwrap();
+                    let pushed = group
+                        .iter()
+                        .filter(|id| plan.reductions.contains_key(*id))
+                        .find_map(|id| plan.pushed.get(id))
+                        .unwrap();
                     return Err(Error::new(
                         "PLACEMENT_INFEASIBLE",
                         "source",
-                        format!("{}: {reason}", pushed.stage),
+                        format!(
+                            "policy placement require_source cannot be met for {}: {reason}",
+                            pushed.stage
+                        ),
                     )
                     .with_subject(pushed.stage.clone())
-                    .with_remediation("Use placement prefer_source or local."));
+                    .with_remediation(
+                        "Use placement prefer_source or local; the policy is not overridden.",
+                    ));
                 }
                 fallback.get_or_insert(reason);
             }
@@ -2249,7 +2258,15 @@ pub fn inspect_schemas(recipe: &Recipe, bindings: &Bindings, policy: &Policy) ->
                 binding,
                 &snapshots[binding.path.as_os_str().as_encoded_bytes()].conn,
                 if policy.placement == Placement::RequireSource {
-                    plan.pushed.get(&source.id)
+                    plan.reductions
+                        .keys()
+                        .filter(|id| {
+                            bindings
+                                .get(*id)
+                                .is_some_and(|b| crate::placement::colocated(binding, b))
+                        })
+                        .find_map(|id| plan.pushed.get(id))
+                        .or_else(|| plan.pushed.get(&source.id))
                 } else {
                     None
                 },
