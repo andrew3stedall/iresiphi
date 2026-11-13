@@ -268,7 +268,7 @@ fn materialize_sources(
     // Placement is decided from declarations and policy before any source opens.
     let plan = crate::placement::plan(recipe, bindings, policy)?;
     let snapshots = sqlite_snapshots(recipe, bindings, policy, &mut total, cancel)?;
-    let mut fallbacks = BTreeMap::<String, String>::new();
+    let mut fallbacks = BTreeMap::<String, sqlite::Fallback>::new();
     // Connected candidate groups include all sibling targets, even a candidate
     // kept local by static planning. Finish every check before delivering rows.
     let mut remaining = plan.candidates.clone();
@@ -297,12 +297,10 @@ fn materialize_sources(
             check_cancel(cancel)?;
             let binding = &bindings[&source.id];
             let snapshot = &snapshots[binding.path.as_os_str().as_encoded_bytes()];
-            if let Some(reason) = sqlite::preflight(&snapshot.conn, source, binding, policy)
+            if let Some(reason) = sqlite::preflight(&snapshot.conn, source, binding, policy, cancel)
                 .map_err(|e| tag_source(e, &source.id))?
             {
-                if policy.placement == Placement::RequireSource
-                    && reason.starts_with("the database stores text")
-                {
+                if policy.placement == Placement::RequireSource && reason.is_encoding() {
                     let pushed = group.iter().find_map(|id| plan.pushed.get(id)).unwrap();
                     return Err(Error::new(
                         "PLACEMENT_INFEASIBLE",

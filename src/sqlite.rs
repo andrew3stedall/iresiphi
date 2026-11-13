@@ -175,19 +175,41 @@ fn storage_classes(field: &Field) -> Vec<&'static str> {
 /// Checks a pushed scan would otherwise skip for the records it does not read:
 /// identity presence and uniqueness, nullability and storage classes, over
 /// every record of the table. Returns why the scan must stay local, if it must.
+#[derive(Clone)]
+pub(super) enum Fallback {
+    Encoding(String),
+    Data(String),
+}
+impl Fallback {
+    pub(super) fn is_encoding(&self) -> bool {
+        matches!(self, Self::Encoding(_))
+    }
+    pub(super) fn reason(&self) -> &str {
+        match self {
+            Self::Encoding(reason) | Self::Data(reason) => reason,
+        }
+    }
+}
+impl std::fmt::Display for Fallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.reason())
+    }
+}
+
 fn source_checks(
     conn: &Connection,
     source: &Source,
     table: &Table<'_>,
     limits: &Limits,
-) -> Result<Option<String>> {
+    cancel: &AtomicBool,
+) -> Result<Option<Fallback>> {
     let encoding: String = conn
         .query_row("PRAGMA encoding", [], |r| r.get(0))
         .map_err(sql_error)?;
     if encoding != "UTF-8" {
-        return Ok(Some(format!(
+        return Ok(Some(Fallback::Encoding(format!(
             "the database stores text as {encoding}; bytewise text comparison at the source would not match the local executor's"
-        )));
+        ))));
     }
     let name = quoted(&table.name);
     let mut violations = vec![];
@@ -225,9 +247,9 @@ fn source_checks(
         )
         .map_err(sql_error)?;
     if violating > 0 {
-        return Ok(Some(format!(
+        return Ok(Some(Fallback::Data(format!(
             "{violating} records fail a source-side identity, nullability, field_bytes or storage-class check; the whole table is read locally to diagnose them"
-        )));
+        ))));
     }
     // A from table may have a decimal identity even though reduction keys and
     // target identities cannot. Check that identity with the executor's exact
@@ -249,6 +271,7 @@ fn source_checks(
         let mut records = statement.query([]).map_err(sql_error)?;
         let mut seen = BTreeSet::new();
         while let Some(record) = records.next().map_err(sql_error)? {
+            check_cancel(cancel)?;
             let mut key = Vec::new();
             for (i, id) in source.identity.iter().enumerate() {
                 let (value, _) = convert(
@@ -258,14 +281,18 @@ fn source_checks(
                 )?;
                 match value {
                     Ok(value) => key.push(value),
-                    Err(_) => return Ok(Some("identity requires local value diagnostics".into())),
+                    Err(_) => {
+                        return Ok(Some(Fallback::Data(
+                            "identity requires local value diagnostics".into(),
+                        )));
+                    }
                 }
             }
             if !seen.insert(serde_json::to_string(&key).map_err(io_error)?) {
-                return Ok(Some(
+                return Ok(Some(Fallback::Data(
                     "records share an identity; the whole table is read locally to diagnose them"
                         .into(),
-                ));
+                )));
             }
         }
         return Ok(None);
@@ -278,10 +305,10 @@ fn source_checks(
             ))
             .map_err(sql_error)?;
         if duplicated.exists([]).map_err(sql_error)? {
-            return Ok(Some(
+            return Ok(Some(Fallback::Data(
                 "records share an identity; the whole table is read locally to diagnose them"
                     .into(),
-            ));
+            )));
         }
     }
     Ok(None)
@@ -348,14 +375,14 @@ pub(super) fn read(
     policy: &Policy,
     cancel: &AtomicBool,
     pushed: Option<&Pushed>,
-    group_fallback: Option<&String>,
+    group_fallback: Option<&Fallback>,
 ) -> Result<Scan> {
     let table = table(&conn, source, binding)?;
     let name = quoted(&table.name);
     let fallback = match group_fallback {
         Some(reason) => Some(reason.clone()),
         None => match pushed {
-            Some(_) => source_checks(&conn, source, &table, &policy.limits)?,
+            Some(_) => source_checks(&conn, source, &table, &policy.limits, cancel)?,
             None => None,
         },
     };
@@ -364,7 +391,7 @@ pub(super) fn read(
     {
         // Check failures are diagnosed by the local read below; an encoding the
         // source cannot compare in is a placement the policy forbids.
-        if reason.starts_with("the database stores text") {
+        if reason.is_encoding() {
             return Err(Error::new(
                 "PLACEMENT_INFEASIBLE",
                 "source",
@@ -457,7 +484,7 @@ pub(super) fn read(
         Some(reason) => serde_json::json!({
             "scan": "local",
             "operation": p.stage,
-            "reason": reason,
+            "reason": reason.reason(),
         }),
     });
     Ok(Scan {
@@ -473,7 +500,41 @@ pub(super) fn preflight(
     source: &Source,
     binding: &Binding,
     policy: &Policy,
-) -> Result<Option<String>> {
+    cancel: &AtomicBool,
+) -> Result<Option<Fallback>> {
     let table = table(conn, source, binding)?;
-    source_checks(conn, source, &table, &policy.limits)
+    source_checks(conn, source, &table, &policy.limits, cancel)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decimal_identity_preflight_observes_cancellation() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE items (id TEXT); INSERT INTO items VALUES ('1.00'), ('2.00')",
+        )
+        .unwrap();
+        let source: Source = serde_json::from_value(serde_json::json!({
+            "id":"items", "identity":["id"], "grain":["id"],
+            "projection":{"fields":{"id":{"path":"id","data_type":{"kind":"decimal","precision":10,"scale":2}}}}
+        })).unwrap();
+        let binding: Binding = serde_json::from_value(serde_json::json!({
+            "adapter":"sqlite", "path":"unused.sqlite", "settings":{"table":"items"}
+        }))
+        .unwrap();
+        let table = table(&conn, &source, &binding).unwrap();
+        match source_checks(
+            &conn,
+            &source,
+            &table,
+            &Limits::default(),
+            &AtomicBool::new(true),
+        ) {
+            Err(error) => assert_eq!(error.code, "CANCELLED"),
+            Ok(_) => panic!("decimal identity scan ignored cancellation"),
+        }
+    }
 }

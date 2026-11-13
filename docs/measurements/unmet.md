@@ -130,8 +130,13 @@ reduction and whole-group fallback, UTF-16 refusal, malformed UTF-8 coverage,
 exact decimal from identities, alias collisions, and row/batch/retention/input
 budgets. Python and Node include the same-database acceptance fixture.
 
-Local evidence below applies to this uncommitted shared-checkout change only;
-it does not establish hosted acceptance at the coordinator's eventual commit.
+Native ARM verification at `288b244`: `cargo test --locked` passed 310 tests;
+the installed CPython 3.12.16 wheel passed 42 tests; the Node 24.22.2 addon
+passed 13 tests and strict TypeScript. A first Node build attempt failed with
+host ENOSYS/libuv errors; a subsequent native build and tests passed.
+A review follow-up adds cancellation inside decimal-identity preflight and
+typed encoding fallback reasons; its final Rust verification is pending.
+These local results do not establish hosted acceptance at the final commit.
 Hosted ARM and x86 at the same commit, CPython 3.12/3.13, Node 22/24, the workload,
 and x86 wheel audits and clean-image installs remain unverified for slice 4.
 No x86 workload was run locally.
