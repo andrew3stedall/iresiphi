@@ -42,7 +42,7 @@ The policy's `placement` says where operations may run.
 | --- | --- |
 | `local` (default) | Everything runs in the local executor. Results are what they were before this setting existed. |
 | `prefer_source` | An eligibility predicate runs at its source when the rules below allow it, and locally otherwise. |
-| `require_source` | An eligibility predicate on a source that can filter must run there. If it cannot, validate, explain and run fail with `PLACEMENT_INFEASIBLE` before any source is opened. |
+| `require_source` | An eligibility predicate on a source that can filter must run there. Recipe/binding infeasibility fails with `PLACEMENT_INFEASIBLE` before opening sources. Encoding infeasibility is detected when bound validation or run opens the database; explain opens nothing. |
 
 ```python
 policy = b.policy(["/data"], placement="prefer_source")
@@ -52,7 +52,7 @@ print(recipe.explain(bindings, policy)["bound"]["placement"])
 Only one operation can be placed at a source: an output's anchor `eligibility`, as a filter on the anchor source's scan. It is pushed when all of these hold:
 
 - The anchor is bound to `sqlite`.
-- The source has no other use in the recipe. It is not a relationship target, another output's anchor, a detail output's parent, a population's recipient or period source, or an allocation's quantity source. Those need the records the filter would drop.
+- The source has no other use in the recipe. It is not a relationship target, another output's anchor, a detail output's parent, a population's recipient or period source, or an allocation's quantity source. Outgoing one-to-one and one-to-many relationships also keep the filter local for shared-target ambiguity and detail-parent checks. Those need the records the filter would drop.
 - The predicate reads only the anchor's own fields and literals, through `equal`, `less`, `less_equal`, `and`, `or`, `not` and `is_null`.
 - Every compared value is `int64`, `string`, `date` or `boolean`. SQLite compares these as the local executor does: integers numerically, text and ISO dates bytewise, and a null comparison is unknown. The generated SQL removes each column's declared affinity and collation, so a `NOCASE` column still compares bytewise.
 - No comparison involves a `decimal`, and the source's identity has no `decimal` field. SQLite would compare decimal text bytewise (`"120.50" < "50.00"`) or through a float.
@@ -64,12 +64,14 @@ Explain lists each eligibility with its placement and, when it stays local, the 
 Output rows, values, evidence records and output counts are the same under either placement. `tests/sqlite.rs` runs 22 predicates both ways and compares them. Three things differ, and the manifest states each:
 
 - **Records scanned.** `sources.<id>.rows` is still the table's record count. `scanned_rows` is how many crossed into the executor. Row limits apply to scanned records, so a table larger than `limits.anchor_rows` can run when its eligible records fit.
-- **Text format checks.** Decimal and date text is parsed for scanned records only.
+- **Text format checks.** Decimal and date formats, and valid UTF-8, are checked for scanned records only. Invalid UTF-8 in a dropped record fails locally but may pass under source placement.
 - **Lookup checks.** Unmatched, ambiguous and strict-cardinality checks cover scanned anchor records only. A closed order with an unknown customer raises `LOOKUP_UNMATCHED` under local placement and nothing under source placement.
 
-Before a pushed scan, SQLite checks every record of the table: identity present and unique, required columns not null, and each value's storage class acceptable for its declared type. If any record fails, the run reads the whole table locally and reports the same diagnostic local placement would. The same happens for a database whose text encoding is not UTF-8.
+Before a pushed scan, SQLite checks every record of the table: identity present and unique, required columns not null, each value's storage class acceptable for its declared type, and every projected TEXT value within `limits.field_bytes`. If any record fails, the run reads the whole table locally and reports the same diagnostic local placement would. A database whose text encoding is not UTF-8 also falls back locally under `prefer_source`; `require_source` refuses it with `PLACEMENT_INFEASIBLE`.
 
 Bytes read do not change. The whole file is read and fingerprinted under either placement, so this slice saves decoding and row budget, not I/O.
+
+Static validation rejects expressions deeper than 18, including feature references, before recursive typing. Predicates with more than 500 bound literals stay local (or fail under `require_source`).
 
 ## Not included
 

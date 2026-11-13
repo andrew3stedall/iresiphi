@@ -51,7 +51,7 @@ pub(crate) fn quoted(name: &str) -> String {
 
 /// The column a declared field reads, as the SQLite reader resolves it.
 pub(crate) fn column(field: &Field) -> &str {
-    field.path.strip_prefix('/').unwrap_or(&field.path)
+    &field.path
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -114,6 +114,9 @@ impl Translator<'_> {
                         return Err("the predicate compares with a null literal".into());
                     }
                 };
+                if self.parameters.len() >= 500 {
+                    return Err("the predicate exceeds 500 bound parameters".into());
+                }
                 self.parameters.push(parameter);
                 Ok(("?".into(), kind))
             }
@@ -126,7 +129,7 @@ impl Translator<'_> {
 
     /// A condition whose SQL truth value is the predicate's: true, false or unknown.
     fn condition(&mut self, expr: &Expr, depth: usize) -> Reasoned<String> {
-        if depth > 64 {
+        if depth > crate::validation::EXPRESSION_DEPTH {
             return Err("the predicate is nested too deeply to push".into());
         }
         match expr {
@@ -210,6 +213,16 @@ fn other_use(recipe: &Recipe, source: &str, output: &str) -> Option<String> {
     }
     if let Some(r) = recipe.relationships.iter().find(|r| r.to == source) {
         return Some(format!("relationship {} reads it as a target", r.id));
+    }
+    if let Some(r) = recipe
+        .relationships
+        .iter()
+        .find(|r| r.from == source && r.cardinality != Cardinality::ManyToOne)
+    {
+        return Some(format!(
+            "relationship {} needs every anchor record for cross-anchor ambiguity or detail parent checks",
+            r.id
+        ));
     }
     // A detail output reads its parent back through the parent's relationship.
     for r in recipe.relationships.iter().filter(|r| r.from == source) {
@@ -303,7 +316,7 @@ pub fn plan(recipe: &Recipe, bindings: &Bindings, policy: &Policy) -> Result<Pla
             Ok(pushed) => {
                 decision["placement"] = json!("source");
                 decision["coverage"] = json!(
-                    "identity, nullability and storage classes are checked at the source for every record; text formats and lookups are checked for scanned records only"
+                    "identity, nullability, field_bytes and storage classes are checked at the source for every record; text checks (date text, decimal text, and valid UTF-8) and lookups are checked for scanned records only"
                 );
                 plan.pushed.insert(output.anchor.clone(), pushed);
             }

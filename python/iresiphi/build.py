@@ -302,7 +302,7 @@ def policy(read_roots, output_roots=(), limits=None, diagnostic_values=False, pl
     declared = {"allowed_read_roots": list(read_roots),
                 "allowed_output_roots": list(output_roots),
                 "diagnostic_values": diagnostic_values}
-    if placement:
+    if placement is not None:
         declared["placement"] = placement
     if limits:
         declared["limits"] = dict(limits)

@@ -684,3 +684,154 @@ fn placement_is_policy_and_defaults_to_local() {
     );
     let _ = BTreeMap::<String, String>::new();
 }
+
+/// Requests cancellation from another thread `after` the run enters parsing.
+struct CancelDuringParse {
+    flag: std::sync::Arc<AtomicBool>,
+    after: std::time::Duration,
+}
+impl iresiphi::Cancellation for CancelDuringParse {
+    fn flag(&self) -> &AtomicBool {
+        &self.flag
+    }
+    fn entered(&self, phase: iresiphi::RunPhase) {
+        if phase == iresiphi::RunPhase::Parse {
+            let (flag, after) = (self.flag.clone(), self.after);
+            std::thread::spawn(move || {
+                std::thread::sleep(after);
+                flag.store(true, std::sync::atomic::Ordering::Release);
+            });
+        }
+    }
+}
+
+#[test]
+fn a_run_cancelled_during_a_sqlite_scan_reports_cancelled() {
+    // Enough records that the scan, not the file read, takes the run's time.
+    const RECORDS: usize = 200_000;
+    let many = format!(
+        "WITH RECURSIVE n(i) AS (SELECT 7 UNION ALL SELECT i + 1 FROM n WHERE i < {})
+         INSERT INTO orders SELECT i, 'A', '2026-01-05', '1.00', 1 FROM n",
+        RECORDS + 6
+    );
+    for placement in [Placement::Local, Placement::RequireSource] {
+        let mut f =
+            fixture_with(open_from_january(), &[ORDERS_DDL, ORDERS, &many]).placed(placement);
+        f.policy.limits.anchor_rows = RECORDS + 10;
+        f.policy.limits.retained_bytes = 1 << 30;
+        f.policy.limits.output_bytes = 1 << 30;
+        let cancel = CancelDuringParse {
+            flag: Default::default(),
+            after: std::time::Duration::from_millis(200),
+        };
+        let started = std::time::Instant::now();
+        let report = ExecutionContext::default().run(&f.recipe(), &f.bindings, &f.policy, &cancel);
+        let latency = started.elapsed();
+        assert_eq!(
+            report.status, "cancelled",
+            "{placement:?} {:?}",
+            report.diagnostics
+        );
+        assert!(
+            report.tables.is_empty(),
+            "a cancelled run publishes nothing"
+        );
+        let error = &report.diagnostics[0];
+        assert_eq!(error.code, "CANCELLED", "{placement:?}");
+        assert_eq!(error.phase, "source", "{placement:?}");
+        assert_eq!(
+            error.subject.as_deref(),
+            Some("source:orders"),
+            "{placement:?}"
+        );
+        assert_eq!(report.manifest["checks"]["data"], "incomplete");
+        eprintln!("cancel during {placement:?} sqlite scan: run returned after {latency:?}");
+    }
+}
+
+/// The fixture's orders in a database whose text encoding is UTF-16le. Customer
+/// "Ā" (U+0100) sorts after "B" in UTF-8 but before it in UTF-16le bytes.
+fn utf16_fixture(eligibility: Json) -> Fixture {
+    fixture_with(
+        eligibility,
+        &[
+            "PRAGMA encoding = 'UTF-16le'",
+            ORDERS_DDL,
+            ORDERS,
+            "INSERT INTO orders VALUES (7,'Ā','2026-03-01','5.00',1)",
+        ],
+    )
+}
+
+#[test]
+fn a_utf16_database_is_read_locally_with_the_same_result() {
+    let encoding: String =
+        rusqlite::Connection::open(utf16_fixture(field("open")).bindings["orders"].path.clone())
+            .unwrap()
+            .query_row("PRAGMA encoding", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(encoding, "UTF-16le");
+    // Local placement decodes UTF-16 text exactly.
+    let local = utf16_fixture(open_from_january()).succeeded();
+    let utf8 = fixture_with(
+        open_from_january(),
+        &[
+            ORDERS_DDL,
+            ORDERS,
+            "INSERT INTO orders VALUES (7,'Ā','2026-03-01','5.00',1)",
+        ],
+    )
+    .succeeded();
+    assert_eq!(local.tables, utf8.tables);
+    assert_eq!(rows(&local)[4].0, "7");
+    assert_eq!(local.manifest["sources"]["orders"]["placement"], Json::Null);
+
+    // A text comparison whose bytewise order differs between the encodings.
+    let after_b = op("less", literal("string", "B"), field("cust"));
+    let mut f = utf16_fixture(after_b.clone());
+    let local = f.succeeded();
+    let kept: Vec<_> = rows(&local).into_iter().map(|r| r.0).collect();
+    assert_eq!(kept, ["4", "5", "7"], "C, Z and Ā sort after B");
+
+    // Preferring the source reads the whole table locally and says why.
+    f.policy.placement = Placement::PreferSource;
+    assert_eq!(
+        f.explain()["bound"]["placement"]["operations"][0]["placement"],
+        "source",
+        "explain opens no source, so it cannot see the encoding"
+    );
+    let source = f.succeeded();
+    assert_eq!(source.tables, local.tables);
+    assert_eq!(source.manifest["counts"], local.manifest["counts"]);
+    assert_eq!(source.evidence, local.evidence);
+    let read = &source.manifest["sources"]["orders"];
+    assert_eq!(read["placement"]["scan"], "local", "{read}");
+    assert!(
+        read["placement"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("UTF-16le"),
+        "{read}"
+    );
+    assert_eq!(read["rows"], 7);
+    assert_eq!(read["scanned_rows"], 7, "every record was read");
+
+    // Requiring the source cannot be met.
+    let error = utf16_fixture(after_b)
+        .placed(Placement::RequireSource)
+        .failure();
+    assert_eq!(error.code, "PLACEMENT_INFEASIBLE", "{error:?}");
+    assert_eq!(
+        error.subject.as_deref(),
+        Some("output:open_orders/eligibility")
+    );
+    assert!(error.message.contains("UTF-16le"), "{}", error.message);
+    assert!(
+        error
+            .remediation
+            .as_deref()
+            .unwrap()
+            .contains("prefer_source"),
+        "the alternative is named"
+    );
+}

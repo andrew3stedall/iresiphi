@@ -2101,12 +2101,21 @@ pub fn inspect_schemas(recipe: &Recipe, bindings: &Bindings, policy: &Policy) ->
     let cancel = AtomicBool::new(false);
     let mut total = 0;
     let mut expanded = 0;
+    let plan = crate::placement::plan(recipe, bindings, policy)?;
     for source in &recipe.sources {
         let binding = bindings
             .get(&source.id)
             .ok_or_else(|| err("MISSING_BINDING", format!("missing binding {}", source.id)))?;
-        inspect_schema(source, binding, policy, &mut total, &mut expanded, &cancel)
-            .map_err(|e| tag_source(e, &source.id).with_check("source_schema"))?;
+        inspect_schema(
+            source,
+            binding,
+            policy,
+            &mut total,
+            &mut expanded,
+            &cancel,
+            plan.pushed.get(&source.id),
+        )
+        .map_err(|e| tag_source(e, &source.id).with_check("source_schema"))?;
     }
     Ok(recipe.sources.len())
 }
@@ -2118,6 +2127,7 @@ fn inspect_schema(
     total: &mut usize,
     expanded: &mut usize,
     cancel: &AtomicBool,
+    pushed: Option<&crate::placement::Pushed>,
 ) -> Result<()> {
     check_text_settings(binding)?;
     let missing = |what: &str, name: &str| {
@@ -2129,7 +2139,16 @@ fn inspect_schema(
     match binding.adapter.as_str() {
         "sqlite" => {
             let bytes = read_bytes(binding, policy, total, cancel)?;
-            sqlite::inspect(source, binding, &bytes)?;
+            sqlite::inspect(
+                source,
+                binding,
+                &bytes,
+                if policy.placement == Placement::RequireSource {
+                    pushed
+                } else {
+                    None
+                },
+            )?;
         }
         "csv" => {
             let dialect = CsvDialect::from_binding(binding)?;

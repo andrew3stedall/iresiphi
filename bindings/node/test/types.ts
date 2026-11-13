@@ -3,7 +3,7 @@ async function example(document: string) {
   const recipe = new Recipe(document);
   const hash: string = recipe.hash;
   const signal = new AbortController().signal;
-  const result = await run(recipe, {}, {allowed_read_roots: [], allowed_output_roots: []}, {signal});
+  const result = await run(recipe, {orders: {path: '/data/sales.sqlite', adapter: 'sqlite', settings: {table: 'orders'}}}, {allowed_read_roots: ['/data'], allowed_output_roots: [], placement: 'prefer_source'}, {signal});
   const value: Scalar = result.batch('review')[0].amount;
   const count: bigint = result.rowCount('review');
   const status: string = result.status;

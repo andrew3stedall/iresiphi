@@ -91,7 +91,7 @@ fn table<'a>(conn: &Connection, source: &'a Source, binding: &Binding) -> Result
         Some(_) => {}
     }
     let mut info = conn
-        .prepare("SELECT name FROM pragma_table_info(?1)")
+        .prepare("SELECT name FROM pragma_table_xinfo(?1)")
         .map_err(sql_error)?;
     let present: BTreeSet<String> = info
         .query_map([&name], |r| r.get(0))
@@ -132,8 +132,23 @@ fn table<'a>(conn: &Connection, source: &'a Source, binding: &Binding) -> Result
 
 /// Bound validation's schema inspection: the table and each declared column
 /// exist. No record is read.
-pub(super) fn inspect(source: &Source, binding: &Binding, bytes: &[u8]) -> Result<()> {
-    table(&open(bytes)?, source, binding).map(|_| ())
+pub(super) fn inspect(
+    source: &Source,
+    binding: &Binding,
+    bytes: &[u8],
+    required: Option<&Pushed>,
+) -> Result<()> {
+    let conn = open(bytes)?;
+    table(&conn, source, binding)?;
+    if let Some(pushed) = required {
+        let encoding: String = conn
+            .query_row("PRAGMA encoding", [], |r| r.get(0))
+            .map_err(sql_error)?;
+        if encoding != "UTF-8" {
+            return Err(Error::new("PLACEMENT_INFEASIBLE", "source", format!("policy placement require_source cannot be met for {}: the database stores text as {encoding}", pushed.stage)).with_subject(pushed.stage.clone()));
+        }
+    }
+    Ok(())
 }
 
 /// The SQL storage classes a declared type accepts, as `typeof` names them.
@@ -152,7 +167,12 @@ fn storage_classes(field: &Field) -> Vec<&'static str> {
 /// Checks a pushed scan would otherwise skip for the records it does not read:
 /// identity presence and uniqueness, nullability and storage classes, over
 /// every record of the table. Returns why the scan must stay local, if it must.
-fn source_checks(conn: &Connection, source: &Source, table: &Table<'_>) -> Result<Option<String>> {
+fn source_checks(
+    conn: &Connection,
+    source: &Source,
+    table: &Table<'_>,
+    limits: &Limits,
+) -> Result<Option<String>> {
     let encoding: String = conn
         .query_row("PRAGMA encoding", [], |r| r.get(0))
         .map_err(sql_error)?;
@@ -172,9 +192,13 @@ fn source_checks(conn: &Connection, source: &Source, table: &Table<'_>) -> Resul
             .collect::<Vec<_>>()
             .join(", ");
         violations.push(format!("typeof({column}) NOT IN ({classes})"));
+        violations.push(format!(
+            "(typeof({column}) = 'text' AND length(CAST({column} AS BLOB)) > {})",
+            limits.field_bytes
+        ));
         if declared.data_type == Type::Boolean {
             violations.push(format!(
-                "({column} IS NOT NULL AND +{column} NOT IN (0, 1))"
+                "({column} IS NOT NULL AND +{column} COLLATE BINARY NOT IN (0, 1))"
             ));
         }
         if source.identity.contains(*field) {
@@ -194,7 +218,7 @@ fn source_checks(conn: &Connection, source: &Source, table: &Table<'_>) -> Resul
         .map_err(sql_error)?;
     if violating > 0 {
         return Ok(Some(format!(
-            "{violating} records fail a source-side identity, nullability or storage-class check; the whole table is read locally to diagnose them"
+            "{violating} records fail a source-side identity, nullability, field_bytes or storage-class check; the whole table is read locally to diagnose them"
         )));
     }
     if !identity.is_empty() {
@@ -280,7 +304,7 @@ pub(super) fn read(
     let table = table(&conn, source, binding)?;
     let name = quoted(&table.name);
     let fallback = match pushed {
-        Some(_) => source_checks(&conn, source, &table)?,
+        Some(_) => source_checks(&conn, source, &table, &policy.limits)?,
         None => None,
     };
     if let (Some(reason), Placement::RequireSource, Some(pushed)) =
@@ -373,7 +397,8 @@ pub(super) fn read(
                 "identity": "full: every record, at the source",
                 "nullability": "full: every record, at the source",
                 "storage_classes": "full: every record, at the source",
-                "text_formats": "scanned records only",
+                "field_bytes": "full: every record, at the source",
+                "text_formats": "date text, decimal text, and valid UTF-8: scanned records only",
                 "lookups": "scanned records only",
             },
         }),

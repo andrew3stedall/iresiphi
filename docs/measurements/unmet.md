@@ -46,14 +46,43 @@ Two choices take the stricter reading of the contract:
 
 ## Slice 3: SQLite source and placement
 
-The contract is [docs/spec/slice-3.md](../spec/slice-3.md); [docs/sqlite.md](../sqlite.md) describes the behaviour. Every clause is implemented and covered by `tests/sqlite.rs`, except as listed here.
+The contract is [docs/spec/slice-3.md](../spec/slice-3.md); [docs/sqlite.md](../sqlite.md) describes the behaviour. Rust coverage is in `tests/sqlite.rs` and `tests/sqlite_adversarial.rs`, with binding coverage in Python and Node. Remaining limitations and evidence are listed here.
 
 | Clause | Status | Reason |
 | --- | --- | --- |
-| SQLite source 7: cancellation is checked between records | Unverified | The reader checks before the row count and before each record. No test cancels a run during a SQLite scan. |
-| Placement 4: a database that is not UTF-8 is read locally | Unverified | Implemented from `PRAGMA encoding`. No test builds a UTF-16 database. |
-| Ticket 2: the placement half of the fixture through Python and Node | Unmet | `iresiphi.build.policy` takes `placement`, `binding` takes the `sqlite` adapter, and the Node declarations type both. Neither binding has a test that runs the fixture. |
+| SQLite source 7: cancellation is checked between records | Covered locally; hosted pending | `tests/sqlite.rs` cancels during a SQLite scan and asserts `CANCELLED`. |
+| Placement 4: a database that is not UTF-8 is read locally | Covered locally; hosted pending | `tests/sqlite.rs` and `tests/sqlite_adversarial.rs` build UTF-16 databases and check local fallback and `require_source` refusal in run and bound validation. Explain opens no source, so encoding is checked only at access time. |
+| Ticket 2: the placement half of the fixture through Python and Node | Met locally; hosted unverified | `tests/python_sqlite.py` and `bindings/node/test/sqlite.test.js` run the SQLite/CSV fixture under local and source placement, compare rows, evidence and output counts, and check decimal fallback/refusal. Both pass locally on ARM (CPython 3.12, Node 24.22.2); Python CI explicitly includes the new module and Node discovers the new test. Hosted x86 results for these tests still need CI, as do the full pinned interpreter/Node and architecture matrices. |
 | Both hosted architectures pass at the same commit | Unverified | Local ARM results only. The x86 pass needs GitHub Actions. |
+
+Source placement checks field byte limits across all projected TEXT values in the
+table, along with identity, nullability and storage classes. Text formats and
+valid UTF-8 cover scanned records only; invalid UTF-8 in a dropped record may pass
+under source placement while failing locally. Full bound validation reports that
+same coverage rather than claiming every row was decoded. Outgoing one-to-one
+and one-to-many relationships prevent anchor filtering. Static validation uses an
+iterative depth preflight (maximum 18 including feature references) before
+expansion or recursive typing; pushdown has a 500-bound-parameter cap.
+
+Local ARM verification of the uncommitted slice 3 fixes:
+
+- `cargo fmt --check`: passed.
+- `cargo test --locked --test sqlite --test sqlite_adversarial`: 18 + 21 passed,
+  zero ignored, including the 2 MiB stack regressions.
+- `CARGO_BUILD_JOBS=1 cargo test --locked`: 302 passed, zero failed or ignored.
+- CPython 3.12.16: native plain Linux aarch64 development wheel built and
+  installed; `python_acceptance`, `python_handles`, `python_cancellation` and
+  `python_sqlite`: 41 passed, including falsy placement rejection.
+- Node 24.22.2: native aarch64 addon built; 12 tests passed, zero skipped;
+  strict TypeScript checks passed.
+
+The old full-validation assertion that every coverage string contained “rows”
+was replaced with a check that validation preserves execution's actual coverage
+(records, intervals and placement scope). Interrupted concurrent build attempts
+are not counted as passes. No hosted check at this working-tree state has been
+established. CPython 3.13, Node 22 and the 100,000-line workload were not
+rerun locally in this defect-fix session. Hosted ARM/x86, CPython 3.12/3.13
+and Node 22/24 gates remain pending at the eventual commit.
 
 ## Closed in this ticket
 

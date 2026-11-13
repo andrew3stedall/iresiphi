@@ -12,7 +12,7 @@ PY
 python -m venv /tmp/clean-venv
 /tmp/clean-venv/bin/python -m pip install --no-index --no-deps /dist/*"$abi"*.whl
 cd /tests
-/tmp/clean-venv/bin/python -m unittest -v python_acceptance python_handles python_cancellation
+/tmp/clean-venv/bin/python -m unittest -v python_acceptance python_handles python_cancellation python_sqlite
 /tmp/clean-venv/bin/python - <<'PY'
 import iresiphi
 print('Installed module:', iresiphi.__file__)

@@ -47,9 +47,17 @@ at `72ffd6c` is counted as a pass.
 [docs/spec/slice-3.md](spec/slice-3.md) adds a SQLite table as a source and lets an
 output's anchor eligibility run at that source under `policy.placement`
 ([sqlite.md](sqlite.md)). It is implemented with tests in `tests/sqlite.rs`. The
-Python builder and the Node type declarations accept the new adapter and policy
-field; neither binding has its own SQLite test yet. Hosted ARM and x86 passes at
-the same commit are required before this counts as passing.
+Python and Node suites exercise the SQLite/CSV fixture through validate, explain
+and run, including placement parity and decimal fallback/refusal. The Rust
+adversarial suite covers anchor relationship guards, field byte limits, unknown
+collations, parameter limits, validation coverage, UTF-16, generated rowid
+shadowing and safe static expression depth. UTF-8 validation covers scanned text
+only under source placement, as disclosed in the contract and manifest.
+
+Local ARM verification of these uncommitted fixes is recorded in
+[unmet.md](measurements/unmet.md). Hosted ARM and x86 passes at the same commit,
+including pinned Python/Node matrices, remain pending; local results do not
+establish release acceptance. Slice 4 remains specification work only.
 
 ## Remaining scope
 

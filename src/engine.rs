@@ -487,7 +487,7 @@ fn execute(
         String::new()
     } else {
         format!(
-            "; {pushed_sources} sources evaluated an eligibility predicate, so text formats and lookups cover their scanned records only"
+            "; {pushed_sources} sources evaluated an eligibility predicate, so text checks (date text, decimal text, and valid UTF-8) and lookups cover their scanned records only"
         )
     };
     progress.pass(
