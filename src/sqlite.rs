@@ -21,11 +21,58 @@ pub(super) struct Scan {
 }
 
 fn sql_error(e: rusqlite::Error) -> Error {
-    err("INVALID_SQLITE", e.to_string())
+    if e.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted) {
+        err("CANCELLED", "SQLite query cancelled")
+    } else {
+        err("INVALID_SQLITE", e.to_string())
+    }
+}
+
+/// Keep the borrowed cancellation flag alive until SQLite's callback is removed.
+/// The connection executes synchronously and is never shared across threads.
+struct QueryCancellation<'a> {
+    conn: &'a Connection,
+    _cancel: &'a AtomicBool,
+}
+impl<'a> QueryCancellation<'a> {
+    fn install(conn: &'a Connection, cancel: &'a AtomicBool) -> Self {
+        unsafe extern "C" fn cancelled(data: *mut std::ffi::c_void) -> std::ffi::c_int {
+            // SAFETY: install borrows the flag for the guard's lifetime; Drop
+            // removes the callback before either borrow can end.
+            unsafe { (&*data.cast::<AtomicBool>()).load(Ordering::Relaxed) as _ }
+        }
+        // SAFETY: the callback does not unwind, and the flag remains borrowed
+        // until the callback is removed in Drop. These guards are not nested.
+        unsafe {
+            rusqlite::ffi::sqlite3_progress_handler(
+                conn.handle(),
+                1000,
+                Some(cancelled),
+                std::ptr::from_ref(cancel).cast_mut().cast(),
+            );
+        }
+        Self {
+            conn,
+            _cancel: cancel,
+        }
+    }
+}
+impl Drop for QueryCancellation<'_> {
+    fn drop(&mut self) {
+        // SAFETY: the connection is still borrowed and no query outlives this guard.
+        unsafe {
+            rusqlite::ffi::sqlite3_progress_handler(
+                self.conn.handle(),
+                0,
+                None,
+                std::ptr::null_mut(),
+            );
+        }
+    }
 }
 
 /// Open the bytes read as a read-only in-memory database.
-fn open(bytes: &[u8]) -> Result<Connection> {
+pub(super) fn open(bytes: &[u8]) -> Result<Connection> {
     if bytes.is_empty() {
         return Err(err("INVALID_SQLITE", "the database file is empty"));
     }
@@ -91,7 +138,7 @@ fn table<'a>(conn: &Connection, source: &'a Source, binding: &Binding) -> Result
         Some(_) => {}
     }
     let mut info = conn
-        .prepare("SELECT name FROM pragma_table_info(?1)")
+        .prepare("SELECT name FROM pragma_table_xinfo(?1)")
         .map_err(sql_error)?;
     let present: BTreeSet<String> = info
         .query_map([&name], |r| r.get(0))
@@ -132,8 +179,31 @@ fn table<'a>(conn: &Connection, source: &'a Source, binding: &Binding) -> Result
 
 /// Bound validation's schema inspection: the table and each declared column
 /// exist. No record is read.
-pub(super) fn inspect(source: &Source, binding: &Binding, bytes: &[u8]) -> Result<()> {
-    table(&open(bytes)?, source, binding).map(|_| ())
+pub(super) fn inspect(
+    source: &Source,
+    binding: &Binding,
+    bytes: &[u8],
+    required: Option<&Pushed>,
+) -> Result<()> {
+    let conn = open(bytes)?;
+    inspect_connection(source, binding, &conn, required)
+}
+pub(super) fn inspect_connection(
+    source: &Source,
+    binding: &Binding,
+    conn: &Connection,
+    required: Option<&Pushed>,
+) -> Result<()> {
+    table(conn, source, binding)?;
+    if let Some(pushed) = required {
+        let encoding: String = conn
+            .query_row("PRAGMA encoding", [], |r| r.get(0))
+            .map_err(sql_error)?;
+        if encoding != "UTF-8" {
+            return Err(Error::new("PLACEMENT_INFEASIBLE", "source", format!("policy placement require_source cannot be met for {}: the database stores text as {encoding}", pushed.stage)).with_subject(pushed.stage.clone()).with_remediation("Use placement prefer_source or local; the policy is not overridden."));
+        }
+    }
+    Ok(())
 }
 
 /// The SQL storage classes a declared type accepts, as `typeof` names them.
@@ -152,14 +222,41 @@ fn storage_classes(field: &Field) -> Vec<&'static str> {
 /// Checks a pushed scan would otherwise skip for the records it does not read:
 /// identity presence and uniqueness, nullability and storage classes, over
 /// every record of the table. Returns why the scan must stay local, if it must.
-fn source_checks(conn: &Connection, source: &Source, table: &Table<'_>) -> Result<Option<String>> {
+#[derive(Clone)]
+pub(super) enum Fallback {
+    Encoding(String),
+    Data(String),
+}
+impl Fallback {
+    pub(super) fn is_encoding(&self) -> bool {
+        matches!(self, Self::Encoding(_))
+    }
+    pub(super) fn reason(&self) -> &str {
+        match self {
+            Self::Encoding(reason) | Self::Data(reason) => reason,
+        }
+    }
+}
+impl std::fmt::Display for Fallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.reason())
+    }
+}
+
+fn source_checks(
+    conn: &Connection,
+    source: &Source,
+    table: &Table<'_>,
+    limits: &Limits,
+    cancel: &AtomicBool,
+) -> Result<Option<Fallback>> {
     let encoding: String = conn
         .query_row("PRAGMA encoding", [], |r| r.get(0))
         .map_err(sql_error)?;
     if encoding != "UTF-8" {
-        return Ok(Some(format!(
+        return Ok(Some(Fallback::Encoding(format!(
             "the database stores text as {encoding}; bytewise text comparison at the source would not match the local executor's"
-        )));
+        ))));
     }
     let name = quoted(&table.name);
     let mut violations = vec![];
@@ -172,9 +269,13 @@ fn source_checks(conn: &Connection, source: &Source, table: &Table<'_>) -> Resul
             .collect::<Vec<_>>()
             .join(", ");
         violations.push(format!("typeof({column}) NOT IN ({classes})"));
+        violations.push(format!(
+            "(typeof({column}) = 'text' AND length(CAST({column} AS BLOB)) > {})",
+            limits.field_bytes
+        ));
         if declared.data_type == Type::Boolean {
             violations.push(format!(
-                "({column} IS NOT NULL AND +{column} NOT IN (0, 1))"
+                "({column} IS NOT NULL AND +{column} COLLATE BINARY NOT IN (0, 1))"
             ));
         }
         if source.identity.contains(*field) {
@@ -193,9 +294,55 @@ fn source_checks(conn: &Connection, source: &Source, table: &Table<'_>) -> Resul
         )
         .map_err(sql_error)?;
     if violating > 0 {
-        return Ok(Some(format!(
-            "{violating} records fail a source-side identity, nullability or storage-class check; the whole table is read locally to diagnose them"
-        )));
+        return Ok(Some(Fallback::Data(format!(
+            "{violating} records fail a source-side identity, nullability, field_bytes or storage-class check; the whole table is read locally to diagnose them"
+        ))));
+    }
+    // A from table may have a decimal identity even though reduction keys and
+    // target identities cannot. Check that identity with the executor's exact
+    // conversion rather than grouping decimal spellings in SQLite.
+    if source
+        .identity
+        .iter()
+        .any(|id| matches!(source.projection.fields[id].data_type, Type::Decimal { .. }))
+    {
+        let selected = source
+            .identity
+            .iter()
+            .map(|id| quoted(column(&source.projection.fields[id])))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut statement = conn
+            .prepare(&format!("SELECT {selected} FROM {name}"))
+            .map_err(sql_error)?;
+        let mut records = statement.query([]).map_err(sql_error)?;
+        let mut seen = BTreeSet::new();
+        while let Some(record) = records.next().map_err(sql_error)? {
+            check_cancel(cancel)?;
+            let mut key = Vec::new();
+            for (i, id) in source.identity.iter().enumerate() {
+                let (value, _) = convert(
+                    record.get_ref(i).map_err(sql_error)?,
+                    &source.projection.fields[id],
+                    limits,
+                )?;
+                match value {
+                    Ok(value) => key.push(value),
+                    Err(_) => {
+                        return Ok(Some(Fallback::Data(
+                            "identity requires local value diagnostics".into(),
+                        )));
+                    }
+                }
+            }
+            if !seen.insert(serde_json::to_string(&key).map_err(io_error)?) {
+                return Ok(Some(Fallback::Data(
+                    "records share an identity; the whole table is read locally to diagnose them"
+                        .into(),
+                )));
+            }
+        }
+        return Ok(None);
     }
     if !identity.is_empty() {
         let mut duplicated = conn
@@ -205,10 +352,10 @@ fn source_checks(conn: &Connection, source: &Source, table: &Table<'_>) -> Resul
             ))
             .map_err(sql_error)?;
         if duplicated.exists([]).map_err(sql_error)? {
-            return Ok(Some(
+            return Ok(Some(Fallback::Data(
                 "records share an identity; the whole table is read locally to diagnose them"
                     .into(),
-            ));
+            )));
         }
     }
     Ok(None)
@@ -270,25 +417,29 @@ fn convert(
 pub(super) fn read(
     source: &Source,
     binding: &Binding,
-    bytes: &[u8],
+    conn: &Connection,
     reference: &SourceReference,
     policy: &Policy,
     cancel: &AtomicBool,
     pushed: Option<&Pushed>,
+    group_fallback: Option<&Fallback>,
 ) -> Result<Scan> {
-    let conn = open(bytes)?;
+    let _cancellation = QueryCancellation::install(conn, cancel);
     let table = table(&conn, source, binding)?;
     let name = quoted(&table.name);
-    let fallback = match pushed {
-        Some(_) => source_checks(&conn, source, &table)?,
-        None => None,
+    let fallback = match group_fallback {
+        Some(reason) => Some(reason.clone()),
+        None => match pushed {
+            Some(_) => source_checks(&conn, source, &table, &policy.limits, cancel)?,
+            None => None,
+        },
     };
     if let (Some(reason), Placement::RequireSource, Some(pushed)) =
         (&fallback, policy.placement, pushed)
     {
         // Check failures are diagnosed by the local read below; an encoding the
         // source cannot compare in is a placement the policy forbids.
-        if reason.starts_with("the database stores text") {
+        if reason.is_encoding() {
             return Err(Error::new(
                 "PLACEMENT_INFEASIBLE",
                 "source",
@@ -320,7 +471,7 @@ pub(super) fn read(
     let rowid = table.rowid;
     let mut statement = conn
         .prepare(&format!(
-            "SELECT {rowid}, {selected} FROM {name}{condition} ORDER BY {rowid}"
+            "SELECT {rowid}, {selected} FROM {name} AS iresiphi_target{condition} ORDER BY {rowid}"
         ))
         .map_err(sql_error)?;
     let parameters = filter
@@ -373,14 +524,16 @@ pub(super) fn read(
                 "identity": "full: every record, at the source",
                 "nullability": "full: every record, at the source",
                 "storage_classes": "full: every record, at the source",
-                "text_formats": "scanned records only",
-                "lookups": "scanned records only",
+                "field_bytes": "full: every record, at the source",
+                "boolean_values": "full: every record, at the source",
+                "text_formats": "date text, decimal text, and valid UTF-8: scanned records only",
+                "lookups": if p.stage.starts_with("relationship:") { "full: every delivered from record; target reduction preserves all candidates" } else { "scanned records only" },
             },
         }),
         Some(reason) => serde_json::json!({
             "scan": "local",
             "operation": p.stage,
-            "reason": reason,
+            "reason": reason.reason(),
         }),
     });
     Ok(Scan {
@@ -388,4 +541,70 @@ pub(super) fn read(
         total_rows: usize::try_from(total_rows).unwrap_or(usize::MAX),
         placement,
     })
+}
+
+/// Preflight without delivering or charging decoded records.
+pub(super) fn preflight(
+    conn: &Connection,
+    source: &Source,
+    binding: &Binding,
+    policy: &Policy,
+    cancel: &AtomicBool,
+) -> Result<Option<Fallback>> {
+    let _cancellation = QueryCancellation::install(conn, cancel);
+    let table = table(conn, source, binding)?;
+    source_checks(conn, source, &table, &policy.limits, cancel)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_interrupts_a_query_before_it_delivers_a_record() {
+        let conn = Connection::open_in_memory().unwrap();
+        let cancel = AtomicBool::new(true);
+        let query = "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000) SELECT sum(x) FROM n";
+        {
+            let _guard = QueryCancellation::install(&conn, &cancel);
+            let error = conn
+                .query_row(query, [], |row| row.get::<_, i64>(0))
+                .unwrap_err();
+            assert_eq!(sql_error(error).code, "CANCELLED");
+        }
+        // The callback must not retain its borrowed flag after the guard ends.
+        assert_eq!(
+            conn.query_row(query, [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            50_005_000
+        );
+    }
+
+    #[test]
+    fn decimal_identity_preflight_observes_cancellation() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE items (id TEXT); INSERT INTO items VALUES ('1.00'), ('2.00')",
+        )
+        .unwrap();
+        let source: Source = serde_json::from_value(serde_json::json!({
+            "id":"items", "identity":["id"], "grain":["id"],
+            "projection":{"fields":{"id":{"path":"id","data_type":{"kind":"decimal","precision":10,"scale":2}}}}
+        })).unwrap();
+        let binding: Binding = serde_json::from_value(serde_json::json!({
+            "adapter":"sqlite", "path":"unused.sqlite", "settings":{"table":"items"}
+        }))
+        .unwrap();
+        let table = table(&conn, &source, &binding).unwrap();
+        match source_checks(
+            &conn,
+            &source,
+            &table,
+            &Limits::default(),
+            &AtomicBool::new(true),
+        ) {
+            Err(error) => assert_eq!(error.code, "CANCELLED"),
+            Ok(_) => panic!("decimal identity scan ignored cancellation"),
+        }
+    }
 }

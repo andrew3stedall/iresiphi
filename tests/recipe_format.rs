@@ -789,6 +789,12 @@ fn bound_validation_distinguishes_none_and_full_coverage() {
     }
     let full = validate_bound(&recipe, &bindings, &policy, "full");
     assert!(full.valid, "{full:?}");
+    let run = iresiphi::ExecutionContext::default().run(
+        &recipe,
+        &bindings,
+        &policy,
+        &std::sync::atomic::AtomicBool::new(false),
+    );
     for id in [
         "data",
         "data.types",
@@ -797,7 +803,24 @@ fn bound_validation_distinguishes_none_and_full_coverage() {
         "data.rate_validity",
     ] {
         assert_eq!(check(&full, id).status, "passed", "{id}");
-        assert!(check(&full, id).coverage.contains("rows"), "{id}");
+        if id == "data" {
+            assert!(check(&full, id).coverage.contains("source rows"));
+        } else {
+            // Coverage is the execution check's actual scope (records or
+            // intervals), not a blanket promise to decode every source row.
+            let executed = run.manifest["check_results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"] == id)
+                .unwrap();
+            assert_eq!(
+                check(&full, id).coverage,
+                executed["coverage"].as_str().unwrap(),
+                "{id}"
+            );
+            assert!(check(&full, id).coverage.starts_with("full:"), "{id}");
+        }
     }
     // Static validity does not imply data correctness: a duplicate identity
     // passes static and none-mode validation but fails the full scan.

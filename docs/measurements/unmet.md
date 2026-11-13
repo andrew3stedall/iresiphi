@@ -46,14 +46,42 @@ Two choices take the stricter reading of the contract:
 
 ## Slice 3: SQLite source and placement
 
-The contract is [docs/spec/slice-3.md](../spec/slice-3.md); [docs/sqlite.md](../sqlite.md) describes the behaviour. Every clause is implemented and covered by `tests/sqlite.rs`, except as listed here.
+The contract is [docs/spec/slice-3.md](../spec/slice-3.md); [docs/sqlite.md](../sqlite.md) describes the behaviour. Rust coverage is in `tests/sqlite.rs` and `tests/sqlite_adversarial.rs`, with binding coverage in Python and Node. Remaining limitations and evidence are listed here.
 
 | Clause | Status | Reason |
 | --- | --- | --- |
-| SQLite source 7: cancellation is checked between records | Unverified | The reader checks before the row count and before each record. No test cancels a run during a SQLite scan. |
-| Placement 4: a database that is not UTF-8 is read locally | Unverified | Implemented from `PRAGMA encoding`. No test builds a UTF-16 database. |
-| Ticket 2: the placement half of the fixture through Python and Node | Unmet | `iresiphi.build.policy` takes `placement`, `binding` takes the `sqlite` adapter, and the Node declarations type both. Neither binding has a test that runs the fixture. |
-| Both hosted architectures pass at the same commit | Unverified | Local ARM results only. The x86 pass needs GitHub Actions. |
+| SQLite source 7: cancellation is checked between records | Met at `61c5e0c` | `tests/sqlite.rs` cancels during a SQLite scan and asserts `CANCELLED`. |
+| Placement 4: a database that is not UTF-8 is read locally | Met at `61c5e0c` | `tests/sqlite.rs` and `tests/sqlite_adversarial.rs` build UTF-16 databases and check local fallback and `require_source` refusal in run and bound validation. Explain opens no source, so encoding is checked only at access time. |
+| Ticket 2: the placement half of the fixture through Python and Node | Met at `61c5e0c` | `tests/python_sqlite.py` and `bindings/node/test/sqlite.test.js` run the SQLite/CSV fixture under local and source placement, compare rows, evidence and output counts, and check decimal fallback/refusal. Both pass locally on ARM (CPython 3.12, Node 24.22.2); Python CI explicitly includes the new module and Node discovers the new test. All pinned interpreter/Node and architecture matrices passed in hosted run 43424967912. |
+| Both hosted architectures pass at the same commit | Met at `61c5e0c` | [Run 43424967912](https://github.com/andrew3stedall/iresiphi/actions/runs/43424967912) passed all eight jobs, including ARM and x86 Rust, workload, Python and Node gates. |
+
+Source placement checks field byte limits across all projected TEXT values in the
+table, along with identity, nullability and storage classes. Text formats and
+valid UTF-8 cover scanned records only; invalid UTF-8 in a dropped record may pass
+under source placement while failing locally. Full bound validation reports that
+same coverage rather than claiming every row was decoded. Outgoing one-to-one
+and one-to-many relationships prevent anchor filtering. Static validation uses an
+iterative depth preflight (maximum 18 including feature references) before
+expansion or recursive typing; pushdown has a 500-bound-parameter cap.
+
+Local ARM verification of the slice 3 fixes later committed at `c514682`:
+
+- `cargo fmt --check`: passed.
+- `cargo test --locked --test sqlite --test sqlite_adversarial`: 18 + 21 passed,
+  zero ignored, including the 2 MiB stack regressions.
+- `CARGO_BUILD_JOBS=1 cargo test --locked`: 302 passed, zero failed or ignored.
+- CPython 3.12.16: native plain Linux aarch64 development wheel built and
+  installed; `python_acceptance`, `python_handles`, `python_cancellation` and
+  `python_sqlite`: 41 passed, including falsy placement rejection.
+- Node 24.22.2: native aarch64 addon built; 12 tests passed, zero skipped;
+  strict TypeScript checks passed.
+
+The old full-validation assertion that every coverage string contained “rows”
+was replaced with a check that validation preserves execution's actual coverage
+(records, intervals and placement scope). Interrupted concurrent build attempts
+are not counted as passes. CPython 3.13, Node 22 and the 100,000-line workload
+were not rerun locally in that defect-fix session. The later integrated commit
+`61c5e0c` passed the full hosted matrices; see the evidence record below.
 
 ## Closed in this ticket
 
@@ -82,4 +110,41 @@ These gaps from earlier tickets were fixed, with tests in `tests/preview.rs` and
 | Node contract clause | Status | Reason |
 | --- | --- | --- |
 | 6: customer/month parity golden | Met | `bindings/node/test/customer_month.test.js` compares against the shared golden and the fixed acceptance numbers. |
-| 7: both hosted architectures pass at the same commit | Unverified | The workflow builds and tests pinned Node 22.16.0 and 24.11.1 on hosted x86_64 and aarch64. This implementation session cannot establish a hosted pass; the coordinator must run CI after pushing. Local Node 24 ARM evidence does not replace any of these four gates. |
+| 7: both hosted architectures pass at the same commit | Met at `61c5e0c` | Node 22.16.0 and 24.11.1 passed addon and strict TypeScript checks on hosted x86_64 and aarch64 in run 43424967912. |
+
+## Slice 4: shared SQLite snapshots and lookup target reduction
+
+The implementation follows [slice 4](../spec/slice-4.md). Co-located bindings
+share one byte read, fingerprint, input-byte charge and in-memory database under
+every placement; settings and read-policy admission remain independent. The
+SQLite capabilities now declare `relationship_target_reduction` and exact-path
+co-location. Explain remains source-free. Target placement and check coverage
+appear in the source manifest and bound data validation.
+
+Rust tests cover the seven-order/five-customer acceptance fixture, reversed
+source declarations, exact path spellings and copied files, second target use,
+decimal fallback, null and duplicate keys, compound keys, NOCASE and NUMERIC
+affinity, Boolean keys, unfiltered from scans, strict ambiguity, sibling target
+reduction and whole-group fallback, UTF-16 refusal, malformed UTF-8 coverage,
+exact decimal from identities, alias collisions, and row/batch/retention/input
+budgets. Python and Node include the same-database acceptance fixture.
+
+Native ARM verification at `288b244`: `cargo test --locked` passed 310 tests;
+the installed CPython 3.12.16 wheel passed 42 tests; the Node 24.22.2 addon
+passed 13 tests and strict TypeScript. A first Node build attempt failed with
+host ENOSYS/libuv errors; a subsequent native build and tests passed.
+Review follow-ups add cancellation inside decimal-identity preflight, typed
+encoding fallback reasons, a scoped SQLite query progress callback, materialized
+key membership, and separate text/lookup coverage. Focused verification passed
+27 SQLite integration tests and two deterministic cancellation unit tests. A
+query-plan regression verifies LIST SUBQUERY without a correlated subquery.
+The first full Rust rerun after review hit host ENOSYS/futex failures; it is not
+counted as a pass. Final local Rust and Python rebuild attempts also encountered
+host syscall failures, while the rebuilt Node addon suite passed. Error precedence across independent faults is now explicitly
+disclosed in the slice 4 contract and guide.
+These local results do not establish hosted acceptance at the final commit.
+Hosted verification at `61c5e0cd781df4ff871c720bb4044b7731166932` passed all eight
+jobs: ARM and x86 Rust/workloads, CPython 3.12/3.13, Node 22/24, x86 wheel
+audits and clean-image installs. The [evidence record](ci-x86.md#slice-3-fixes-and-slice-4-verified-on-both-architectures)
+links run 43424967912 and artifact identities. Later heads require their own checks.
+No x86 workload was run locally.

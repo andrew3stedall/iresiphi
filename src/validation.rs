@@ -160,6 +160,7 @@ fn unsupported_aggregate(function: &str) -> Error {
     )
 }
 pub fn expression_type(e: &Expr, r: &Recipe) -> Result<Option<Type>> {
+    expression_depth(e, r)?;
     infer(e, r, &mut BTreeSet::new())
 }
 fn infer(e: &Expr, r: &Recipe, visiting: &mut BTreeSet<String>) -> Result<Option<Type>> {
@@ -1527,7 +1528,64 @@ fn check_outputs(r: &Recipe) -> Result<()> {
     }
     Ok(())
 }
+/// Conservative bound for recursive typing on an ordinary 2 MiB host thread.
+/// Check iteratively before expansion (which clones expressions) or validation.
+pub(crate) const EXPRESSION_DEPTH: usize = 18;
+
+fn expression_depth(e: &Expr, r: &Recipe) -> Result<()> {
+    let mut pending = vec![(e, 0, Vec::<&str>::new())];
+    while let Some((expr, depth, mut features)) = pending.pop() {
+        if depth > EXPRESSION_DEPTH {
+            return Err(error(
+                "EXPRESSION_DEPTH",
+                "expression exceeds the maximum depth of 18 (including feature references)",
+            ));
+        }
+        if let Expr::Feature { id } = expr {
+            // Leave cycles to the existing cycle diagnostic.
+            if !features.contains(&id.as_str()) {
+                if let Some(f) = r.features.iter().find(|f| f.id == *id) {
+                    features.push(id);
+                    pending.push((&f.expr, depth + 1, features));
+                }
+            }
+        } else {
+            for child in children(expr) {
+                pending.push((child, depth + 1, features.clone()));
+            }
+        }
+    }
+    Ok(())
+}
+fn check_expression_depth(r: &Recipe) -> Result<()> {
+    let mut roots: Vec<&Expr> = r.features.iter().map(|f| &f.expr).collect();
+    roots.extend(r.populations.iter().filter_map(|p| p.filter.as_ref()));
+    for o in &r.outputs {
+        roots.extend(o.columns.iter().map(|c| &c.expr));
+        roots.extend(o.eligibility.iter().chain(o.filter.iter()));
+        for a in &o.aggregates {
+            roots.push(&a.expr);
+            roots.extend(a.filter.iter());
+        }
+        for a in &o.allocations {
+            roots.push(&a.weight);
+            roots.extend(a.recipient_filter.iter());
+        }
+    }
+    for root in roots {
+        expression_depth(root, r)?;
+    }
+    Ok(())
+}
 fn static_report(r: &Recipe) -> Vec<Check> {
+    if let Err(e) = check_expression_depth(r) {
+        return vec![Check {
+            id: "expressions".into(),
+            status: "failed".into(),
+            coverage: "iterative expression depth preflight; no source data read".into(),
+            diagnostic: Some(e.with_check("expressions").completed()),
+        }];
+    }
     let r = &expand(r);
     let mut failed = false;
     STAGES
@@ -1553,6 +1611,7 @@ fn static_report(r: &Recipe) -> Vec<Check> {
         .collect()
 }
 fn static_checks(r: &Recipe) -> Result<()> {
+    check_expression_depth(r)?;
     let r = &expand(r);
     for (_, _, stage) in STAGES {
         stage(r)?;
@@ -1852,6 +1911,9 @@ fn sorted<'a, T>(items: &'a [T], id: impl Fn(&T) -> &str) -> Vec<&'a T> {
 /// Logical explanation with stable declaration IDs. It never opens sources,
 /// runs data checks or claims a cost optimum.
 pub fn explain(declared: &Recipe) -> Json {
+    if let Err(e) = check_expression_depth(declared) {
+        return json!({"valid": false, "diagnostic": e.completed()});
+    }
     let r = &expand(declared);
     let mut nodes = vec![];
     let mut unsupported = vec![];
@@ -2370,7 +2432,14 @@ pub fn validate_bound(
             let (status, coverage, diagnostic) = if passed {
                 (
                     "passed",
-                    format!("full: every row of every selected source; source rows {rows}"),
+                    run.manifest["check_results"]
+                        .as_array()
+                        .and_then(|checks| checks.iter().find(|check| check["id"] == id))
+                        .and_then(|check| check["coverage"].as_str())
+                        .unwrap_or(
+                            "complete selected materialization; see source placement coverage",
+                        )
+                        .to_string(),
                     None,
                 )
             } else if failed_category == Some(id) {
@@ -2406,7 +2475,10 @@ pub fn explain_bound(recipe: &Recipe, bindings: &Bindings, policy: &Policy) -> J
     if lenient.placement == Placement::RequireSource {
         lenient.placement = Placement::PreferSource;
     }
-    let plan = crate::placement::plan(recipe, bindings, &lenient).unwrap_or_default();
+    let mut plan = crate::placement::plan(recipe, bindings, &lenient).unwrap_or_default();
+    for decision in &mut plan.decisions {
+        decision["policy"] = json!(policy.placement);
+    }
     explanation["bound"] = json!({
         "feasible": feasibility.is_ok(),
         "diagnostic": feasibility.err(),
@@ -2416,7 +2488,7 @@ pub fn explain_bound(recipe: &Recipe, bindings: &Bindings, policy: &Policy) -> J
             "adapter": bindings.get(&source.id).map(|b| &b.adapter),
             "capabilities": bindings.get(&source.id).map(|b| crate::adapters::adapter_capabilities(&b.adapter)),
             "location": "local",
-            "scan": if plan.pushed.contains_key(&source.id) { "filtered at the source" } else { "every record" },
+            "scan": if let Some(from) = plan.reductions.get(&source.id) { format!("reduced at the source to keys of `{from}`") } else if plan.pushed.contains_key(&source.id) { "filtered at the source".into() } else { "every record".into() },
             "rows": null,
             "bytes": null,
             "estimate_status": "unknown",

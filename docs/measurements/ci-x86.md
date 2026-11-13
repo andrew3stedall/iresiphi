@@ -77,3 +77,31 @@ hard RSS ceiling or a fixed latency.
 Workflow artifacts expire according to GitHub's retention policy. Before any
 publication, retain the exact release commit's artifacts durably and recheck
 registry names and account ownership. No package publication is automated here.
+
+
+## Slice 3 fixes and slice 4: verified on both architectures
+
+[PR #34](https://github.com/andrew3stedall/iresiphi/pull/34), commit
+`61c5e0cd781df4ff871c720bb4044b7731166932`, passed all eight jobs in
+[run 43424967912](https://github.com/andrew3stedall/iresiphi/actions/runs/43424967912)
+on 2026-11-13. Both native ARM and x86 jobs passed the complete Rust suite,
+formatting, dependency notices and 100,000-line workload with cancellation.
+Installed CPython 3.12 and 3.13 wheels passed on both architectures. Node
+22.16.0 and 24.11.1 each passed addon and strict TypeScript tests on ARM and x86.
+The x86 packaging job built wheels from the sdist, audited them for
+manylinux_2_28, and tested offline installs on glibc 2.28. Terraform validation
+also passed. No x86 workload ran locally, and no packages were published.
+
+The run retained these artifacts, all tied to that exact commit:
+
+| Artifact | ID | SHA-256 digest |
+| --- | --- | --- |
+| x86-distributions | 14037748443 | `ab88cefbb54d47fe57896bf5e75815cc00b296f70afbff4a2fd7424733db614d` |
+| x86-workload | 14037580031 | `0851e09642a55c94a8e56be194911125468c392b55920f09bc153d2842d4ba10` |
+| arm-workload (including installed ARM wheels) | 14037470633 | `218bfbe2888f3025c991335083bd00f28ca0864641f8ed2c0a5539dabb652b2d` |
+
+GitHub reports an expiry of 2027-02-11 for these artifacts. They must be retained
+durably before publication. Local ENOSYS/futex failures during later development
+runs were not counted as passes; this hosted run supplies verification for the
+reviewed implementation. Evidence for this commit does not certify later heads;
+their own PR checks remain authoritative under [the CI rules](../ci.md).

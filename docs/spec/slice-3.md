@@ -46,24 +46,26 @@ Expected, through the public validate/explain/run seam:
 1. The policy gains `placement`, one of:
    - `local` (the default): every operation runs in the local executor. Existing policies mean this, and existing results do not change.
    - `prefer_source`: an operation runs at its source where this contract allows it, and locally otherwise. Explain states which, and why.
-   - `require_source`: every output's eligibility on a source that supports pushdown must run at the source. If one cannot, validation, explain and run report `PLACEMENT_INFEASIBLE`, naming the blocked operation, the reason and the alternative (`prefer_source` or `local`). Nothing is opened first, and the policy is never overridden.
+   - `require_source`: every output's eligibility on a source that supports pushdown must run at the source. If one cannot, validation, explain and run report `PLACEMENT_INFEASIBLE`, naming the blocked operation, the reason and the alternative (`prefer_source` or `local`). Recipe/binding infeasibility is reported before opening any source. Data-dependent encoding infeasibility is reported when bound validation or run inspects the database; explain opens nothing. The policy is never overridden.
 2. One operation can be placed at a source in this slice: an output's anchor eligibility predicate, as a filter on the anchor source's scan. Aggregation, joins, allocation and output filters always run locally.
 3. Placement is negotiated against the exact predicate, not against a "supports filters" flag. A predicate is pushed only when all of these hold:
    - The anchor source's adapter declares filter pushdown (in this slice, `sqlite`).
-   - The source has exactly one use in the recipe: it is the anchor of this one output. It is not the target of a relationship, the anchor of another output, the recipient or period source of a population, or the quantity source of an allocation. Otherwise other operations need the rows the filter would drop.
+   - The source has exactly one use in the recipe: it is the anchor of this one output. It is not the target of a relationship, the anchor of another output, the recipient or period source of a population, or the quantity source of an allocation. Outgoing one-to-one and one-to-many relationships also keep the filter local: shared-target ambiguity and detail-parent checks need every anchor record. Otherwise other operations need the rows the filter would drop.
    - The predicate reads only fields of the anchor source, with no relationship path, feature, aggregate or arithmetic.
    - The source's identity has no `decimal` field. SQLite cannot check a decimal identity's uniqueness exactly, and that check must cover every record.
    - The predicate uses only `equal`, `less`, `less_equal`, `and`, `or`, `not`, `is_null`, fields and literals, over `int64`, `string`, `date` and `boolean` values. SQLite compares these exactly as the local executor does: integers numerically, text and ISO dates bytewise, null as unknown, and only true keeps a row.
    - No comparison involves a `decimal`. SQLite would compare decimal text bytewise or through a float, and neither is the recipe's exact numeric comparison. This is the semantic mismatch that rejects pushdown.
-4. Before a pushed scan, the source checks every row of the table, not only the rows the predicate keeps: identity columns are non-null and unique, non-nullable columns are non-null, and each column's storage classes are ones the declared type accepts. If any check fails, the run reads the whole table locally instead, so the diagnostic is the same one local placement gives. A database whose text encoding is not UTF-8 is also read locally, because its bytewise text order differs; under `require_source` that is `PLACEMENT_INFEASIBLE`.
+4. Before a pushed scan, the source checks every row of the table, not only the rows the predicate keeps: identity columns are non-null and unique, non-nullable columns are non-null, each column's storage classes are ones the declared type accepts, and every projected TEXT value fits `limits.field_bytes`. If any check fails, the run reads the whole table locally instead, so the diagnostic is the same one local placement gives. A database whose text encoding is not UTF-8 is also read locally, because its bytewise text order differs; under `require_source` that is `PLACEMENT_INFEASIBLE`.
 5. What a pushed predicate changes, all of it disclosed:
    - Rows scanned. The manifest reports the table's row count as `rows` and the rows that crossed into the executor as `scanned_rows`. Row limits apply to scanned rows.
-   - Text format checks (decimal and date text) cover scanned rows only.
+   - Text checks (decimal and date text formats, and valid UTF-8) cover scanned rows only. Invalid UTF-8 in a record dropped by the predicate is therefore diagnosed locally but may pass under source placement.
    - Lookup checks (unmatched, ambiguous, strict cardinality) cover scanned anchor records only. An ineligible order with an unknown customer produces a warning under local placement and nothing under source placement.
    The manifest's check coverage and the placement record say so. Output rows, values, evidence records and output counts (`source_rows`, `eligible_rows`, `output_rows`) do not change.
 6. Explain with bindings and a policy lists, per source, the placement of its scan and, per output eligibility, whether it is pushed, and if not, the first reason. It lists no transfers: nothing moves between environments in this slice. Explain opens no source.
 7. The run manifest records, per source, the placement that was used, the pushed predicate's stage ID, and the coverage of the source-side checks.
 8. Placement never changes a recipe's canonical JSON or hash. It is run policy, not recipe meaning.
+
+Static validation rejects expression depth above 18, including feature references, using an iterative preflight before cloning or recursive typing. Pushed predicates also have a conservative 500-parameter cap; larger predicates stay local (or fail under `require_source`).
 
 ## Out of scope
 

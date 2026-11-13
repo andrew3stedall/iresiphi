@@ -47,16 +47,43 @@ at `72ffd6c` is counted as a pass.
 [docs/spec/slice-3.md](spec/slice-3.md) adds a SQLite table as a source and lets an
 output's anchor eligibility run at that source under `policy.placement`
 ([sqlite.md](sqlite.md)). It is implemented with tests in `tests/sqlite.rs`. The
-Python builder and the Node type declarations accept the new adapter and policy
-field; neither binding has its own SQLite test yet. Hosted ARM and x86 passes at
-the same commit are required before this counts as passing.
+Python and Node suites exercise the SQLite/CSV fixture through validate, explain
+and run, including placement parity and decimal fallback/refusal. The Rust
+adversarial suite covers anchor relationship guards, field byte limits, unknown
+collations, parameter limits, validation coverage, UTF-16, generated rowid
+shadowing and safe static expression depth. UTF-8 validation covers scanned text
+only under source placement, as disclosed in the contract and manifest.
+
+Local ARM verification of the slice 3 fixes is recorded in
+[unmet.md](measurements/unmet.md). The integrated slice 3 fixes and slice 4 implementation passed all eight hosted
+checks at `61c5e0c`, including both architecture and runtime matrices; see the
+[verified run](measurements/ci-x86.md#slice-3-fixes-and-slice-4-verified-on-both-architectures).
+Slice 4 implementation is described below.
+
+## Slice 4: same-database lookup reduction
+
+[Slice 4](spec/slice-4.md) shares an independently admitted SQLite snapshot
+between bindings with byte-for-byte equal declared paths, under every placement.
+It adds many-to-one target reduction to the delivered from keys, including a
+pushed eligibility where applicable. Connected candidate groups finish their
+whole-table preflight before any filtered scan; a check failure falls the entire
+group back locally. Matching and evidence remain in the executor.
+
+The Rust acceptance and parity cases are in `tests/sqlite.rs`; Python and Node
+exercise the co-located fixture through their public validate/explain/run APIs.
+The manifest and bound validation disclose scanned-only target text checks.
+Hosted ARM/x86, pinned Python and Node matrices, workloads and packaging gates
+passed at `61c5e0c`. [The evidence record](measurements/ci-x86.md#slice-3-fixes-and-slice-4-verified-on-both-architectures)
+links the run and immutable artifact identities. Later heads require their own
+passing checks. Local evidence and remaining contract limitations are recorded
+in [unmet.md](measurements/unmet.md).
 
 ## Remaining scope
 
 The broad product specification
 [#1](https://github.com/andrew3stedall/iresiphi/issues/1) remains a roadmap
-umbrella. Later slices added Node bindings, allocation and a SQLite source with one
-pushdown operation. Still deferred: remote and dataframe connectors, other
+umbrella. Later slices added Node bindings, allocation and a SQLite source with eligibility filtering and same-database
+lookup target reduction. Still deferred: remote and dataframe connectors, other
 pushdown, transfers and hybrid execution, and other platforms. These
 require their own bounded delivery specifications; they are not claims of this
 preview.

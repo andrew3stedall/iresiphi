@@ -483,11 +483,30 @@ fn execute(
                     .is_some_and(|p| p["scan"] == "source")
         })
         .count();
-    let pushed_note = if pushed_sources == 0 {
+    let text_note = if pushed_sources == 0 {
         String::new()
     } else {
         format!(
-            "; {pushed_sources} sources evaluated an eligibility predicate, so text formats and lookups cover their scanned records only"
+            "; {pushed_sources} sources evaluated an eligibility predicate or relationship target reduction, so text checks (date text, decimal text, and valid UTF-8) cover their scanned records only"
+        )
+    };
+    let anchor_filters = progress
+        .reads
+        .values()
+        .filter(|read| {
+            read.placement.as_ref().is_some_and(|p| {
+                p["scan"] == "source"
+                    && p["operation"]
+                        .as_str()
+                        .is_some_and(|stage| stage.starts_with("output:"))
+            })
+        })
+        .count();
+    let lookup_note = if anchor_filters == 0 {
+        String::new()
+    } else {
+        format!(
+            "; {anchor_filters} sources evaluated an eligibility predicate, so lookups cover their scanned records only"
         )
     };
     progress.pass(
@@ -499,7 +518,7 @@ fn execute(
     );
     progress.pass(
         "data.types",
-        format!("full: every projected field of every record read; {rows_read} source records{pushed_note}"),
+        format!("full: every projected field of every record read; {rows_read} source records{text_note}"),
     );
     for source in &declared.sources {
         let rows = &sources[&source.id];
@@ -871,7 +890,7 @@ fn execute(
     }
     progress.pass(
         "data.relationships",
-        format!("full: declared cardinality of every lookup over every anchor record; no strict lookup was violated{pushed_note}"),
+        format!("full: declared cardinality of every lookup over every anchor record; no strict lookup was violated{lookup_note}"),
     );
     progress.pass(
         "lookup.cardinality",
@@ -879,7 +898,7 @@ fn execute(
     );
     progress.pass(
         "lookup.coverage",
-        format!("full: every anchor record of every lookup; {unmatched_anchors} anchor records unmatched{pushed_note}"),
+        format!("full: every anchor record of every lookup; {unmatched_anchors} anchor records unmatched{lookup_note}"),
     );
     diagnostics.extend(orphan_details(recipe, &sources, &matches));
     progress.pass(

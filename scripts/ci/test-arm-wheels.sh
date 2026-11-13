@@ -24,6 +24,6 @@ for minor in 12 13; do
   "$environment/bin/python" -m pip install --no-index --no-deps \
     "$evidence"/wheels/*cp3"$minor"*.whl
   (cd tests && "$environment/bin/python" -m unittest -v \
-    python_acceptance python_handles python_cancellation) \
+    python_acceptance python_handles python_cancellation python_sqlite) \
     2>&1 | tee "$evidence/cp3$minor-tests.log"
 done

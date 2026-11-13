@@ -1,6 +1,6 @@
 # SQLite sources and source placement
 
-A source can be a table in a SQLite database file, and an output's eligibility predicate can run inside SQLite instead of in the local executor. The recipe does not change for either: the adapter is named in the binding, and placement is set in the policy. The normative contract is [docs/spec/slice-3.md](spec/slice-3.md). This page describes what the library does.
+A source can be a table in a SQLite database file, and an output's eligibility predicate can run inside SQLite instead of in the local executor. The recipe does not change for either: the adapter is named in the binding, and placement is set in the policy. The normative contracts are [slice 3](spec/slice-3.md) and [slice 4](spec/slice-4.md). This page describes what the library does.
 
 ## Binding a table
 
@@ -42,17 +42,17 @@ The policy's `placement` says where operations may run.
 | --- | --- |
 | `local` (default) | Everything runs in the local executor. Results are what they were before this setting existed. |
 | `prefer_source` | An eligibility predicate runs at its source when the rules below allow it, and locally otherwise. |
-| `require_source` | An eligibility predicate on a source that can filter must run there. If it cannot, validate, explain and run fail with `PLACEMENT_INFEASIBLE` before any source is opened. |
+| `require_source` | An eligibility predicate on a source that can filter must run there. Recipe/binding infeasibility fails with `PLACEMENT_INFEASIBLE` before opening sources. Encoding infeasibility is detected when bound validation or run opens the database; explain opens nothing. |
 
 ```python
 policy = b.policy(["/data"], placement="prefer_source")
 print(recipe.explain(bindings, policy)["bound"]["placement"])
 ```
 
-Only one operation can be placed at a source: an output's anchor `eligibility`, as a filter on the anchor source's scan. It is pushed when all of these hold:
+An output's anchor `eligibility` can run as a filter on the anchor source's scan. It is pushed when all of these hold:
 
 - The anchor is bound to `sqlite`.
-- The source has no other use in the recipe. It is not a relationship target, another output's anchor, a detail output's parent, a population's recipient or period source, or an allocation's quantity source. Those need the records the filter would drop.
+- The source has no other use in the recipe. It is not a relationship target, another output's anchor, a detail output's parent, a population's recipient or period source, or an allocation's quantity source. Outgoing one-to-one and one-to-many relationships also keep the filter local for shared-target ambiguity and detail-parent checks. Those need the records the filter would drop.
 - The predicate reads only the anchor's own fields and literals, through `equal`, `less`, `less_equal`, `and`, `or`, `not` and `is_null`.
 - Every compared value is `int64`, `string`, `date` or `boolean`. SQLite compares these as the local executor does: integers numerically, text and ISO dates bytewise, and a null comparison is unknown. The generated SQL removes each column's declared affinity and collation, so a `NOCASE` column still compares bytewise.
 - No comparison involves a `decimal`, and the source's identity has no `decimal` field. SQLite would compare decimal text bytewise (`"120.50" < "50.00"`) or through a float.
@@ -64,13 +64,65 @@ Explain lists each eligibility with its placement and, when it stays local, the 
 Output rows, values, evidence records and output counts are the same under either placement. `tests/sqlite.rs` runs 22 predicates both ways and compares them. Three things differ, and the manifest states each:
 
 - **Records scanned.** `sources.<id>.rows` is still the table's record count. `scanned_rows` is how many crossed into the executor. Row limits apply to scanned records, so a table larger than `limits.anchor_rows` can run when its eligible records fit.
-- **Text format checks.** Decimal and date text is parsed for scanned records only.
+- **Text format checks.** Decimal and date formats, and valid UTF-8, are checked for scanned records only. Invalid UTF-8 in a dropped record fails locally but may pass under source placement.
 - **Lookup checks.** Unmatched, ambiguous and strict-cardinality checks cover scanned anchor records only. A closed order with an unknown customer raises `LOOKUP_UNMATCHED` under local placement and nothing under source placement.
 
-Before a pushed scan, SQLite checks every record of the table: identity present and unique, required columns not null, and each value's storage class acceptable for its declared type. If any record fails, the run reads the whole table locally and reports the same diagnostic local placement would. The same happens for a database whose text encoding is not UTF-8.
+Before a pushed scan, SQLite checks every record of the table: identity present and unique, required columns not null, each value's storage class acceptable for its declared type, and every projected TEXT value within `limits.field_bytes`. If any record fails, the run reads the whole table locally and reports the same diagnostic local placement would. A database whose text encoding is not UTF-8 also falls back locally under `prefer_source`; `require_source` refuses it with `PLACEMENT_INFEASIBLE`.
 
 Bytes read do not change. The whole file is read and fingerprinted under either placement, so this slice saves decoding and row budget, not I/O.
 
+Static validation rejects expressions deeper than 18, including feature references, before recursive typing. Predicates with more than 500 bound literals stay local (or fail under `require_source`).
+
+## Same-database lookup target reduction
+
+Bindings using `sqlite` with byte-for-byte equal declared path spellings share
+one immutable in-memory snapshot under every placement. Every binding is
+independently admitted against its settings and read policy. The bytes are read,
+fingerprinted and charged to `input_bytes` once. Each manifest source reports the
+file's full `bytes_read`, the common fingerprint, and the other source IDs in
+`shared_read`. Different path spellings, including `./`, do not share a read or
+qualify for reduction, even when they refer to the same file.
+
+Under `prefer_source` and `require_source`, a many-to-one relationship between
+distinct co-located bindings can reduce its target scan to keys in the records
+delivered by its from scan. A pushed eligibility is included in that selection.
+The keys must be direct fields of the from source, with types `int64`, `string`,
+`date` or `boolean`. Decimal keys stay local because decimal spellings can be
+equal in the executor while unequal as SQLite text. Validity and period
+qualification stay local. The target must have no decimal identity and no other
+use: another output anchor, relationship target or from source, population
+recipient or period source, or allocation quantity source.
+
+SQLite returns target records in rowid order using a materialized key membership condition; it
+preserves duplicate keys and compares without declared affinity or collation.
+Null key components match nothing. Matching, ambiguity, strict cardinality,
+candidates and evidence remain in the executor. For the same delivered from
+records, reduction preserves all lookup outcomes and evidence.
+
+Whole-table identity, nullability, storage-class, Boolean and `field_bytes`
+checks finish on the connected candidate group before any filtered records are
+delivered. A failure disables every pushed scan in the group, including sibling
+targets, for local diagnostics. Non-UTF-8 database encoding falls back under
+`prefer_source` and fails with `PLACEMENT_INFEASIBLE` under `require_source`.
+Date text, decimal text and valid UTF-8 checks on reduced targets cover scanned
+records only. An invalid date on an unused customer can therefore fail locally
+and pass with reduction; the target placement entry discloses this coverage.
+Target row, decoded batch and retention limits apply to delivered records;
+whole-file byte limits and whole-table `field_bytes` checks still apply.
+
+Explain opens nothing and names `relationship:<id>/target` for each candidate,
+with its placement and first unsupported reason. `require_source` rejects an
+unsupported candidate before opening any source. A relationship between files
+with different declared path spellings is not a candidate and imposes no such
+requirement. Encoding infeasibility is detectable only after opening a snapshot.
+SQLite progress callbacks interrupt scans and source checks even when no record
+is delivered; cancellation remains `CANCELLED`. Snapshots are opened before
+per-record decoding, so admission or schema failures can precede errors in an
+earlier-declared source. Error precedence across independent faults is not
+preserved from slice 3.
+Capabilities declare `relationship_target_reduction` and equal-path co-location.
+Placement does not alter canonical recipe JSON or its hash.
+
 ## Not included
 
-Remote databases, credentials, SQL bindings, pushdown of aggregation, joins or output filters, transfers and staging are deferred.
+Remote databases, credentials, SQL bindings, pushdown of aggregation, joined rows or output filters, transfers and staging are deferred.

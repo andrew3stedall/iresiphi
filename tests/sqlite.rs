@@ -684,3 +684,663 @@ fn placement_is_policy_and_defaults_to_local() {
     );
     let _ = BTreeMap::<String, String>::new();
 }
+
+/// Requests cancellation from another thread `after` the run enters parsing.
+struct CancelDuringParse {
+    flag: std::sync::Arc<AtomicBool>,
+    after: std::time::Duration,
+}
+impl iresiphi::Cancellation for CancelDuringParse {
+    fn flag(&self) -> &AtomicBool {
+        &self.flag
+    }
+    fn entered(&self, phase: iresiphi::RunPhase) {
+        if phase == iresiphi::RunPhase::Parse {
+            let (flag, after) = (self.flag.clone(), self.after);
+            std::thread::spawn(move || {
+                std::thread::sleep(after);
+                flag.store(true, std::sync::atomic::Ordering::Release);
+            });
+        }
+    }
+}
+
+#[test]
+fn a_run_cancelled_during_a_sqlite_scan_reports_cancelled() {
+    // Enough records that the scan, not the file read, takes the run's time.
+    const RECORDS: usize = 200_000;
+    let many = format!(
+        "WITH RECURSIVE n(i) AS (SELECT 7 UNION ALL SELECT i + 1 FROM n WHERE i < {})
+         INSERT INTO orders SELECT i, 'A', '2026-01-05', '1.00', 1 FROM n",
+        RECORDS + 6
+    );
+    for placement in [Placement::Local, Placement::RequireSource] {
+        let mut f =
+            fixture_with(open_from_january(), &[ORDERS_DDL, ORDERS, &many]).placed(placement);
+        f.policy.limits.anchor_rows = RECORDS + 10;
+        f.policy.limits.retained_bytes = 1 << 30;
+        f.policy.limits.output_bytes = 1 << 30;
+        let cancel = CancelDuringParse {
+            flag: Default::default(),
+            after: std::time::Duration::from_millis(200),
+        };
+        let started = std::time::Instant::now();
+        let report = ExecutionContext::default().run(&f.recipe(), &f.bindings, &f.policy, &cancel);
+        let latency = started.elapsed();
+        assert_eq!(
+            report.status, "cancelled",
+            "{placement:?} {:?}",
+            report.diagnostics
+        );
+        assert!(
+            report.tables.is_empty(),
+            "a cancelled run publishes nothing"
+        );
+        let error = &report.diagnostics[0];
+        assert_eq!(error.code, "CANCELLED", "{placement:?}");
+        assert_eq!(error.phase, "source", "{placement:?}");
+        assert_eq!(
+            error.subject.as_deref(),
+            Some("source:orders"),
+            "{placement:?}"
+        );
+        assert_eq!(report.manifest["checks"]["data"], "incomplete");
+        eprintln!("cancel during {placement:?} sqlite scan: run returned after {latency:?}");
+    }
+}
+
+/// The fixture's orders in a database whose text encoding is UTF-16le. Customer
+/// "Ā" (U+0100) sorts after "B" in UTF-8 but before it in UTF-16le bytes.
+fn utf16_fixture(eligibility: Json) -> Fixture {
+    fixture_with(
+        eligibility,
+        &[
+            "PRAGMA encoding = 'UTF-16le'",
+            ORDERS_DDL,
+            ORDERS,
+            "INSERT INTO orders VALUES (7,'Ā','2026-03-01','5.00',1)",
+        ],
+    )
+}
+
+#[test]
+fn a_utf16_database_is_read_locally_with_the_same_result() {
+    let encoding: String =
+        rusqlite::Connection::open(utf16_fixture(field("open")).bindings["orders"].path.clone())
+            .unwrap()
+            .query_row("PRAGMA encoding", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(encoding, "UTF-16le");
+    // Local placement decodes UTF-16 text exactly.
+    let local = utf16_fixture(open_from_january()).succeeded();
+    let utf8 = fixture_with(
+        open_from_january(),
+        &[
+            ORDERS_DDL,
+            ORDERS,
+            "INSERT INTO orders VALUES (7,'Ā','2026-03-01','5.00',1)",
+        ],
+    )
+    .succeeded();
+    assert_eq!(local.tables, utf8.tables);
+    assert_eq!(rows(&local)[4].0, "7");
+    assert_eq!(local.manifest["sources"]["orders"]["placement"], Json::Null);
+
+    // A text comparison whose bytewise order differs between the encodings.
+    let after_b = op("less", literal("string", "B"), field("cust"));
+    let mut f = utf16_fixture(after_b.clone());
+    let local = f.succeeded();
+    let kept: Vec<_> = rows(&local).into_iter().map(|r| r.0).collect();
+    assert_eq!(kept, ["4", "5", "7"], "C, Z and Ā sort after B");
+
+    // Preferring the source reads the whole table locally and says why.
+    f.policy.placement = Placement::PreferSource;
+    assert_eq!(
+        f.explain()["bound"]["placement"]["operations"][0]["placement"],
+        "source",
+        "explain opens no source, so it cannot see the encoding"
+    );
+    let source = f.succeeded();
+    assert_eq!(source.tables, local.tables);
+    assert_eq!(source.manifest["counts"], local.manifest["counts"]);
+    assert_eq!(source.evidence, local.evidence);
+    let read = &source.manifest["sources"]["orders"];
+    assert_eq!(read["placement"]["scan"], "local", "{read}");
+    assert!(
+        read["placement"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("UTF-16le"),
+        "{read}"
+    );
+    assert_eq!(read["rows"], 7);
+    assert_eq!(read["scanned_rows"], 7, "every record was read");
+
+    // Requiring the source cannot be met.
+    let error = utf16_fixture(after_b)
+        .placed(Placement::RequireSource)
+        .failure();
+    assert_eq!(error.code, "PLACEMENT_INFEASIBLE", "{error:?}");
+    assert_eq!(
+        error.subject.as_deref(),
+        Some("output:open_orders/eligibility")
+    );
+    assert!(error.message.contains("UTF-16le"), "{}", error.message);
+    assert!(
+        error
+            .remediation
+            .as_deref()
+            .unwrap()
+            .contains("prefer_source"),
+        "the alternative is named"
+    );
+}
+
+// Slice 4: both bindings use one independently admitted SQLite snapshot.
+fn colocated_fixture() -> Fixture {
+    let mut f = fixture();
+    database(
+        &f.bindings["orders"].path,
+        &[
+            "INSERT INTO orders VALUES (7,'D','2025-11-02','30.00',1)",
+            "CREATE TABLE customers (CustNo TEXT, SalesArea TEXT, Since TEXT)",
+            "INSERT INTO customers VALUES ('A','North','2020-01-01'),('B','North',NULL),('C','South','2021-06-30'),('D','West','2022-02-02'),('E','East','2023-03-03')",
+        ],
+    );
+    let path = f.bindings["orders"].path.clone();
+    f.bindings.insert(
+        "customers".into(),
+        binding(&path, "sqlite", json!({"table":"customers"})),
+    );
+    f.doc["sources"][1]["projection"]["fields"]["Since"] =
+        json!({"path":"Since","data_type":{"kind":"date"},"nullable":true});
+    f
+}
+
+#[test]
+fn shared_snapshot_acceptance_and_reversed_declarations() {
+    for reverse in [false, true] {
+        let mut f = colocated_fixture();
+        if reverse {
+            f.doc["sources"].as_array_mut().unwrap().reverse();
+        }
+        let size = std::fs::metadata(&f.bindings["orders"].path).unwrap().len() as usize;
+        f.policy.limits.input_bytes = size;
+        let local = f.succeeded();
+        assert_eq!(local.manifest["sources"]["orders"]["rows"], 7);
+        assert_eq!(local.manifest["sources"]["customers"]["rows"], 5);
+        assert_eq!(
+            local.manifest["sources"]["orders"]["shared_read"],
+            json!(["customers"])
+        );
+        assert_eq!(
+            local.manifest["sources"]["customers"]["shared_read"],
+            json!(["orders"])
+        );
+        assert_eq!(
+            local.manifest["sources"]["customers"]["fingerprint"],
+            local.manifest["sources"]["orders"]["fingerprint"]
+        );
+        for placement in [Placement::PreferSource, Placement::RequireSource] {
+            f.policy.placement = placement;
+            assert!(validate_bound(&f.recipe(), &f.bindings, &f.policy, "full").valid);
+            let run = f.succeeded();
+            assert_eq!(run.tables, local.tables);
+            assert_eq!(run.evidence, local.evidence);
+            assert_eq!(run.candidate_evidence, local.candidate_evidence);
+            assert_eq!(run.manifest["counts"], local.manifest["counts"]);
+            assert_eq!(run.manifest["sources"]["orders"]["scanned_rows"], 4);
+            assert_eq!(run.manifest["sources"]["customers"]["scanned_rows"], 3);
+            assert_eq!(
+                run.manifest["sources"]["customers"]["placement"]["operation"],
+                "relationship:order_customer/target"
+            );
+        }
+        std::fs::remove_file(&f.bindings["orders"].path).unwrap();
+        assert_eq!(f.explain()["bound"]["feasible"], true);
+        assert!(
+            f.explain()
+                .to_string()
+                .contains("reduced at the source to keys of `orders`")
+        );
+    }
+}
+
+#[test]
+fn target_text_coverage_and_whole_group_fallback() {
+    let mut f = colocated_fixture();
+    database(
+        &f.bindings["orders"].path,
+        &["UPDATE customers SET Since='2023-02-30' WHERE CustNo='E'"],
+    );
+    assert_eq!(f.failure().samples[0].location, "rowid:5");
+    f.policy.placement = Placement::PreferSource;
+    let run = f.succeeded();
+    assert!(
+        run.manifest["sources"]["customers"]["placement"]["checks"]["text_formats"]
+            .as_str()
+            .unwrap()
+            .contains("scanned records only")
+    );
+    // A storage-class failure in a second target must also disable the orders
+    // eligibility and the first target reduction before either delivers records.
+    let mut source = f.doc["sources"][1].clone();
+    source["id"] = json!("other");
+    f.doc["sources"].as_array_mut().unwrap().push(source);
+    let mut rel = f.doc["relationships"][0].clone();
+    rel["id"] = json!("other_lookup");
+    rel["to"] = json!("other");
+    f.doc["relationships"].as_array_mut().unwrap().push(rel);
+    database(
+        &f.bindings["orders"].path,
+        &[
+            "CREATE TABLE other AS SELECT * FROM customers",
+            "UPDATE other SET SalesArea=NULL WHERE CustNo='E'",
+        ],
+    );
+    f.bindings.insert(
+        "other".into(),
+        binding(
+            &f.bindings["orders"].path,
+            "sqlite",
+            json!({"table":"other"}),
+        ),
+    );
+    // First target's invalid date is exposed only when the entire group falls back.
+    let error = f.failure();
+    assert!(!error.samples.is_empty(), "{error:?}");
+    assert_eq!(error.samples[0].source, "customers");
+    f.policy.placement = Placement::Local;
+    let local = f.failure();
+    f.policy.placement = Placement::RequireSource;
+    let required = f.failure();
+    assert_eq!(required.code, local.code);
+    assert_eq!(
+        serde_json::to_value(required.samples).unwrap(),
+        serde_json::to_value(local.samples).unwrap()
+    );
+}
+
+#[test]
+fn target_second_use_and_exact_path_spelling() {
+    let mut f = colocated_fixture().placed(Placement::PreferSource);
+    f.doc["outputs"].as_array_mut().unwrap().push(json!({"id":"all_customers","anchor":"customers","columns":[named("id",json!({"op":"field","source":"customers","field":"CustNo"}))]}));
+    assert_eq!(
+        f.succeeded().manifest["sources"]["customers"]["scanned_rows"],
+        Json::Null
+    );
+    f.policy.placement = Placement::RequireSource;
+    std::fs::remove_file(&f.bindings["orders"].path).unwrap();
+    assert_eq!(
+        f.failure().subject.as_deref(),
+        Some("relationship:order_customer/target")
+    );
+
+    for copy in [false, true] {
+        let mut f = colocated_fixture().placed(Placement::RequireSource);
+        let path = if copy {
+            let p = f.dir.path().join("copy.db");
+            std::fs::copy(&f.bindings["orders"].path, &p).unwrap();
+            p
+        } else {
+            f.dir.path().join(".").join("sales.db")
+        };
+        f.bindings.get_mut("customers").unwrap().path = path;
+        let run = f.succeeded();
+        assert_eq!(
+            run.manifest["sources"]["customers"]["scanned_rows"],
+            Json::Null
+        );
+        assert_eq!(
+            run.manifest["sources"]["customers"]["shared_read"],
+            Json::Null
+        );
+    }
+}
+
+#[test]
+fn reduced_keys_preserve_null_duplicates_compounds_collation_and_strictness() {
+    for compound in [false, true] {
+        for strict in [false, true] {
+            let mut f = colocated_fixture();
+            f.doc["outputs"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("eligibility");
+            f.doc["sources"][1]["identity"] = json!(["SalesArea"]);
+            f.doc["sources"][1]["grain"] = json!(["SalesArea"]);
+            f.doc["sources"][1]["projection"]["fields"]["CustNo"]["nullable"] = json!(true);
+            f.doc["relationships"][0]["strict"] = json!(strict);
+            database(
+                &f.bindings["orders"].path,
+                &[
+                    "DROP TABLE customers; CREATE TABLE customers(CustNo TEXT COLLATE NOCASE,SalesArea TEXT,Since NUMERIC)",
+                    "INSERT INTO customers VALUES ('A','North',NULL),('A','Duplicate',NULL),('a','lower',NULL),('01','zero',NULL),('1','one',NULL),('','empty',NULL),(NULL,'null',NULL),('unused','unused',NULL)",
+                    "UPDATE orders SET cust=NULL WHERE order_no=2; UPDATE orders SET cust='' WHERE order_no=3; UPDATE orders SET cust='01' WHERE order_no=4; UPDATE orders SET cust='1' WHERE order_no=5",
+                ],
+            );
+            if compound {
+                database(
+                    &f.bindings["orders"].path,
+                    &[
+                        "UPDATE customers SET Since='2026-01-05' WHERE CustNo='A'; UPDATE customers SET Since='2026-02-08' WHERE CustNo='01'",
+                    ],
+                );
+                f.doc["relationships"][0]["from_keys"] = json!(["cust", "booked"]);
+                f.doc["relationships"][0]["to_keys"] = json!(["CustNo", "Since"]);
+            }
+            let local = f.run();
+            assert!(
+                local.status.starts_with("succeeded") || strict,
+                "{:?}",
+                local.diagnostics
+            );
+            f.policy.placement = Placement::RequireSource;
+            let source = f.run();
+            assert_eq!(source.status, local.status, "{:?}", source.diagnostics);
+            assert_eq!(source.tables, local.tables);
+            assert_eq!(source.evidence, local.evidence);
+            assert_eq!(source.candidate_evidence, local.candidate_evidence);
+            assert_eq!(
+                serde_json::to_value(source.diagnostics).unwrap(),
+                serde_json::to_value(local.diagnostics).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn reduction_boolean_decimal_encoding_and_limits() {
+    let mut f = colocated_fixture();
+    f.doc["sources"][1]["identity"] = json!(["SalesArea"]);
+    f.doc["sources"][1]["grain"] = json!(["SalesArea"]);
+    f.doc["sources"][1]["projection"]["fields"]["CustNo"]["data_type"] = json!({"kind":"boolean"});
+    f.doc["relationships"][0]["from_keys"] = json!(["open"]);
+    database(
+        &f.bindings["orders"].path,
+        &[
+            "DROP TABLE customers; CREATE TABLE customers(CustNo INTEGER,SalesArea TEXT,Since TEXT); INSERT INTO customers VALUES(1,'yes',NULL),(0,'no',NULL)",
+        ],
+    );
+    let local = f.succeeded();
+    f.policy.placement = Placement::RequireSource;
+    let run = f.succeeded();
+    assert_eq!(run.tables, local.tables);
+    assert_eq!(run.evidence, local.evidence);
+    assert_eq!(run.manifest["sources"]["customers"]["scanned_rows"], 1);
+
+    let mut f = colocated_fixture();
+    for (i, key) in [(0, "cust"), (1, "CustNo")] {
+        f.doc["sources"][i]["projection"]["fields"][key]["data_type"] =
+            json!({"kind":"decimal","precision":10,"scale":2});
+    }
+    database(
+        &f.bindings["orders"].path,
+        &[
+            "UPDATE orders SET cust='1.0'; DELETE FROM customers; INSERT INTO customers VALUES('1.00','North',NULL)",
+        ],
+    );
+    let local = f.succeeded();
+    f.policy.placement = Placement::PreferSource;
+    assert_eq!(f.succeeded().tables, local.tables);
+    assert_eq!(
+        f.succeeded().manifest["sources"]["customers"]["scanned_rows"],
+        Json::Null
+    );
+    f.policy.placement = Placement::RequireSource;
+    assert_eq!(f.failure().code, "PLACEMENT_INFEASIBLE");
+
+    let mut f = colocated_fixture().placed(Placement::PreferSource);
+    f.policy.limits.lookup_rows = 3;
+    f.succeeded();
+    f.policy.placement = Placement::Local;
+    assert_eq!(f.failure().code, "RESOURCE_LIMIT");
+    f.policy.placement = Placement::RequireSource;
+    f.policy.limits.lookup_rows = 2;
+    assert_eq!(f.failure().code, "RESOURCE_LIMIT");
+}
+
+#[test]
+fn reduction_encoding_utf8_coverage_and_independent_binding_admission() {
+    let mut f = colocated_fixture();
+    database(
+        &f.bindings["orders"].path,
+        &["UPDATE customers SET SalesArea=CAST(x'80' AS TEXT) WHERE CustNo='E'"],
+    );
+    assert_eq!(f.failure().code, "INVALID_VALUE");
+    f.policy.placement = Placement::RequireSource;
+    assert_eq!(
+        f.succeeded().manifest["sources"]["customers"]["scanned_rows"],
+        3
+    );
+    f.bindings
+        .get_mut("customers")
+        .unwrap()
+        .settings
+        .insert("typo".into(), json!(true));
+    assert_eq!(f.failure().code, "INVALID_BINDING");
+
+    // An unfiltered from still creates a reduction candidate; UTF-16 is a
+    // data-dependent require_source failure even without anchor eligibility.
+    let mut f = colocated_fixture();
+    let path = f.dir.path().join("utf16.db");
+    database(
+        &path,
+        &[
+            "PRAGMA encoding='UTF-16le'",
+            ORDERS_DDL,
+            ORDERS,
+            "CREATE TABLE customers(CustNo TEXT,SalesArea TEXT,Since TEXT); INSERT INTO customers VALUES('A','North',NULL)",
+        ],
+    );
+    for b in f.bindings.values_mut() {
+        b.path = path.clone();
+    }
+    f.doc["outputs"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("eligibility");
+    let local = f.succeeded();
+    f.policy.placement = Placement::PreferSource;
+    assert_eq!(f.succeeded().tables, local.tables);
+    f.policy.placement = Placement::RequireSource;
+    assert_eq!(f.explain()["bound"]["feasible"], true);
+    let error = f.failure();
+    assert_eq!(error.code, "PLACEMENT_INFEASIBLE");
+    assert_eq!(
+        error.subject.as_deref(),
+        Some("relationship:order_customer/target")
+    );
+    assert!(error.message.contains("UTF-16"));
+    assert!(!validate_bound(&f.recipe(), &f.bindings, &f.policy, "none").valid);
+}
+
+#[test]
+fn sibling_reductions_numeric_affinity_and_delivery_budgets() {
+    let mut f = colocated_fixture();
+    database(
+        &f.bindings["orders"].path,
+        &[
+            "CREATE TABLE other(CustNo TEXT,SalesArea TEXT,Since TEXT); INSERT INTO other SELECT * FROM customers",
+        ],
+    );
+    let mut source = f.doc["sources"][1].clone();
+    source["id"] = json!("other");
+    f.doc["sources"].as_array_mut().unwrap().push(source);
+    let mut rel = f.doc["relationships"][0].clone();
+    rel["id"] = json!("other_lookup");
+    rel["to"] = json!("other");
+    f.doc["relationships"].as_array_mut().unwrap().push(rel);
+    f.bindings.insert(
+        "other".into(),
+        binding(
+            &f.bindings["orders"].path,
+            "sqlite",
+            json!({"table":"other"}),
+        ),
+    );
+    let local = f.succeeded();
+    f.policy.placement = Placement::RequireSource;
+    let run = f.succeeded();
+    assert_eq!(run.tables, local.tables);
+    assert_eq!(run.evidence, local.evidence);
+    for id in ["customers", "other"] {
+        assert_eq!(run.manifest["sources"][id]["scanned_rows"], 3);
+    }
+
+    // INTEGER keys in NUMERIC-affinity columns retain exact integer equality.
+    let mut f = colocated_fixture();
+    f.doc["relationships"][0]["from_keys"] = json!(["order_no"]);
+    f.doc["sources"][1]["projection"]["fields"]["CustNo"]["data_type"] = json!({"kind":"int64"});
+    database(
+        &f.bindings["orders"].path,
+        &[
+            "DROP TABLE customers; CREATE TABLE customers(CustNo NUMERIC,SalesArea TEXT,Since TEXT); INSERT INTO customers VALUES('01','one',NULL),('3','three',NULL),('9','unused',NULL)",
+        ],
+    );
+    let local = f.succeeded();
+    f.policy.placement = Placement::RequireSource;
+    let run = f.succeeded();
+    assert_eq!(run.tables, local.tables);
+    assert_eq!(run.evidence, local.evidence);
+    assert_eq!(run.manifest["sources"]["customers"]["scanned_rows"], 2);
+
+    // The exact snapshot boundary applies to aggregate bytes under every policy.
+    for placement in [
+        Placement::Local,
+        Placement::PreferSource,
+        Placement::RequireSource,
+    ] {
+        let mut f = colocated_fixture().placed(placement);
+        f.policy.limits.input_bytes =
+            std::fs::metadata(&f.bindings["orders"].path).unwrap().len() as usize - 1;
+        assert_eq!(f.failure().code, "RESOURCE_LIMIT");
+    }
+    // Find the smallest successful delivery budget, then show that it admits
+    // the reduced run while a full scan exceeds it. This tests the public
+    // accounting without coupling to the serialized Row representation.
+    for retained in [false, true] {
+        let mut f = colocated_fixture().placed(Placement::RequireSource);
+        database(
+            &f.bindings["orders"].path,
+            &[
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<100) INSERT INTO customers SELECT 'unused-' || i,'Unused',NULL FROM n",
+            ],
+        );
+        let (mut low, mut high) = (1, 100_000);
+        while low < high {
+            let mid = (low + high) / 2;
+            if retained {
+                f.policy.limits.retained_bytes = mid;
+            } else {
+                f.policy.limits.batch_bytes = mid;
+            }
+            if f.run().status.starts_with("succeeded") {
+                high = mid;
+            } else {
+                low = mid + 1;
+            }
+        }
+        if retained {
+            f.policy.limits.retained_bytes = low;
+        } else {
+            f.policy.limits.batch_bytes = low;
+        }
+        f.succeeded();
+        f.policy.placement = Placement::Local;
+        assert_eq!(f.failure().code, "RESOURCE_LIMIT");
+    }
+}
+
+#[test]
+fn reduction_aliases_and_decimal_from_identity_are_exact() {
+    let mut f = colocated_fixture();
+    database(
+        &f.bindings["orders"].path,
+        &["ALTER TABLE customers RENAME TO iresiphi_from"],
+    );
+    f.bindings
+        .get_mut("customers")
+        .unwrap()
+        .settings
+        .insert("table".into(), json!("iresiphi_from"));
+    // A decimal from identity is permitted; it is not a reduction key.
+    f.doc["sources"][0]["identity"] = json!(["net"]);
+    f.doc["sources"][0]["grain"] = json!(["net"]);
+    let local = f.succeeded();
+    f.policy.placement = Placement::RequireSource;
+    // Remove eligibility: slice 3 deliberately keeps decimal anchor identities local.
+    f.doc["outputs"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("eligibility");
+    f.policy.placement = Placement::Local;
+    let local_unfiltered = f.succeeded();
+    f.policy.placement = Placement::RequireSource;
+    let reduced = f.succeeded();
+    assert_eq!(reduced.tables, local_unfiltered.tables);
+    assert_eq!(reduced.evidence, local_unfiltered.evidence);
+    assert_eq!(reduced.manifest["sources"]["customers"]["scanned_rows"], 4);
+    assert_eq!(local.tables["open_orders"].len(), 4);
+    database(
+        &f.bindings["orders"].path,
+        &["UPDATE orders SET net='60.0' WHERE order_no=7"],
+    );
+    let required = f.failure();
+    f.policy.placement = Placement::Local;
+    let local = f.failure();
+    assert_eq!(required.code, "DUPLICATE_IDENTITY");
+    assert_eq!(
+        serde_json::to_value(required).unwrap(),
+        serde_json::to_value(local).unwrap()
+    );
+}
+
+#[test]
+fn reduction_materializes_keys_and_preserves_unfiltered_lookup_coverage() {
+    let mut f = colocated_fixture().placed(Placement::PreferSource);
+    f.doc["outputs"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("eligibility");
+    let plan = iresiphi::placement::plan(&f.recipe(), &f.bindings, &f.policy).unwrap();
+    let conn = rusqlite::Connection::open(&f.bindings["orders"].path).unwrap();
+    let sql = format!(
+        "EXPLAIN QUERY PLAN SELECT rowid FROM customers AS iresiphi_target WHERE {}",
+        plan.pushed["customers"].sql
+    );
+    let details = conn
+        .prepare(&sql)
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap()
+        .join("\n");
+    assert!(details.contains("LIST SUBQUERY"), "{details}");
+    assert!(!details.contains("CORRELATED"), "{details}");
+    let run = f.succeeded();
+    let checks = &run.manifest["sources"]["customers"]["placement"]["checks"];
+    assert!(
+        checks["lookups"]
+            .as_str()
+            .unwrap()
+            .contains("every delivered from record")
+    );
+    assert!(
+        checks["boolean_values"]
+            .as_str()
+            .unwrap()
+            .contains("every record")
+    );
+    for check in run.manifest["check_results"].as_array().unwrap() {
+        if check["id"] == "lookup.coverage" || check["id"] == "data.relationships" {
+            assert!(
+                !check["coverage"]
+                    .as_str()
+                    .unwrap()
+                    .contains("scanned records only")
+            );
+        }
+    }
+}

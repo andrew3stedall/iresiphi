@@ -1,6 +1,6 @@
 //! Source-side placement (docs/spec/slice-3.md, "Contract: placement").
 //!
-//! One operation can run at a source: an output's anchor eligibility predicate,
+//! Source operations include an output's anchor eligibility predicate,
 //! as a filter on the anchor source's scan. This module decides, from the recipe,
 //! the bindings and the policy alone, whether a predicate may be pushed. It opens
 //! nothing. The decision is negotiated against the exact predicate, so a source
@@ -37,6 +37,8 @@ pub struct Plan {
     pub pushed: BTreeMap<String, Pushed>,
     /// One record per output eligibility, for explain and the manifest.
     pub decisions: Vec<serde_json::Value>,
+    pub reductions: BTreeMap<String, String>,
+    pub candidates: Vec<(String, String)>,
 }
 
 /// True when `adapter` can evaluate a negotiated filter during its scan.
@@ -51,7 +53,7 @@ pub(crate) fn quoted(name: &str) -> String {
 
 /// The column a declared field reads, as the SQLite reader resolves it.
 pub(crate) fn column(field: &Field) -> &str {
-    field.path.strip_prefix('/').unwrap_or(&field.path)
+    &field.path
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -114,6 +116,9 @@ impl Translator<'_> {
                         return Err("the predicate compares with a null literal".into());
                     }
                 };
+                if self.parameters.len() >= 500 {
+                    return Err("the predicate exceeds 500 bound parameters".into());
+                }
                 self.parameters.push(parameter);
                 Ok(("?".into(), kind))
             }
@@ -126,7 +131,7 @@ impl Translator<'_> {
 
     /// A condition whose SQL truth value is the predicate's: true, false or unknown.
     fn condition(&mut self, expr: &Expr, depth: usize) -> Reasoned<String> {
-        if depth > 64 {
+        if depth > crate::validation::EXPRESSION_DEPTH {
             return Err("the predicate is nested too deeply to push".into());
         }
         match expr {
@@ -211,6 +216,16 @@ fn other_use(recipe: &Recipe, source: &str, output: &str) -> Option<String> {
     if let Some(r) = recipe.relationships.iter().find(|r| r.to == source) {
         return Some(format!("relationship {} reads it as a target", r.id));
     }
+    if let Some(r) = recipe
+        .relationships
+        .iter()
+        .find(|r| r.from == source && r.cardinality != Cardinality::ManyToOne)
+    {
+        return Some(format!(
+            "relationship {} needs every anchor record for cross-anchor ambiguity or detail parent checks",
+            r.id
+        ));
+    }
     // A detail output reads its parent back through the parent's relationship.
     for r in recipe.relationships.iter().filter(|r| r.from == source) {
         if let Some(o) = recipe
@@ -245,6 +260,7 @@ fn other_use(recipe: &Recipe, source: &str, output: &str) -> Option<String> {
 /// predicate that cannot run at its source; the policy is never overridden.
 pub fn plan(recipe: &Recipe, bindings: &Bindings, policy: &Policy) -> Result<Plan> {
     let mut plan = Plan::default();
+    let mut eligibility_error = None;
     for output in &recipe.outputs {
         let Some(predicate) = &output.eligibility else {
             continue;
@@ -303,21 +319,21 @@ pub fn plan(recipe: &Recipe, bindings: &Bindings, policy: &Policy) -> Result<Pla
             Ok(pushed) => {
                 decision["placement"] = json!("source");
                 decision["coverage"] = json!(
-                    "identity, nullability and storage classes are checked at the source for every record; text formats and lookups are checked for scanned records only"
+                    "identity, nullability, field_bytes and storage classes are checked at the source for every record; text checks (date text, decimal text, and valid UTF-8) and lookups are checked for scanned records only"
                 );
                 plan.pushed.insert(output.anchor.clone(), pushed);
             }
             Err(reason) => {
                 // Requiring source placement only binds sources that can filter.
                 if policy.placement == Placement::RequireSource && capable {
-                    return Err(Error::new(
+                    eligibility_error = Some(Error::new(
                         "PLACEMENT_INFEASIBLE",
                         "planning",
                         format!(
                             "policy placement require_source cannot be met for {stage}: {reason}"
                         ),
                     )
-                    .with_subject(stage)
+                    .with_subject(stage.clone())
                     .with_outputs(vec![output.id.clone()])
                     .with_remediation(
                         "Use placement prefer_source to run this predicate in the local executor, or local to place every operation there; the policy is not overridden.",
@@ -329,5 +345,152 @@ pub fn plan(recipe: &Recipe, bindings: &Bindings, policy: &Policy) -> Result<Pla
         }
         plan.decisions.push(decision);
     }
+    for r in &recipe.relationships {
+        let (Some(a), Some(b)) = (bindings.get(&r.from), bindings.get(&r.to)) else {
+            continue;
+        };
+        if r.from == r.to || !colocated(a, b) {
+            continue;
+        }
+        plan.candidates.push((r.from.clone(), r.to.clone()));
+        let stage = format!("relationship:{}/target", r.id);
+        let (Some(from), Some(to)) = (
+            recipe.sources.iter().find(|s| s.id == r.from),
+            recipe.sources.iter().find(|s| s.id == r.to),
+        ) else {
+            return Err(Error::new(
+                "INVALID_RELATIONSHIP",
+                "planning",
+                "reduction endpoints must be declared sources",
+            ));
+        };
+        if r.to_keys
+            .iter()
+            .any(|k| !to.projection.fields.contains_key(k))
+        {
+            return Err(Error::new(
+                "INVALID_RELATIONSHIP",
+                "planning",
+                "target keys must be declared fields",
+            ));
+        }
+        let reason = if policy.placement == Placement::Local {
+            Some("the policy places every operation in the local executor".to_string())
+        } else if r.cardinality != Cardinality::ManyToOne
+            || r.validity.is_some()
+            || r.period.is_some()
+        {
+            Some("only many_to_one without validity or period qualification can be reduced".into())
+        } else if r
+            .from_keys
+            .iter()
+            .any(|k| !from.projection.fields.contains_key(k))
+        {
+            Some("every from key must be a field of the from source itself".into())
+        } else if recipe.outputs.iter().any(|o| o.anchor == r.to)
+            || recipe
+                .relationships
+                .iter()
+                .any(|other| (other.to == r.to && other.id != r.id) || other.from == r.to)
+            || recipe.populations.iter().any(|p| {
+                p.recipients == r.to || p.period.from.as_ref().is_some_and(|f| f.source == r.to)
+            })
+            || recipe
+                .outputs
+                .iter()
+                .flat_map(|o| &o.allocations)
+                .any(|a| a.quantity.source == r.to)
+        {
+            Some("the target source has another use that needs every record".into())
+        } else if r
+            .from_keys
+            .iter()
+            .any(|k| matches!(from.projection.fields[k].data_type, Type::Decimal { .. }))
+            || r.to_keys
+                .iter()
+                .any(|k| matches!(to.projection.fields[k].data_type, Type::Decimal { .. }))
+        {
+            Some("decimal keys cannot be reduced with exact executor equality".into())
+        } else if to
+            .identity
+            .iter()
+            .any(|k| matches!(to.projection.fields[k].data_type, Type::Decimal { .. }))
+        {
+            Some(
+                "the target has a decimal identity whose uniqueness sqlite cannot check exactly"
+                    .into(),
+            )
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            if policy.placement == Placement::RequireSource {
+                return Err(Error::new(
+                    "PLACEMENT_INFEASIBLE",
+                    "planning",
+                    format!("policy placement require_source cannot be met for {stage}: {reason}"),
+                )
+                .with_subject(stage)
+                .with_remediation(
+                    "Use placement prefer_source or local; the policy is not overridden.",
+                ));
+            }
+            plan.decisions.push(json!({"operation":stage,"source":format!("source:{}",r.to),"policy":policy.placement,"placement":"local","reason":reason}));
+        } else {
+            // IN materializes the from keys once instead of rescanning them for
+            // each target. Unary plus and BINARY retain exact key semantics.
+            let from_keys = r
+                .from_keys
+                .iter()
+                .map(|f| {
+                    format!(
+                        "+iresiphi_from.{} COLLATE BINARY",
+                        quoted(column(&from.projection.fields[f]))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let target_keys = r
+                .to_keys
+                .iter()
+                .map(|t| {
+                    format!(
+                        "+iresiphi_target.{} COLLATE BINARY",
+                        quoted(column(&to.projection.fields[t]))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let filter = plan.pushed.get(&r.from);
+            let sql = format!(
+                "({target_keys}) IN (SELECT {from_keys} FROM (SELECT * FROM {}{}) AS iresiphi_from)",
+                quoted(a.settings["table"].as_str().unwrap_or("")),
+                filter
+                    .map(|p| format!(" WHERE {}", p.sql))
+                    .unwrap_or_default()
+            );
+            let parameters = filter.map(|p| p.parameters.clone()).unwrap_or_default();
+            plan.pushed.insert(
+                r.to.clone(),
+                Pushed {
+                    stage: stage.clone(),
+                    sql,
+                    parameters,
+                },
+            );
+            plan.reductions.insert(r.to.clone(), r.from.clone());
+            plan.decisions.push(json!({"operation":stage,"source":format!("source:{}",r.to),"policy":policy.placement,"placement":"source","coverage":"whole-table source checks; text formats and valid UTF-8 checked for scanned records only"}));
+        }
+    }
+    if let Some(error) = eligibility_error {
+        return Err(error);
+    }
     Ok(plan)
+}
+
+/// Declared spellings, deliberately without Path component equality.
+pub(crate) fn colocated(a: &Binding, b: &Binding) -> bool {
+    a.adapter == "sqlite"
+        && b.adapter == "sqlite"
+        && a.path.as_os_str().as_encoded_bytes() == b.path.as_os_str().as_encoded_bytes()
 }

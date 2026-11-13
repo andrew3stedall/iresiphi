@@ -197,6 +197,61 @@ fn check_text_settings(binding: &Binding) -> Result<()> {
     }
 }
 
+/// One admitted immutable SQLite image for each exact declared path spelling.
+struct SqliteSnapshot {
+    owner: String,
+    access_us: u64,
+    bytes: Vec<u8>,
+    fingerprint: String,
+    conn: rusqlite::Connection,
+}
+fn sqlite_snapshots(
+    recipe: &Recipe,
+    bindings: &Bindings,
+    policy: &Policy,
+    total: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<BTreeMap<Vec<u8>, SqliteSnapshot>> {
+    let mut snapshots = BTreeMap::new();
+    for source in &recipe.sources {
+        let binding = bindings
+            .get(&source.id)
+            .ok_or_else(|| err("MISSING_BINDING", &source.id))?;
+        if binding.adapter != "sqlite" {
+            continue;
+        }
+        let admitted = || -> Result<()> {
+            check_text_settings(binding)?;
+            // Every binding is independently admitted even when its bytes are shared.
+            let file = open_permitted(&binding.path, &policy.allowed_read_roots)?;
+            limit(
+                file.metadata().map_err(io_error)?.len() <= policy.limits.file_bytes as u64,
+                "encoded file bytes",
+            )
+        };
+        admitted().map_err(|e| tag_source(e, &source.id))?;
+        let key = binding.path.as_os_str().as_encoded_bytes().to_vec();
+        if !snapshots.contains_key(&key) {
+            let accessed = std::time::Instant::now();
+            let bytes = read_bytes(binding, policy, total, cancel)
+                .map_err(|e| tag_source(e, &source.id))?;
+            let fingerprint = crate::validation::hex(&Sha256::digest(&bytes));
+            let conn = sqlite::open(&bytes).map_err(|e| tag_source(e, &source.id))?;
+            snapshots.insert(
+                key,
+                SqliteSnapshot {
+                    owner: source.id.clone(),
+                    access_us: micros(accessed),
+                    bytes,
+                    fingerprint,
+                    conn,
+                },
+            );
+        }
+    }
+    Ok(snapshots)
+}
+
 /// Read immutable materializations. The public executor converts these owned rows to typed batches.
 /// This adapter boundary is bounded materialization, not a zero-copy or streaming guarantee.
 fn materialize_sources(
@@ -212,6 +267,67 @@ fn materialize_sources(
     let mut retained = 0usize;
     // Placement is decided from declarations and policy before any source opens.
     let plan = crate::placement::plan(recipe, bindings, policy)?;
+    let snapshots = sqlite_snapshots(recipe, bindings, policy, &mut total, cancel)?;
+    let mut fallbacks = BTreeMap::<String, sqlite::Fallback>::new();
+    // Connected candidate groups include all sibling targets, even a candidate
+    // kept local by static planning. Finish every check before delivering rows.
+    let mut remaining = plan.candidates.clone();
+    while let Some((a, b)) = remaining.pop() {
+        let mut group = BTreeSet::from([a, b]);
+        loop {
+            let before = group.len();
+            remaining.retain(|(a, b)| {
+                if group.contains(a) || group.contains(b) {
+                    group.insert(a.clone());
+                    group.insert(b.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            if group.len() == before {
+                break;
+            }
+        }
+        if !group.iter().any(|id| plan.reductions.contains_key(id)) {
+            continue;
+        }
+        let mut fallback = None;
+        for source in recipe.sources.iter().filter(|s| group.contains(&s.id)) {
+            check_cancel(cancel)?;
+            let binding = &bindings[&source.id];
+            let snapshot = &snapshots[binding.path.as_os_str().as_encoded_bytes()];
+            if let Some(reason) = sqlite::preflight(&snapshot.conn, source, binding, policy, cancel)
+                .map_err(|e| tag_source(e, &source.id))?
+            {
+                if policy.placement == Placement::RequireSource && reason.is_encoding() {
+                    let pushed = group
+                        .iter()
+                        .filter(|id| plan.reductions.contains_key(*id))
+                        .find_map(|id| plan.pushed.get(id))
+                        .unwrap();
+                    return Err(Error::new(
+                        "PLACEMENT_INFEASIBLE",
+                        "source",
+                        format!(
+                            "policy placement require_source cannot be met for {}: {reason}",
+                            pushed.stage
+                        ),
+                    )
+                    .with_subject(pushed.stage.clone())
+                    .with_remediation(
+                        "Use placement prefer_source or local; the policy is not overridden.",
+                    ));
+                }
+                fallback.get_or_insert(reason);
+            }
+        }
+        if let Some(reason) = fallback {
+            for id in group {
+                fallbacks.insert(id, reason.clone());
+            }
+        }
+    }
     for source in &recipe.sources {
         check_cancel(cancel)?;
         let binding = bindings
@@ -220,9 +336,23 @@ fn materialize_sources(
         let subject = |e: Error| tag_source(e, &source.id);
         check_text_settings(binding).map_err(subject)?;
         let accessed = std::time::Instant::now();
-        let bytes = read_bytes(binding, policy, &mut total, cancel).map_err(subject)?;
-        let fingerprint = crate::validation::hex(&Sha256::digest(&bytes));
-        let access_us = micros(accessed);
+        let snapshot = snapshots
+            .get(binding.path.as_os_str().as_encoded_bytes())
+            .filter(|_| binding.adapter == "sqlite");
+        let owned_bytes;
+        let bytes = if let Some(snapshot) = snapshot {
+            &snapshot.bytes
+        } else {
+            owned_bytes = read_bytes(binding, policy, &mut total, cancel).map_err(subject)?;
+            &owned_bytes
+        };
+        let fingerprint = snapshot
+            .map(|s| s.fingerprint.clone())
+            .unwrap_or_else(|| crate::validation::hex(&Sha256::digest(bytes)));
+        let access_us = snapshot.map_or_else(
+            || micros(accessed),
+            |s| if s.owner == source.id { s.access_us } else { 0 },
+        );
         let parsed = std::time::Instant::now();
         let reference = SourceReference {
             source: source.id.clone(),
@@ -253,11 +383,12 @@ fn materialize_sources(
             "sqlite" => sqlite::read(
                 source,
                 binding,
-                &bytes,
+                &snapshot.unwrap().conn,
                 &reference,
                 &admission,
                 cancel,
                 plan.pushed.get(&source.id),
+                fallbacks.get(&source.id),
             )
             .map(|read| {
                 scan = Some((read.total_rows, read.placement));
@@ -371,6 +502,17 @@ fn materialize_sources(
                     binding: reference.binding.clone(),
                     fingerprint: reference.fingerprint.clone(),
                     bytes_read: bytes.len(),
+                    shared_read: recipe
+                        .sources
+                        .iter()
+                        .filter(|s| {
+                            s.id != source.id
+                                && bindings
+                                    .get(&s.id)
+                                    .is_some_and(|b| crate::placement::colocated(binding, b))
+                        })
+                        .map(|s| s.id.clone())
+                        .collect(),
                     rows: scan.as_ref().map_or(rows.len(), |(total, _)| *total),
                     scanned_rows: scan
                         .as_ref()
@@ -398,6 +540,8 @@ pub struct SourceRead {
     pub binding: String,
     pub fingerprint: String,
     pub bytes_read: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_read: Vec<String>,
     /// Records in the source. Under a pushed predicate this still counts every
     /// record of the table; `scanned_rows` counts those that were read.
     pub rows: usize,
@@ -433,7 +577,8 @@ pub(crate) fn adapter_capabilities(adapter: &str) -> serde_json::Value {
         serde_json::json!({
             "location": "local", "typed_read": true,
             "pushdown": true,
-            "pushdown_operations": ["anchor_eligibility_filter"],
+            "pushdown_operations": ["anchor_eligibility_filter", "relationship_target_reduction"],
+            "co_location": "equal declared path spelling, byte-for-byte",
             "pushdown_types": ["int64", "string", "date", "boolean"],
             "streaming": false,
             "materialization": "bounded", "snapshot": "bytes_read",
@@ -2101,12 +2246,44 @@ pub fn inspect_schemas(recipe: &Recipe, bindings: &Bindings, policy: &Policy) ->
     let cancel = AtomicBool::new(false);
     let mut total = 0;
     let mut expanded = 0;
+    let plan = crate::placement::plan(recipe, bindings, policy)?;
+    let snapshots = sqlite_snapshots(recipe, bindings, policy, &mut total, &cancel)?;
     for source in &recipe.sources {
         let binding = bindings
             .get(&source.id)
             .ok_or_else(|| err("MISSING_BINDING", format!("missing binding {}", source.id)))?;
-        inspect_schema(source, binding, policy, &mut total, &mut expanded, &cancel)
+        if binding.adapter == "sqlite" {
+            sqlite::inspect_connection(
+                source,
+                binding,
+                &snapshots[binding.path.as_os_str().as_encoded_bytes()].conn,
+                if policy.placement == Placement::RequireSource {
+                    plan.reductions
+                        .keys()
+                        .filter(|id| {
+                            bindings
+                                .get(*id)
+                                .is_some_and(|b| crate::placement::colocated(binding, b))
+                        })
+                        .find_map(|id| plan.pushed.get(id))
+                        .or_else(|| plan.pushed.get(&source.id))
+                } else {
+                    None
+                },
+            )
             .map_err(|e| tag_source(e, &source.id).with_check("source_schema"))?;
+            continue;
+        }
+        inspect_schema(
+            source,
+            binding,
+            policy,
+            &mut total,
+            &mut expanded,
+            &cancel,
+            plan.pushed.get(&source.id),
+        )
+        .map_err(|e| tag_source(e, &source.id).with_check("source_schema"))?;
     }
     Ok(recipe.sources.len())
 }
@@ -2118,6 +2295,7 @@ fn inspect_schema(
     total: &mut usize,
     expanded: &mut usize,
     cancel: &AtomicBool,
+    pushed: Option<&crate::placement::Pushed>,
 ) -> Result<()> {
     check_text_settings(binding)?;
     let missing = |what: &str, name: &str| {
@@ -2129,7 +2307,16 @@ fn inspect_schema(
     match binding.adapter.as_str() {
         "sqlite" => {
             let bytes = read_bytes(binding, policy, total, cancel)?;
-            sqlite::inspect(source, binding, &bytes)?;
+            sqlite::inspect(
+                source,
+                binding,
+                &bytes,
+                if policy.placement == Placement::RequireSource {
+                    pushed
+                } else {
+                    None
+                },
+            )?;
         }
         "csv" => {
             let dialect = CsvDialect::from_binding(binding)?;
