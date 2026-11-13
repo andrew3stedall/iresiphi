@@ -2488,7 +2488,7 @@ pub fn explain_bound(recipe: &Recipe, bindings: &Bindings, policy: &Policy) -> J
             "adapter": bindings.get(&source.id).map(|b| &b.adapter),
             "capabilities": bindings.get(&source.id).map(|b| crate::adapters::adapter_capabilities(&b.adapter)),
             "location": "local",
-            "scan": if plan.pushed.contains_key(&source.id) { "filtered at the source" } else { "every record" },
+            "scan": if let Some(from) = plan.reductions.get(&source.id) { format!("reduced at the source to keys of `{from}`") } else if plan.pushed.contains_key(&source.id) { "filtered at the source".into() } else { "every record".into() },
             "rows": null,
             "bytes": null,
             "estimate_status": "unknown",

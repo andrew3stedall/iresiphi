@@ -112,3 +112,26 @@ These gaps from earlier tickets were fixed, with tests in `tests/preview.rs` and
 | --- | --- | --- |
 | 6: customer/month parity golden | Met | `bindings/node/test/customer_month.test.js` compares against the shared golden and the fixed acceptance numbers. |
 | 7: both hosted architectures pass at the same commit | Unverified | The workflow builds and tests pinned Node 22.16.0 and 24.11.1 on hosted x86_64 and aarch64. This implementation session cannot establish a hosted pass; the coordinator must run CI after pushing. Local Node 24 ARM evidence does not replace any of these four gates. |
+
+## Slice 4: shared SQLite snapshots and lookup target reduction
+
+The implementation follows [slice 4](../spec/slice-4.md). Co-located bindings
+share one byte read, fingerprint, input-byte charge and in-memory database under
+every placement; settings and read-policy admission remain independent. The
+SQLite capabilities now declare `relationship_target_reduction` and exact-path
+co-location. Explain remains source-free. Target placement and check coverage
+appear in the source manifest and bound data validation.
+
+Rust tests cover the seven-order/five-customer acceptance fixture, reversed
+source declarations, exact path spellings and copied files, second target use,
+decimal fallback, null and duplicate keys, compound keys, NOCASE and NUMERIC
+affinity, Boolean keys, unfiltered from scans, strict ambiguity, sibling target
+reduction and whole-group fallback, UTF-16 refusal, malformed UTF-8 coverage,
+exact decimal from identities, alias collisions, and row/batch/retention/input
+budgets. Python and Node include the same-database acceptance fixture.
+
+Local evidence below applies to this uncommitted shared-checkout change only;
+it does not establish hosted acceptance at the coordinator's eventual commit.
+Hosted ARM and x86 at the same commit, CPython 3.12/3.13, Node 22/24, the workload,
+and x86 wheel audits and clean-image installs remain unverified for slice 4.
+No x86 workload was run locally.

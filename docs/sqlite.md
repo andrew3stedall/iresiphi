@@ -1,6 +1,6 @@
 # SQLite sources and source placement
 
-A source can be a table in a SQLite database file, and an output's eligibility predicate can run inside SQLite instead of in the local executor. The recipe does not change for either: the adapter is named in the binding, and placement is set in the policy. The normative contract is [docs/spec/slice-3.md](spec/slice-3.md). This page describes what the library does.
+A source can be a table in a SQLite database file, and an output's eligibility predicate can run inside SQLite instead of in the local executor. The recipe does not change for either: the adapter is named in the binding, and placement is set in the policy. The normative contracts are [slice 3](spec/slice-3.md) and [slice 4](spec/slice-4.md). This page describes what the library does.
 
 ## Binding a table
 
@@ -49,7 +49,7 @@ policy = b.policy(["/data"], placement="prefer_source")
 print(recipe.explain(bindings, policy)["bound"]["placement"])
 ```
 
-Only one operation can be placed at a source: an output's anchor `eligibility`, as a filter on the anchor source's scan. It is pushed when all of these hold:
+An output's anchor `eligibility` can run as a filter on the anchor source's scan. It is pushed when all of these hold:
 
 - The anchor is bound to `sqlite`.
 - The source has no other use in the recipe. It is not a relationship target, another output's anchor, a detail output's parent, a population's recipient or period source, or an allocation's quantity source. Outgoing one-to-one and one-to-many relationships also keep the filter local for shared-target ambiguity and detail-parent checks. Those need the records the filter would drop.
@@ -73,6 +73,51 @@ Bytes read do not change. The whole file is read and fingerprinted under either 
 
 Static validation rejects expressions deeper than 18, including feature references, before recursive typing. Predicates with more than 500 bound literals stay local (or fail under `require_source`).
 
+## Same-database lookup target reduction
+
+Bindings using `sqlite` with byte-for-byte equal declared path spellings share
+one immutable in-memory snapshot under every placement. Every binding is
+independently admitted against its settings and read policy. The bytes are read,
+fingerprinted and charged to `input_bytes` once. Each manifest source reports the
+file's full `bytes_read`, the common fingerprint, and the other source IDs in
+`shared_read`. Different path spellings, including `./`, do not share a read or
+qualify for reduction, even when they refer to the same file.
+
+Under `prefer_source` and `require_source`, a many-to-one relationship between
+distinct co-located bindings can reduce its target scan to keys in the records
+delivered by its from scan. A pushed eligibility is included in that selection.
+The keys must be direct fields of the from source, with types `int64`, `string`,
+`date` or `boolean`. Decimal keys stay local because decimal spellings can be
+equal in the executor while unequal as SQLite text. Validity and period
+qualification stay local. The target must have no decimal identity and no other
+use: another output anchor, relationship target or from source, population
+recipient or period source, or allocation quantity source.
+
+SQLite returns target records in rowid order using an existence condition; it
+preserves duplicate keys and compares without declared affinity or collation.
+Null key components match nothing. Matching, ambiguity, strict cardinality,
+candidates and evidence remain in the executor. For the same delivered from
+records, reduction preserves all lookup outcomes and evidence.
+
+Whole-table identity, nullability, storage-class, Boolean and `field_bytes`
+checks finish on the connected candidate group before any filtered records are
+delivered. A failure disables every pushed scan in the group, including sibling
+targets, for local diagnostics. Non-UTF-8 database encoding falls back under
+`prefer_source` and fails with `PLACEMENT_INFEASIBLE` under `require_source`.
+Date text, decimal text and valid UTF-8 checks on reduced targets cover scanned
+records only. An invalid date on an unused customer can therefore fail locally
+and pass with reduction; the target placement entry discloses this coverage.
+Target row, decoded batch and retention limits apply to delivered records;
+whole-file byte limits and whole-table `field_bytes` checks still apply.
+
+Explain opens nothing and names `relationship:<id>/target` for each candidate,
+with its placement and first unsupported reason. `require_source` rejects an
+unsupported candidate before opening any source. A relationship between files
+with different declared path spellings is not a candidate and imposes no such
+requirement. Encoding infeasibility is detectable only after opening a snapshot.
+Capabilities declare `relationship_target_reduction` and equal-path co-location.
+Placement does not alter canonical recipe JSON or its hash.
+
 ## Not included
 
-Remote databases, credentials, SQL bindings, pushdown of aggregation, joins or output filters, transfers and staging are deferred.
+Remote databases, credentials, SQL bindings, pushdown of aggregation, joined rows or output filters, transfers and staging are deferred.

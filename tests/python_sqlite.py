@@ -88,6 +88,38 @@ class SQLitePlacement(unittest.TestCase):
             self.assertEqual(snapshots[0], snapshots[1])
             self.assertEqual(snapshots[0], snapshots[2])
 
+    def test_colocated_reduction_public_fixture(self):
+        with sqlite3.connect(self.root / 'sales.sqlite') as db:
+            db.execute("INSERT INTO orders VALUES(7,'D','2025-11-02','30.00',1)")
+            db.execute('CREATE TABLE customers(CustNo TEXT, SalesArea TEXT, Since TEXT)')
+            db.executemany('INSERT INTO customers VALUES(?,?,?)', [
+                ('A', 'North', '2020-01-01'), ('B', 'North', None),
+                ('C', 'South', '2021-06-30'), ('D', 'West', '2022-02-02'),
+                ('E', 'East', '2023-03-03')])
+        self.bindings['customers'] = b.binding(str(self.root / 'sales.sqlite'), 'sqlite', table='customers')
+        doc = declaration()
+        doc['sources'][1]['projection']['fields']['Since'] = b.field('Since', b.date_type(), nullable=True)
+        with iresiphi.Recipe(doc) as recipe:
+            original = recipe.hash, recipe.canonical_json()
+            snapshots = []
+            for placement in ['local', 'prefer_source', 'require_source']:
+                policy = self.policy(placement)
+                policy['limits'] = {'input_bytes': (self.root / 'sales.sqlite').stat().st_size}
+                self.assertTrue(recipe.validate(self.bindings, policy, 'full')['valid'])
+                self.assertTrue(recipe.explain(self.bindings, policy)['bound']['feasible'])
+                with iresiphi.run(recipe, self.bindings, policy) as result:
+                    sources = result.manifest['sources']
+                    self.assertEqual(sources['orders']['shared_read'], ['customers'])
+                    self.assertEqual(sources['customers']['shared_read'], ['orders'])
+                    self.assertEqual(sources['orders']['fingerprint'], sources['customers']['fingerprint'])
+                    self.assertEqual(sources['orders']['rows'], 7)
+                    self.assertEqual(sources['customers']['rows'], 5)
+                    self.assertEqual(sources['customers'].get('scanned_rows'), None if placement == 'local' else 3)
+                    snapshots.append((result.batch('open_orders'), result.evidence(), result.evidence('candidate'), result.manifest['counts']))
+            self.assertEqual(snapshots[0], snapshots[1])
+            self.assertEqual(snapshots[0], snapshots[2])
+            self.assertEqual((recipe.hash, recipe.canonical_json()), original)
+
     def test_falsy_placement_is_preserved_and_rejected(self):
         for placement in ['', False, 0]:
             policy = self.policy(placement)

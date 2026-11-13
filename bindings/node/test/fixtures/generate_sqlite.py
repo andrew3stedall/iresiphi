@@ -18,3 +18,19 @@ with sqlite3.connect(path) as db:
         (5, 'Z', '2026-02-09', '10.00', 1),
         (6, 'B', '2025-12-31', '75.25', 1),
     ])
+
+# Slice 4 uses the same orders plus an old D order and a co-located target.
+import shutil
+
+colocated = path.with_name('sales-colocated.sqlite')
+shutil.copyfile(path, colocated)
+with sqlite3.connect(colocated) as db:
+    db.execute("INSERT INTO orders VALUES (7, 'D', '2025-11-02', '30.00', 1)")
+    db.execute('CREATE TABLE customers (CustNo TEXT, SalesArea TEXT, Since TEXT)')
+    db.executemany('INSERT INTO customers VALUES (?, ?, ?)', [
+        ('A', 'North', '2020-01-01'),
+        ('B', 'North', None),
+        ('C', 'South', '2021-06-30'),
+        ('D', 'West', '2022-02-02'),
+        ('E', 'East', '2023-03-03'),
+    ])

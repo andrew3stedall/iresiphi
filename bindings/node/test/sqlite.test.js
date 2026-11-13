@@ -83,3 +83,35 @@ test('decimal eligibility falls back or refuses before opening; explain opens no
   assert.equal(recipe.explain(f.bindings, f.policy('require_source')).bound.feasible, false);
   await assert.rejects(api.run(recipe, f.bindings, f.policy('require_source')), {code:'PLACEMENT_INFEASIBLE'});
 });
+
+test('co-located SQLite snapshot reduces lookup targets through the public API', async t => {
+  const f = fixture(t);
+  fs.copyFileSync(path.join(__dirname, 'fixtures/sales-colocated.sqlite'), f.bindings.orders.path);
+  f.bindings.customers = {path:f.bindings.orders.path, adapter:'sqlite', settings:{table:'customers'}};
+  const doc = declaration();
+  doc.sources[1].projection.fields.Since = {path:'Since', data_type:{kind:'date'}, nullable:true};
+  const recipe = new api.Recipe(doc);
+  t.after(() => recipe.close());
+  const original = [recipe.hash, recipe.canonicalJson()];
+  const snapshots = [];
+  for (const placement of ['local', 'prefer_source', 'require_source']) {
+    const policy = {...f.policy(placement), limits:{input_bytes:fs.statSync(f.bindings.orders.path).size}};
+    assert.equal(recipe.validate(f.bindings, policy, 'full').valid, true);
+    assert.equal(recipe.explain(f.bindings, policy).bound.feasible, true);
+    const result = await api.run(recipe, f.bindings, policy);
+    try {
+      const sources = result.manifest.sources;
+      assert.deepEqual(sources.orders.shared_read, ['customers']);
+      assert.deepEqual(sources.customers.shared_read, ['orders']);
+      assert.equal(sources.orders.fingerprint, sources.customers.fingerprint);
+      assert.equal(sources.orders.rows, 7n);
+      assert.equal(sources.customers.rows, 5n);
+      assert.equal(sources.customers.scanned_rows, placement === 'local' ? undefined : 3n);
+      assert.deepEqual(result.batch('open_orders').map(r => r.order_no), [1n,3n,4n,5n]);
+      snapshots.push([result.batch('open_orders'),result.evidence(),result.evidence('candidate'),result.manifest.counts]);
+    } finally { result.close(); }
+  }
+  assert.deepEqual(snapshots[0],snapshots[1]);
+  assert.deepEqual(snapshots[0],snapshots[2]);
+  assert.deepEqual([recipe.hash,recipe.canonicalJson()],original);
+});

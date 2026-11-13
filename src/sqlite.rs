@@ -25,7 +25,7 @@ fn sql_error(e: rusqlite::Error) -> Error {
 }
 
 /// Open the bytes read as a read-only in-memory database.
-fn open(bytes: &[u8]) -> Result<Connection> {
+pub(super) fn open(bytes: &[u8]) -> Result<Connection> {
     if bytes.is_empty() {
         return Err(err("INVALID_SQLITE", "the database file is empty"));
     }
@@ -139,7 +139,15 @@ pub(super) fn inspect(
     required: Option<&Pushed>,
 ) -> Result<()> {
     let conn = open(bytes)?;
-    table(&conn, source, binding)?;
+    inspect_connection(source, binding, &conn, required)
+}
+pub(super) fn inspect_connection(
+    source: &Source,
+    binding: &Binding,
+    conn: &Connection,
+    required: Option<&Pushed>,
+) -> Result<()> {
+    table(conn, source, binding)?;
     if let Some(pushed) = required {
         let encoding: String = conn
             .query_row("PRAGMA encoding", [], |r| r.get(0))
@@ -221,6 +229,47 @@ fn source_checks(
             "{violating} records fail a source-side identity, nullability, field_bytes or storage-class check; the whole table is read locally to diagnose them"
         )));
     }
+    // A from table may have a decimal identity even though reduction keys and
+    // target identities cannot. Check that identity with the executor's exact
+    // conversion rather than grouping decimal spellings in SQLite.
+    if source
+        .identity
+        .iter()
+        .any(|id| matches!(source.projection.fields[id].data_type, Type::Decimal { .. }))
+    {
+        let selected = source
+            .identity
+            .iter()
+            .map(|id| quoted(column(&source.projection.fields[id])))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut statement = conn
+            .prepare(&format!("SELECT {selected} FROM {name}"))
+            .map_err(sql_error)?;
+        let mut records = statement.query([]).map_err(sql_error)?;
+        let mut seen = BTreeSet::new();
+        while let Some(record) = records.next().map_err(sql_error)? {
+            let mut key = Vec::new();
+            for (i, id) in source.identity.iter().enumerate() {
+                let (value, _) = convert(
+                    record.get_ref(i).map_err(sql_error)?,
+                    &source.projection.fields[id],
+                    limits,
+                )?;
+                match value {
+                    Ok(value) => key.push(value),
+                    Err(_) => return Ok(Some("identity requires local value diagnostics".into())),
+                }
+            }
+            if !seen.insert(serde_json::to_string(&key).map_err(io_error)?) {
+                return Ok(Some(
+                    "records share an identity; the whole table is read locally to diagnose them"
+                        .into(),
+                ));
+            }
+        }
+        return Ok(None);
+    }
     if !identity.is_empty() {
         let mut duplicated = conn
             .prepare(&format!(
@@ -294,18 +343,21 @@ fn convert(
 pub(super) fn read(
     source: &Source,
     binding: &Binding,
-    bytes: &[u8],
+    conn: &Connection,
     reference: &SourceReference,
     policy: &Policy,
     cancel: &AtomicBool,
     pushed: Option<&Pushed>,
+    group_fallback: Option<&String>,
 ) -> Result<Scan> {
-    let conn = open(bytes)?;
     let table = table(&conn, source, binding)?;
     let name = quoted(&table.name);
-    let fallback = match pushed {
-        Some(_) => source_checks(&conn, source, &table, &policy.limits)?,
-        None => None,
+    let fallback = match group_fallback {
+        Some(reason) => Some(reason.clone()),
+        None => match pushed {
+            Some(_) => source_checks(&conn, source, &table, &policy.limits)?,
+            None => None,
+        },
     };
     if let (Some(reason), Placement::RequireSource, Some(pushed)) =
         (&fallback, policy.placement, pushed)
@@ -344,7 +396,7 @@ pub(super) fn read(
     let rowid = table.rowid;
     let mut statement = conn
         .prepare(&format!(
-            "SELECT {rowid}, {selected} FROM {name}{condition} ORDER BY {rowid}"
+            "SELECT {rowid}, {selected} FROM {name} AS iresiphi_target{condition} ORDER BY {rowid}"
         ))
         .map_err(sql_error)?;
     let parameters = filter
@@ -413,4 +465,15 @@ pub(super) fn read(
         total_rows: usize::try_from(total_rows).unwrap_or(usize::MAX),
         placement,
     })
+}
+
+/// Preflight without delivering or charging decoded records.
+pub(super) fn preflight(
+    conn: &Connection,
+    source: &Source,
+    binding: &Binding,
+    policy: &Policy,
+) -> Result<Option<String>> {
+    let table = table(conn, source, binding)?;
+    source_checks(conn, source, &table, &policy.limits)
 }
