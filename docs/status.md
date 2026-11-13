@@ -55,9 +55,10 @@ shadowing and safe static expression depth. UTF-8 validation covers scanned text
 only under source placement, as disclosed in the contract and manifest.
 
 Local ARM verification of the slice 3 fixes is recorded in
-[unmet.md](measurements/unmet.md). Hosted ARM and x86 passes at the same commit,
-including pinned Python/Node matrices, remain pending; local results do not
-establish release acceptance. Slice 4 implementation is described below.
+[unmet.md](measurements/unmet.md). The integrated slice 3 fixes and slice 4 implementation passed all eight hosted
+checks at `61c5e0c`, including both architecture and runtime matrices; see the
+[verified run](measurements/ci-x86.md#slice-3-fixes-and-slice-4-verified-on-both-architectures).
+Slice 4 implementation is described below.
 
 ## Slice 4: same-database lookup reduction
 
@@ -71,9 +72,11 @@ group back locally. Matching and evidence remain in the executor.
 The Rust acceptance and parity cases are in `tests/sqlite.rs`; Python and Node
 exercise the co-located fixture through their public validate/explain/run APIs.
 The manifest and bound validation disclose scanned-only target text checks.
-Hosted ARM/x86, pinned interpreter/Node matrices, workload and packaging gates
-remain pending for the coordinator's integrated commit. Local evidence is
-recorded in [unmet.md](measurements/unmet.md).
+Hosted ARM/x86, pinned Python and Node matrices, workloads and packaging gates
+passed at `61c5e0c`. [The evidence record](measurements/ci-x86.md#slice-3-fixes-and-slice-4-verified-on-both-architectures)
+links the run and immutable artifact identities. Later heads require their own
+passing checks. Local evidence and remaining contract limitations are recorded
+in [unmet.md](measurements/unmet.md).
 
 ## Remaining scope
 

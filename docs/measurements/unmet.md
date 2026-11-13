@@ -50,10 +50,10 @@ The contract is [docs/spec/slice-3.md](../spec/slice-3.md); [docs/sqlite.md](../
 
 | Clause | Status | Reason |
 | --- | --- | --- |
-| SQLite source 7: cancellation is checked between records | Covered locally; hosted pending | `tests/sqlite.rs` cancels during a SQLite scan and asserts `CANCELLED`. |
-| Placement 4: a database that is not UTF-8 is read locally | Covered locally; hosted pending | `tests/sqlite.rs` and `tests/sqlite_adversarial.rs` build UTF-16 databases and check local fallback and `require_source` refusal in run and bound validation. Explain opens no source, so encoding is checked only at access time. |
-| Ticket 2: the placement half of the fixture through Python and Node | Met locally; hosted unverified | `tests/python_sqlite.py` and `bindings/node/test/sqlite.test.js` run the SQLite/CSV fixture under local and source placement, compare rows, evidence and output counts, and check decimal fallback/refusal. Both pass locally on ARM (CPython 3.12, Node 24.22.2); Python CI explicitly includes the new module and Node discovers the new test. Hosted x86 results for these tests still need CI, as do the full pinned interpreter/Node and architecture matrices. |
-| Both hosted architectures pass at the same commit | Unverified | Local ARM results only. The x86 pass needs GitHub Actions. |
+| SQLite source 7: cancellation is checked between records | Met at `61c5e0c` | `tests/sqlite.rs` cancels during a SQLite scan and asserts `CANCELLED`. |
+| Placement 4: a database that is not UTF-8 is read locally | Met at `61c5e0c` | `tests/sqlite.rs` and `tests/sqlite_adversarial.rs` build UTF-16 databases and check local fallback and `require_source` refusal in run and bound validation. Explain opens no source, so encoding is checked only at access time. |
+| Ticket 2: the placement half of the fixture through Python and Node | Met at `61c5e0c` | `tests/python_sqlite.py` and `bindings/node/test/sqlite.test.js` run the SQLite/CSV fixture under local and source placement, compare rows, evidence and output counts, and check decimal fallback/refusal. Both pass locally on ARM (CPython 3.12, Node 24.22.2); Python CI explicitly includes the new module and Node discovers the new test. All pinned interpreter/Node and architecture matrices passed in hosted run 43424967912. |
+| Both hosted architectures pass at the same commit | Met at `61c5e0c` | [Run 43424967912](https://github.com/andrew3stedall/iresiphi/actions/runs/43424967912) passed all eight jobs, including ARM and x86 Rust, workload, Python and Node gates. |
 
 Source placement checks field byte limits across all projected TEXT values in the
 table, along with identity, nullability and storage classes. Text formats and
@@ -64,7 +64,7 @@ and one-to-many relationships prevent anchor filtering. Static validation uses a
 iterative depth preflight (maximum 18 including feature references) before
 expansion or recursive typing; pushdown has a 500-bound-parameter cap.
 
-Local ARM verification of the uncommitted slice 3 fixes:
+Local ARM verification of the slice 3 fixes later committed at `c514682`:
 
 - `cargo fmt --check`: passed.
 - `cargo test --locked --test sqlite --test sqlite_adversarial`: 18 + 21 passed,
@@ -79,10 +79,9 @@ Local ARM verification of the uncommitted slice 3 fixes:
 The old full-validation assertion that every coverage string contained “rows”
 was replaced with a check that validation preserves execution's actual coverage
 (records, intervals and placement scope). Interrupted concurrent build attempts
-are not counted as passes. No hosted check at this working-tree state has been
-established. CPython 3.13, Node 22 and the 100,000-line workload were not
-rerun locally in this defect-fix session. Hosted ARM/x86, CPython 3.12/3.13
-and Node 22/24 gates remain pending at the eventual commit.
+are not counted as passes. CPython 3.13, Node 22 and the 100,000-line workload
+were not rerun locally in that defect-fix session. The later integrated commit
+`61c5e0c` passed the full hosted matrices; see the evidence record below.
 
 ## Closed in this ticket
 
@@ -111,7 +110,7 @@ These gaps from earlier tickets were fixed, with tests in `tests/preview.rs` and
 | Node contract clause | Status | Reason |
 | --- | --- | --- |
 | 6: customer/month parity golden | Met | `bindings/node/test/customer_month.test.js` compares against the shared golden and the fixed acceptance numbers. |
-| 7: both hosted architectures pass at the same commit | Unverified | The workflow builds and tests pinned Node 22.16.0 and 24.11.1 on hosted x86_64 and aarch64. This implementation session cannot establish a hosted pass; the coordinator must run CI after pushing. Local Node 24 ARM evidence does not replace any of these four gates. |
+| 7: both hosted architectures pass at the same commit | Met at `61c5e0c` | Node 22.16.0 and 24.11.1 passed addon and strict TypeScript checks on hosted x86_64 and aarch64 in run 43424967912. |
 
 ## Slice 4: shared SQLite snapshots and lookup target reduction
 
@@ -140,10 +139,12 @@ key membership, and separate text/lookup coverage. Focused verification passed
 27 SQLite integration tests and two deterministic cancellation unit tests. A
 query-plan regression verifies LIST SUBQUERY without a correlated subquery.
 The first full Rust rerun after review hit host ENOSYS/futex failures; it is not
-counted as a pass. Final full Rust and rebuilt binding verification remain in
-progress. Error precedence across independent faults is now explicitly
+counted as a pass. Final local Rust and Python rebuild attempts also encountered
+host syscall failures, while the rebuilt Node addon suite passed. Error precedence across independent faults is now explicitly
 disclosed in the slice 4 contract and guide.
 These local results do not establish hosted acceptance at the final commit.
-Hosted ARM and x86 at the same commit, CPython 3.12/3.13, Node 22/24, the workload,
-and x86 wheel audits and clean-image installs remain unverified for slice 4.
+Hosted verification at `61c5e0cd781df4ff871c720bb4044b7731166932` passed all eight
+jobs: ARM and x86 Rust/workloads, CPython 3.12/3.13, Node 22/24, x86 wheel
+audits and clean-image installs. The [evidence record](ci-x86.md#slice-3-fixes-and-slice-4-verified-on-both-architectures)
+links run 43424967912 and artifact identities. Later heads require their own checks.
 No x86 workload was run locally.
