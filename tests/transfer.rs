@@ -113,6 +113,7 @@ fn fixture_with(customers: &[&str]) -> Fixture {
         diagnostic_values: false,
         placement: Placement::Local,
         transfers: Transfers::None,
+        evidence: iresiphi::model::Evidence::Full,
     };
     Fixture {
         dir,
@@ -623,6 +624,7 @@ fn compound_keys_compare_stored_values_without_affinity_or_collation() {
         diagnostic_values: false,
         placement: Placement::Local,
         transfers: Transfers::None,
+        evidence: iresiphi::model::Evidence::Full,
     };
     let run = |policy: &Policy| {
         let report =
@@ -708,6 +710,7 @@ fn thousands_of_keys_transfer_within_the_default_limit() {
         diagnostic_values: false,
         placement: Placement::Local,
         transfers: Transfers::None,
+        evidence: iresiphi::model::Evidence::Full,
     };
     // The lookup row limit refuses the full table but admits the reduced scan.
     policy.limits.lookup_rows = 4000;

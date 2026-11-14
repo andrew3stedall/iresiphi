@@ -29,6 +29,7 @@ fn fixture() -> (tempfile::TempDir, Recipe, Bindings, Policy) {
         diagnostic_values: false,
         placement: Default::default(),
         transfers: Default::default(),
+        evidence: iresiphi::model::Evidence::Full,
     };
     (dir, recipe, bindings, policy)
 }

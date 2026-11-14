@@ -102,6 +102,27 @@ class TwoSupplierParity(unittest.TestCase):
         self.assertEqual(error.report.status, expected["status"])
         self.assertEqual(error.report_id, error.report.run_id)
 
+    def test_default_evidence_records_only_unresolved_lines(self):
+        """Slice 6: the default level keeps results and records problem lines."""
+        bindings = support.bindings(self.root)
+        with iresiphi.run(self.recipe, bindings, support.policy(self.root)) as result:
+            full_rows = {t: tagged_rows(result, t) for t in result.outputs}
+            full_totals = result.manifest["totals"]
+            unresolved = [r for r in result.evidence("primary") if r["status"] != "matched"]
+        with iresiphi.run(self.recipe, bindings, b.policy([self.root], [self.root])) as result:
+            self.assertEqual(result.status, "succeeded_with_unresolved")
+            self.assertEqual({t: tagged_rows(result, t) for t in result.outputs}, full_rows)
+            self.assertEqual(result.manifest["totals"], full_totals)
+            self.assertEqual(result.manifest["policy"]["evidence"], "problems")
+            self.assertEqual(result.manifest["evidence"]["level"], "problems")
+            self.assertEqual(result.evidence_count("primary"), 1)
+            self.assertEqual(result.evidence("primary"), unresolved)
+            self.assertLess(result.evidence_count("candidate"),
+                            self.golden["expected"]["evidence_counts"]["candidate"])
+        with self.assertRaises(iresiphi.IresiphiError) as raised:
+            iresiphi.run(self.recipe, bindings, b.policy([self.root], [self.root], evidence="none"))
+        self.assertEqual(raised.exception.code, "INVALID_POLICY")
+
     def test_error_parity_missing_binding(self):
         bindings = support.bindings(self.root)
         del bindings["rates"]
@@ -314,7 +335,7 @@ class ExactValues(unittest.TestCase):
         self.root = Path(self.directory.name)
         (self.root / "lines.json").write_text('{"lines":[{"id":"a"}]}', encoding="utf-8")
         self.bindings = {"lines": b.binding(self.root / "lines.json", "json")}
-        self.policy = b.policy([self.root], [self.root])
+        self.policy = b.policy([self.root], [self.root], evidence="full")
 
     def tearDown(self):
         self.directory.cleanup()

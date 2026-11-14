@@ -122,6 +122,7 @@ fn ledger() -> Ledger {
         diagnostic_values: false,
         placement: Default::default(),
         transfers: Default::default(),
+        evidence: iresiphi::model::Evidence::Full,
     };
     Ledger {
         _root: root,

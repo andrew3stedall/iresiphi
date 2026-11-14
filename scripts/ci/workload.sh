@@ -14,7 +14,7 @@ evidence="$(pwd)/ci-artifacts/workload"
   python3 -V
 } > "$evidence/environment.txt"
 fixture="$(mktemp -d)"
-python3 scripts/generate_fixture.py "$fixture" --lines 100000 --byte-limit 1073741824 > "$evidence/fixture-manifest.json"
+python3 scripts/generate_fixture.py "$fixture" --lines 100000 > "$evidence/fixture-manifest.json"
 cp "$fixture/policy.json" "$evidence/policy.json"
 cargo run --locked --release --example workload -- \
   "$fixture/recipe.iresiphi" "$fixture/bindings.json" "$fixture/policy.json" \

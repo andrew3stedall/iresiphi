@@ -46,7 +46,7 @@ class Handles(unittest.TestCase):
         cls.directory.cleanup()
 
     def policy(self, **limits):
-        return b.policy([self.root], [self.root], limits=limits or None)
+        return b.policy([self.root], [self.root], limits=limits or None, evidence="full")
 
     def run_lines(self, **limits):
         return iresiphi.run(iresiphi.Recipe(lines_recipe()), self.bindings, self.policy(**limits))

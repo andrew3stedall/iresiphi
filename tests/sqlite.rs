@@ -116,6 +116,7 @@ fn fixture_with(eligibility: Json, statements: &[&str]) -> Fixture {
         diagnostic_values: false,
         placement: Placement::Local,
         transfers: Default::default(),
+        evidence: iresiphi::model::Evidence::Full,
     };
     Fixture {
         dir,

@@ -168,6 +168,7 @@ fn xlsx_decompressed_and_cell_budgets_fail_the_run() {
         diagnostic_values: false,
         placement: Default::default(),
         transfers: Default::default(),
+        evidence: iresiphi::model::Evidence::Full,
     };
     let ok = ExecutionContext::default().run(&recipe, &bindings, &policy, &go());
     assert_eq!(ok.status, "succeeded", "{:?}", ok.diagnostics);

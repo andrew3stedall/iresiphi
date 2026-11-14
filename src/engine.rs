@@ -33,7 +33,8 @@ pub struct RunReport {
     pub run_id: String,
     pub status: String,
     pub tables: BTreeMap<String, Table>,
-    /// Primary evidence: one record per output line.
+    /// Primary evidence: one record per recorded output line. The policy's
+    /// evidence level decides which lines are recorded (docs/spec/slice-6.md).
     pub evidence: Vec<serde_json::Value>,
     /// One record per qualified to-one lookup candidate of an output line.
     #[serde(default)]
@@ -929,6 +930,7 @@ fn execute(
     let mut lines: BTreeMap<(&str, usize), bool> = BTreeMap::new();
     let mut evidence_time = std::time::Duration::ZERO;
     let mut asserted_lines = 0usize;
+    let full_evidence = policy.evidence == crate::model::Evidence::Full;
     for output in &recipe.outputs {
         progress.nodes.push(format!("output:{}", output.id));
         let parents = output
@@ -947,6 +949,8 @@ fn execute(
         let mut eligible = 0usize;
         let mut statuses: BTreeMap<&'static str, usize> = BTreeMap::new();
         let evidence_before = evidence.len();
+        // Selected lines whose evidence the policy does not ask for.
+        let mut unrecorded = 0usize;
         let mut selected: Vec<usize> = vec![];
         // Allocation runs over every member before any row is selected, so the
         // output filter never changes a denominator.
@@ -1179,11 +1183,14 @@ fn execute(
             };
             population.push((currency, status == "matched"));
             let recording = Instant::now();
+            // Resolved lines are counted, not recorded, unless the policy asks
+            // for full evidence (docs/spec/slice-6.md).
+            let record_line = full_evidence || status != "matched";
             let mut lookups = vec![];
             for rel in recipe
                 .relationships
                 .iter()
-                .filter(|r| r.from == output.anchor)
+                .filter(|r| record_line && r.from == output.anchor)
             {
                 let found = &matches[&rel.id][row_index];
                 let outcome = &outcomes[&rel.id][row_index];
@@ -1210,11 +1217,15 @@ fn execute(
                 };
                 lookups.push(serde_json::json!({"relationship":rel.id,"cardinality":rel.cardinality,"status":outcome.status,"reason":outcome.reason,"candidate_count":found.len(),"selected":selected,"ambiguous_references":ambiguous,"candidates":found.iter().map(|i|&sources[&rel.to][*i]).collect::<Vec<_>>()}));
             }
-            let mut record = serde_json::json!({"output":output.id,"source":row.reference,"original":row.raw,"status":status,"reason":values["_reason"],"relationships":lookups});
-            if output.detail {
+            let mut record = if record_line {
+                serde_json::json!({"output":output.id,"source":row.reference,"original":row.raw,"status":status,"reason":values["_reason"],"relationships":lookups})
+            } else {
+                serde_json::Value::Null
+            };
+            if record_line && output.detail {
                 record["parent"] = serde_json::json!(parent_reference);
             }
-            if let Some(identity) = &member_identity {
+            if let (true, Some(identity)) = (record_line, &member_identity) {
                 record["member"] = key_values(row, identity);
                 if !allocations.is_empty() {
                     record["allocations"] = allocations
@@ -1232,18 +1243,20 @@ fn execute(
                     .iter()
                     .map(|k| (k.clone(), values.get(k).cloned().unwrap_or(Value::Null)))
                     .collect();
-                record["group"] = keys
-                    .iter()
-                    .map(|(k, v)| (k.clone(), crate::adapters::plain_value(v)))
-                    .collect::<serde_json::Map<_, _>>()
-                    .into();
-                record["aggregate_inputs"] = output
-                    .aggregates
-                    .iter()
-                    .zip(&inputs)
-                    .map(|(a, input)| (a.name.clone(), input.is_some().into()))
-                    .collect::<serde_json::Map<_, _>>()
-                    .into();
+                if record_line {
+                    record["group"] = keys
+                        .iter()
+                        .map(|(k, v)| (k.clone(), crate::adapters::plain_value(v)))
+                        .collect::<serde_json::Map<_, _>>()
+                        .into();
+                    record["aggregate_inputs"] = output
+                        .aggregates
+                        .iter()
+                        .zip(&inputs)
+                        .map(|(a, input)| (a.name.clone(), input.is_some().into()))
+                        .collect::<serde_json::Map<_, _>>()
+                        .into();
+                }
                 members.push(Member {
                     key: serde_json::to_string(&keys.values().collect::<Vec<_>>())
                         .map_err(engine_error)?,
@@ -1255,7 +1268,11 @@ fn execute(
             } else {
                 table.push(values);
             }
-            evidence.push(record);
+            if record_line {
+                evidence.push(record);
+            } else {
+                unrecorded += 1;
+            }
             selected.push(row_index);
             evidence_time += recording.elapsed();
         }
@@ -1264,7 +1281,7 @@ fn execute(
             anchor_rows,
             &selected,
             eligible,
-            evidence.len() - evidence_before,
+            evidence.len() - evidence_before + unrecorded,
             if grouped { members.len() } else { table.len() },
         )?;
         asserted_lines += selected.len();
@@ -1307,8 +1324,9 @@ fn execute(
     progress.pass(
         "output.population",
         format!(
-            "full: {asserted_lines} anchor lines across {} outputs each appear once in their output and evidence; no line was added, dropped or repeated by lookups or detail",
-            recipe.outputs.len()
+            "full: {asserted_lines} anchor lines across {} outputs each appear once in their output{}; no line was added, dropped or repeated by lookups or detail",
+            recipe.outputs.len(),
+            if full_evidence { " and evidence" } else { "" }
         ),
     );
     let resolved = lines.values().filter(|r| **r).count();
@@ -1355,7 +1373,15 @@ fn execute(
     progress.pass(
         "evidence",
         format!(
-            "complete: {} primary, {} candidate and {} detail evidence records within the declared bounds",
+            "{}: {} primary, {} candidate and {} detail evidence records within the declared bounds",
+            if full_evidence {
+                "complete".to_string()
+            } else {
+                format!(
+                    "problems only: {} of {asserted_lines} selected lines did not resolve and are recorded; resolved lines are counted, not recorded (policy evidence: problems)",
+                    evidence.len()
+                )
+            },
             evidence.len(),
             candidate_evidence.len(),
             detail_evidence.len()
@@ -1717,6 +1743,7 @@ fn success_manifest(
         "reconciliation": reconciliation,
         "output_schema": crate::validation::output_schema(recipe),
         "evidence": {
+            "level": policy.evidence,
             "primary_rows": run.evidence.len(),
             "candidate_rows": run.candidate_evidence.len(),
             "detail_rows": run.detail_evidence.len(),

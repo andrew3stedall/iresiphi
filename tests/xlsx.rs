@@ -73,6 +73,7 @@ impl Case {
             diagnostic_values: false,
             placement: Default::default(),
             transfers: Default::default(),
+            evidence: iresiphi::model::Evidence::Full,
         };
         Case {
             _dir: dir,
@@ -193,6 +194,7 @@ fn public_run_enriches_invoice_lines_with_original_cell_evidence() {
         diagnostic_values: false,
         placement: Default::default(),
         transfers: Default::default(),
+        evidence: iresiphi::model::Evidence::Full,
     };
     let report =
         ExecutionContext::default().run(&recipe, &bindings, &policy, &AtomicBool::new(false));

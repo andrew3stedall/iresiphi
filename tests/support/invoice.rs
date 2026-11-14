@@ -133,6 +133,7 @@ pub fn fixture(root: &Path) -> (Recipe, Bindings, Policy) {
         diagnostic_values: false,
         placement: Default::default(),
         transfers: Default::default(),
+        evidence: iresiphi::model::Evidence::Full,
     };
     (recipe, bindings, policy)
 }
