@@ -6,27 +6,24 @@ checks `uname -m` before running tools. ARM development machines do not need to
 emulate x86 to run this job. GitHub documents `ubuntu-24.04` as an x64 runner in
 its [runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 
-Every workload that requires x86 must run through GitHub Actions on an x86
-runner. This includes the preview's Linux x86_64 wheels, native dependency audits,
-and minimum-glibc container tests. ARM-compatible builds, tests and processing may
-run locally using native ARM tools and artifacts. A local x86 emulator is not a
-substitute for the required workflow evidence.
+All builds must run through GitHub Actions on the matching GitHub-hosted runner,
+including ARM-compatible builds. Do not build locally on ARM. This includes the
+preview's Linux x86_64 wheels, ARM artifacts, native dependency audits, and
+minimum-glibc container tests. A local x86 emulator is not a substitute for the
+required workflow evidence.
 
 ## Required passes: ARM and x86
 
 A change is accepted, and a release gate is met, only when it passes on both architectures at the same commit:
 
-- **ARM (aarch64):** the full Rust suite (`cargo test --locked`), the Python suites on CPython 3.12 and 3.13 against installed wheels, the Rust/Python parity golden, and the 100,000-line workload. These run on the native `ubuntu-24.04-arm` GitHub runner; they may also run locally on native ARM.
+- **ARM (aarch64):** the full Rust suite (`cargo test --locked`), the Python suites on CPython 3.12 and 3.13 against installed wheels, the Rust/Python parity golden, and the 100,000-line workload. These run on the native `ubuntu-24.04-arm` GitHub runner.
 - **Node:** build the napi-rs addon and run the Node and strict TypeScript suites on Node 22 and 24 on each architecture, at the same commit.
 - **x86 (x86_64):** the same suites and workload, plus the manylinux_2_28 wheel build, `auditwheel`, and clean-image installs. These run in the GitHub Actions x86 job.
 
 A pass on one architecture does not stand in for the other. Record each pass with its commit; evidence for an earlier commit does not carry forward. PR workflows check out the PR head SHA explicitly, so local ARM and x86 jobs test the same commit rather than different synthetic merge commits.
 
-The ARM runner provides a complete verification path when local sessions cannot
-finish the workload. Local Rust and Python suites passed at `72ffd6c`, but two
-local workload attempts terminated without a report, so they are not recorded as
-passes. Native ARM CI records the same fixture, explicit limits and result
-assertions as x86 CI. ARM wheels remain development artifacts, without a
+The ARM runner provides the verification path for ARM workloads. Native ARM CI
+records the same fixture, explicit limits and result assertions as x86 CI. ARM wheels remain development artifacts, without a
 manylinux audit or ARM release-support claim. GitHub documents the native runner
 in its [runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 
