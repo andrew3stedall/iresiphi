@@ -298,11 +298,14 @@ def binding(path, adapter, **settings):
 
 
 def policy(read_roots, output_roots=(), limits=None, diagnostic_values=False, placement=None,
-           transfers=None):
+           transfers=None, evidence=None):
     """`placement` is "local" (the default), "prefer_source" or "require_source".
 
     `transfers` is "none" (the default) or "keys": whether lookup key values may
-    be sent to a lookup target's source to reduce what it returns."""
+    be sent to a lookup target's source to reduce what it returns.
+
+    `evidence` is "problems" (the default) or "full": whether a run records
+    evidence only for lines that did not resolve, or for every line."""
     declared = {"allowed_read_roots": list(read_roots),
                 "allowed_output_roots": list(output_roots),
                 "diagnostic_values": diagnostic_values}
@@ -310,6 +313,8 @@ def policy(read_roots, output_roots=(), limits=None, diagnostic_values=False, pl
         declared["placement"] = placement
     if transfers is not None:
         declared["transfers"] = transfers
+    if evidence is not None:
+        declared["evidence"] = evidence
     if limits:
         declared["limits"] = dict(limits)
     return declared

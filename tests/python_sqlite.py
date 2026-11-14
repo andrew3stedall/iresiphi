@@ -59,7 +59,7 @@ class SQLitePlacement(unittest.TestCase):
         self.bindings = write_fixture(self.root)
 
     def policy(self, placement):
-        return b.policy([str(self.root)], placement=placement)
+        return b.policy([str(self.root)], placement=placement, evidence="full")
 
     def test_acceptance_placement_preserves_rows_evidence_counts_and_recipe(self):
         with iresiphi.Recipe(declaration()) as recipe:
@@ -143,7 +143,8 @@ class SQLitePlacement(unittest.TestCase):
             for placement, transfers, scanned in [
                     ('local', None, None), ('require_source', None, None), ('prefer_source', 'none', None),
                     ('local', 'keys', None), ('prefer_source', 'keys', 4), ('require_source', 'keys', 4)]:
-                policy = b.policy([str(self.root)], placement=placement, transfers=transfers)
+                policy = b.policy([str(self.root)], placement=placement, transfers=transfers,
+                                  evidence="full")
                 self.assertTrue(recipe.validate(bindings, policy, 'full')['valid'])
                 bound = recipe.explain(bindings, policy)['bound']
                 self.assertTrue(bound['feasible'])

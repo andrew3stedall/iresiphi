@@ -31,7 +31,7 @@ function fixture(t) {
   fs.writeFileSync(path.join(root, 'customers.csv'), 'CustNo,SalesArea\nA,North\nB,North\nC,South\n');
   return {root, bindings:{orders:{path:path.join(root, 'sales.sqlite'), adapter:'sqlite', settings:{table:'orders'}},
     customers:{path:path.join(root, 'customers.csv'), adapter:'csv'}},
-  policy: placement => ({allowed_read_roots:[root], allowed_output_roots:[], placement})};
+  policy: placement => ({allowed_read_roots:[root], allowed_output_roots:[], placement, evidence:'full'})};
 }
 
 test('SQLite placement preserves acceptance rows, evidence, output counts and recipe identity', async t => {

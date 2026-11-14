@@ -20,6 +20,7 @@ fn fixture(adapter: &str, contents: &[u8]) -> (tempfile::TempDir, Recipe, Bindin
         diagnostic_values: false,
         placement: Default::default(),
         transfers: Default::default(),
+        evidence: iresiphi::model::Evidence::Full,
     };
     (dir, recipe, bindings, policy)
 }

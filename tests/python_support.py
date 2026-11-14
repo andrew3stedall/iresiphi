@@ -119,8 +119,9 @@ def bindings(root):
     return result
 
 
-def policy(root, **limits):
-    return b.policy([Path(root)], [Path(root)], limits=limits or None)
+def policy(root, evidence="full", **limits):
+    """The shared goldens count evidence for every line, so they state `full`."""
+    return b.policy([Path(root)], [Path(root)], limits=limits or None, evidence=evidence)
 
 
 def load_generator():

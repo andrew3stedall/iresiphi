@@ -141,6 +141,7 @@ fn new(doc: Json) -> Fixture {
         diagnostic_values: false,
         placement: Default::default(),
         transfers: Default::default(),
+        evidence: iresiphi::model::Evidence::Full,
     };
     Fixture {
         dir,

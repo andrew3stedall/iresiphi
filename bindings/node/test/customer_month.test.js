@@ -22,7 +22,7 @@ test('shared customer/month golden: population, allocation, totals and conservat
       fs.writeFileSync(file, content);
       return [id, {path: file, adapter: 'csv', settings: {}}];
     }));
-    const policy = {allowed_read_roots: [directory], allowed_output_roots: [directory]};
+    const policy = {allowed_read_roots: [directory], allowed_output_roots: [directory], evidence: 'full'};
     const recipe = new api.Recipe(golden.canonical_json);
     assert.equal(recipe.hash, golden.recipe_hash);
     assert.equal(recipe.validate(bindings, policy, 'full').valid, true);
