@@ -1,9 +1,13 @@
-import {Recipe, run, IresiphiError, Scalar} from '..';
+import {Recipe, run, IresiphiError, Scalar, plan} from '..';
 async function example(document: string) {
   const recipe = new Recipe(document);
   const hash: string = recipe.hash;
   const signal = new AbortController().signal;
   const result = await run(recipe, {orders: {path: '/data/sales.sqlite', adapter: 'sqlite', settings: {table: 'orders'}}}, {allowed_read_roots: ['/data'], allowed_output_roots: [], placement: 'prefer_source'}, {signal});
+  const pipeline = plan(recipe, {}, {allowed_read_roots: [], allowed_output_roots: []});
+  pipeline.explain();
+  const deferredResult = await pipeline.collect({signal});
+  deferredResult.close();
   const value: Scalar = result.batch('review')[0].amount;
   const count: bigint = result.rowCount('review');
   const status: string = result.status;

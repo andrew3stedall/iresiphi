@@ -485,16 +485,13 @@ pub(super) fn read(
     let mut records = statement
         .query(rusqlite::params_from_iter(parameters))
         .map_err(sql_error)?;
+    let names = crate::adapters::projected_names(source);
     let mut rows = RowCollector::new(policy);
     let mut failures = ValueFailures::default();
     while let Some(record) = records.next().map_err(sql_error)? {
         check_cancel(cancel)?;
         let id: i64 = record.get(0).map_err(sql_error)?;
-        let mut row = Row {
-            fields: BTreeMap::new(),
-            raw: BTreeMap::new(),
-            reference: reference.clone(),
-        };
+        let mut row = crate::adapters::blank_row(&names, &reference);
         row.reference.location = format!("rowid:{id}");
         let mut failure = None;
         for (i, (field, declared, _)) in table.columns.iter().enumerate() {

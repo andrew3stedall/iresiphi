@@ -38,8 +38,9 @@ default = []
 python = ["dep:pyo3"]
 
 [dependencies]
+futures = "=0.3.34"
 datafusion = { version = "=55.2.0", default-features = false, features = ["sql"] }
-serde = { version = "=1.0.229", features = ["derive"] }
+serde = { version = "=1.0.229", features = ["derive", "rc"] }
 serde_json = { version = "=1.0.154", features = ["raw_value", "arbitrary_precision"] }
 csv = "=1.4.0"
 calamine = "=0.38.0"

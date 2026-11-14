@@ -109,6 +109,20 @@ their expectations. Hosted ARM/x86, Python, Node and packaging gates passed at
 `a838be5`, the first hosted workload run under the default limits; see the
 [verified run](measurements/ci-x86.md#slice-6-verified-on-both-architectures).
 
+## Slice 7: deferred pipelines and bounded execution
+
+[Slice 7](spec/slice-7.md) records a developer decision: Iresiphi should work like
+other data platforms, where a caller builds a pipeline and nothing runs until it
+is called, and a run should not hold every record in memory. It is delivered in
+phases. Phase 1 adds `Pipeline` (Rust), `iresiphi.plan` (Python) and `plan`
+(Node), which bind a recipe to its sources and policy without opening them. It
+also stores each source's field names once instead of in every record, shares
+source identity strings across records, streams lookup candidates out of the join
+engine, and counts byte budgets without building serialized copies. Results and
+serialized bytes are unchanged. Before phase 1 the 100,000-line workload held
+1.11 GB right after reading its 350,004 records. Streamed delivery, streamed
+anchors and spilled lookup targets are the later phases.
+
 ## Remaining scope
 
 The broad product specification

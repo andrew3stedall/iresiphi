@@ -56,6 +56,23 @@ class TwoSupplierParity(unittest.TestCase):
         self.recipe.close()
         self.directory.cleanup()
 
+    def test_pipeline_defers_access_and_owns_declarations(self):
+        bindings = support.bindings(self.root)
+        policy = support.policy(self.root)
+        path = Path(bindings["a"]["path"])
+        content = path.read_bytes()
+        path.unlink()
+        pipeline = iresiphi.plan(self.recipe, bindings, policy)
+        self.assertEqual(pipeline.explain()["bound"]["source_access"], "not-run")
+        with self.assertRaises(iresiphi.IresiphiError):
+            pipeline.collect()
+        path.write_bytes(content)
+        bindings.clear()
+        policy["allowed_read_roots"] = []
+        self.recipe.close()
+        with pipeline.collect() as result:
+            self.assertEqual(result.status, self.golden["expected"]["status"])
+
     def test_python_builders_produce_the_rust_recipe(self):
         self.assertEqual(self.recipe.hash, self.golden["recipe_hash"])
         self.assertEqual(self.recipe.canonical_json(), self.golden["canonical_json"])

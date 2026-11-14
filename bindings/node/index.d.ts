@@ -32,3 +32,13 @@ export class Run {
   close(): void;
 }
 export function run(recipe: Recipe, bindings: Bindings, policy: Policy, settings?: {signal?: AbortSignal; destination?: string}): Promise<Run>;
+
+/** Deferred declarations. No sources open until collect/run. Execution currently
+ * materializes source rows; collect also retains output rows. */
+export class Pipeline {
+  constructor(recipe: Recipe, bindings: Bindings, policy: Policy);
+  explain(): RecordData;
+  collect(settings?: {signal?: AbortSignal}): Promise<Run>;
+  run(destination: string, settings?: {signal?: AbortSignal}): Promise<Run>;
+}
+export function plan(recipe: Recipe, bindings: Bindings, policy: Policy): Pipeline;

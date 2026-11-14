@@ -4,6 +4,7 @@ mod allocation;
 pub mod cancel;
 pub mod eval;
 pub mod model;
+pub mod record;
 pub mod scalar;
 pub mod validation;
 pub use model::{Binding, Bindings, Error, Limits, Policy, Recipe};
@@ -18,3 +19,6 @@ pub mod placement;
 
 #[cfg(feature = "python")]
 mod python;
+
+pub mod pipeline;
+pub use pipeline::Pipeline;

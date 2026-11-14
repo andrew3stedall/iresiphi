@@ -139,3 +139,20 @@ test('argument diagnostics retain Python-compatible codes and phases', async () 
   await assert.rejects(api.run(recipe(), {}, {}), {code:'INVALID_POLICY', phase:'policy'});
   await assert.rejects(api.run(recipe(), {a:{}}, policy), {code:'INVALID_BINDING', phase:'binding'});
 });
+
+test('pipeline defers source access and owns declarations', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'iresiphi-plan-'));
+  try {
+    const b = structuredClone(bindings), p = structuredClone(policy), r = recipe();
+    b.a.path = path.join(directory, 'later.json');
+    p.allowed_read_roots.push(directory);
+    const pipeline = api.plan(r, b, p);
+    assert.equal(pipeline.explain().bound.source_access, 'not-run');
+    await assert.rejects(pipeline.collect(), e => e.report.status === 'failed');
+    fs.copyFileSync(bindings.a.path, b.a.path);
+    b.a.path = 'changed'; p.allowed_read_roots = []; r.close();
+    const result = await pipeline.collect();
+    assert.equal(result.status, golden.expected.status);
+    result.close();
+  } finally { fs.rmSync(directory, {recursive:true, force:true}); }
+});

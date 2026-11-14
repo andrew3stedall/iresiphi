@@ -17,7 +17,9 @@ use datafusion::{
     },
     prelude::col,
 };
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::{
     collections::BTreeMap,
     sync::{
@@ -633,7 +635,7 @@ fn execute(
             }
             None => (rel, &sources[&rel.to]),
         };
-        let mut effective_left = sources[&rel.from].clone();
+        let mut effective_left = Cow::Borrowed(sources[&rel.from].as_slice());
         let mut blocked: Vec<Option<Outcome>> = vec![None; effective_left.len()];
         for key_name in &rel.from_keys {
             if let Some((dependency, field)) = key_name.split_once('.') {
@@ -642,7 +644,7 @@ fn execute(
                     .iter()
                     .find(|r| r.id == dependency)
                     .ok_or_else(|| Error::new("UNKNOWN_PATH", "execution", dependency))?;
-                for (i, row) in effective_left.iter_mut().enumerate() {
+                for (i, row) in effective_left.to_mut().iter_mut().enumerate() {
                     let outcome = &outcomes[dependency][i];
                     let value = if outcome.status == "matched" {
                         sources[&prior.to][matches[dependency][i][0]]
@@ -722,24 +724,41 @@ fn execute(
                 .and(col("r_end").is_null().or(col("l_date").lt(col("r_end"))))
         });
         cancel.entered(RunPhase::Join);
-        let batches: Vec<RecordBatch> = rt.block_on(async {
-            let frame=left_frame.join(right_frame,JoinType::Inner,&["l_key"],&["r_key"],temporal)?.select_columns(&["l_idx","r_idx"])?;
-            let work=frame.collect();tokio::pin!(work);
-            loop {tokio::select! {result=&mut work => break result, _=tokio::time::sleep(std::time::Duration::from_millis(50)) => {if cancel.load(Ordering::Acquire){break Err(datafusion::error::DataFusionError::Execution("run cancelled".into()));}}}}
-        }).map_err(|e|if cancel.load(Ordering::Acquire){Error::new("CANCELLED","execution","run cancelled")}else{engine_error(e)})?;
         let mut found = vec![vec![]; left.len()];
-        for b in batches {
-            check(cancel)?;
-            let li = b.column(0).as_any().downcast_ref::<UInt64Array>().unwrap();
-            let ri = b.column(1).as_any().downcast_ref::<UInt64Array>().unwrap();
-            for n in 0..b.num_rows() {
-                let l = li.value(n) as usize;
-                let r = ri.value(n) as usize;
-                if qualified(rel, &left[l], &right[r])? {
-                    found[l].push(r);
+        rt.block_on(async {
+            let work = async {
+                let frame = left_frame.join(right_frame, JoinType::Inner,
+                    &["l_key"], &["r_key"], temporal)?.select_columns(&["l_idx", "r_idx"])?;
+                let mut stream = frame.execute_stream().await?;
+                while let Some(batch) = stream.next().await {
+                    let batch = batch?;
+                    if cancel.load(Ordering::Acquire) {
+                        return Err(datafusion::error::DataFusionError::Execution("run cancelled".into()));
+                    }
+                    let li = batch.column(0).as_any().downcast_ref::<UInt64Array>().unwrap();
+                    let ri = batch.column(1).as_any().downcast_ref::<UInt64Array>().unwrap();
+                    for n in 0..batch.num_rows() {
+                        found[li.value(n) as usize].push(ri.value(n) as usize);
+                    }
+                    // Drop this batch before pulling the next. The engine
+                    // join already applies key and temporal qualification.
+                }
+                Ok::<_, datafusion::error::DataFusionError>(())
+            };
+            tokio::pin!(work);
+            loop {
+                tokio::select! {
+                    result = &mut work => break result,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                        if cancel.load(Ordering::Acquire) {
+                            break Err(datafusion::error::DataFusionError::Execution("run cancelled".into()));
+                        }
+                    }
                 }
             }
-        }
+        }).map_err(|e| if cancel.load(Ordering::Acquire) {
+            Error::new("CANCELLED", "execution", "run cancelled")
+        } else { engine_error(e) })?;
         for candidates in &mut found {
             candidates.sort_unstable();
         }
@@ -1347,15 +1366,16 @@ fn execute(
             policy.limits.candidate_pairs
         )));
     }
-    let mut bytes =
-        serde_json::to_vec(&(&tables, &evidence, &candidate_evidence, &detail_evidence))
-            .map_err(engine_error)?
-            .len();
+    let mut bytes = crate::admission::serialized_size(&(
+        &tables,
+        &evidence,
+        &candidate_evidence,
+        &detail_evidence,
+    ))
+    .map_err(engine_error)?;
     // Allocation evidence counts only when present, so other runs keep their exact size.
     if !allocation_evidence.is_empty() {
-        bytes += serde_json::to_vec(&allocation_evidence)
-            .map_err(engine_error)?
-            .len();
+        bytes += crate::admission::serialized_size(&allocation_evidence).map_err(engine_error)?;
     }
     if bytes > policy.limits.output_bytes || bytes > policy.limits.retained_bytes {
         // The memory result is retained only if it fits; this is a delivery budget.
@@ -2448,8 +2468,7 @@ fn materialize_populations(
     // Members are retained like source records, so they continue the sources'
     // `retained_bytes` count, measured the same way (serialized record size).
     let size = |row: &Row| {
-        serde_json::to_vec(row)
-            .map(|bytes| bytes.len())
+        crate::admission::serialized_size(row)
             .map_err(|e| Error::new("SOURCE_ACCESS", "execution", e.to_string()))
     };
     let mut retained = 0usize;
@@ -2570,7 +2589,7 @@ fn materialize_populations(
                 let member = Row {
                     fields,
                     reference: SourceReference {
-                        source: p.id.clone(),
+                        source: p.id.as_str().into(),
                         binding: recipient.reference.binding.clone(),
                         fingerprint: recipient.reference.fingerprint.clone(),
                         location: format!(
@@ -2588,7 +2607,8 @@ fn materialize_populations(
                             serde_json::json!(recipient.raw),
                         ),
                         (p.period.field.clone(), serde_json::json!(period)),
-                    ]),
+                    ])
+                    .into(),
                 };
                 retained = retained.saturating_add(size(&member)?);
                 if retained > policy.limits.retained_bytes {
