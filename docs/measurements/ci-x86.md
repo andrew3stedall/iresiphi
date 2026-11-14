@@ -152,3 +152,30 @@ locally; this run is the only full pass.
 
 GitHub reports an expiry of 2027-02-12 for these artifacts. Evidence for this
 commit does not certify later heads; their own PR checks remain authoritative.
+
+## Slice 6: verified on both architectures
+
+[PR #37](https://github.com/andrew3stedall/iresiphi/pull/37), commit
+`a838be548dd417a8f7c4d53a336dda13220560b0`, passed all eight jobs in
+[run 43589353015](https://github.com/andrew3stedall/iresiphi/actions/runs/43589353015)
+on 2026-11-14: native ARM and x86 Rust suites with formatting, dependency
+notices and the 100,000-line workload, installed CPython 3.12 and 3.13 wheels,
+Node 22.16.0 and 24.11.1 on both architectures, x86 wheel audits with clean
+installs, and Terraform validation. The suites include the slice 6
+evidence-level tests.
+
+This is the first hosted workload run under the default resource profile:
+`scripts/ci/workload.sh` no longer raises `output_bytes` or `retained_bytes`.
+On x86 the run succeeded with one unresolved line, serialized 52,133,436 bytes of
+results and evidence, wrote a 5,161,798-byte bundle and recorded a process peak
+RSS of 1,411,559,424 bytes; `run_bundle` took 7.6 s. A cancellation requested
+50 ms in returned after 2.1 ms.
+
+| Artifact | ID | SHA-256 digest |
+| --- | --- | --- |
+| x86-distributions | 14112137862 | `9e0a88ee3773636b6753bd57ee1e16a3ec27d0274d2696e4ec2e32852db9f627` |
+| x86-workload | 14111342536 | `b29ace161a8ca49ace4ca8e1be59bee2ad410bf852a77a0fa3450066b39d1850` |
+| arm-workload (including installed ARM wheels) | 14111723610 | `d55811ce920b51eb1770d7a091f5fae09e3368495412b4a4ed88fead61a4d00f` |
+
+GitHub reports an expiry of 2027-02-12 for these artifacts. Evidence for this
+commit does not certify later heads; their own PR checks remain authoritative.

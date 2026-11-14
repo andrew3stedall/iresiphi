@@ -105,8 +105,9 @@ workload no longer raises its byte limits.
 
 Rust cases are in `tests/evidence.rs`; Python and Node check the default level on
 the two-supplier fixture. The earlier suites state `evidence: full` and keep
-their expectations. Hosted verification is recorded in
-[the evidence record](measurements/ci-x86.md) once it has run at the commit.
+their expectations. Hosted ARM/x86, Python, Node and packaging gates passed at
+`a838be5`, the first hosted workload run under the default limits; see the
+[verified run](measurements/ci-x86.md#slice-6-verified-on-both-architectures).
 
 ## Remaining scope
 
