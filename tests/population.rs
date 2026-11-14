@@ -238,6 +238,42 @@ fn population_size_counts_toward_anchor_rows_before_materialization() {
 }
 
 #[test]
+fn population_members_count_toward_retained_bytes_as_they_are_created() {
+    let mut f = sales_fixture();
+    let source_limited = |f: &Fixture| {
+        let report = f.run();
+        report.status != "succeeded"
+            && failure(&report)
+                .message
+                .contains("retained source materialization")
+    };
+    f.policy.limits.retained_bytes = 1;
+    assert!(source_limited(&f), "one byte cannot hold the sources");
+    // The smallest budget that holds every source record.
+    let (mut low, mut high) = (1usize, 1 << 20);
+    while high - low > 1 {
+        let middle = low + (high - low) / 2;
+        f.policy.limits.retained_bytes = middle;
+        if source_limited(&f) {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    f.policy.limits.retained_bytes = high;
+    let report = f.run();
+    let error = failure(&report);
+    assert_eq!(error.code, "RESOURCE_LIMIT");
+    assert_eq!(error.subject.as_deref(), Some("population:customer_month"));
+    assert!(
+        error.message.contains("limits.retained_bytes"),
+        "{}",
+        error.message
+    );
+    assert!(report.tables.is_empty(), "nothing is published");
+}
+
+#[test]
 fn bundles_carry_population_outputs_and_their_schema() {
     let f = sales_fixture();
     let destination = f.dir.path().join("bundle");

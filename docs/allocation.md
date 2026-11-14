@@ -175,7 +175,7 @@ The totals for an allocated column hold the usual `population`, `comparable` and
 
 The run report has a fourth evidence list, `allocation_evidence`, with one record per partition: the partition keys, the quantity, recipient count, weight sum, assigned sum, residual, policy, status (`allocated`, `unallocated` or `no_quantity`) and the quantity record's reference. Python reads it as evidence kind `"allocation"`, and a bundle stores it as the `_allocation_evidence` table when the recipe allocates. Each primary evidence record of a population output carries `member` (its identity values) and `allocations.<name>`. That entry holds the recipient's weight, the exact share before quantization (`exact_share`), and the assigned amount. `exact_share` is decimal text when the share terminates within 38 digits. Otherwise it is null, with `exact_share_terminates` false and `exact_share_status` `non_terminating` or `exceeds_38_digits`.
 
-Budgets, cancellation and bundle delivery work as for other runs. Allocation evidence counts toward `output_bytes` and `retained_bytes`.
+Budgets, cancellation and bundle delivery work as for other runs. Allocation evidence counts toward `output_bytes` and `retained_bytes`. Population members count toward `retained_bytes` as they are created, on top of the source records. A cancellation request is seen within 1,024 members inside one allocation.
 
 ## Limits
 

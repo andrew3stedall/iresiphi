@@ -954,13 +954,14 @@ fn execute(
         for a in &output.allocations {
             check(cancel)?;
             let (members, weight_reasons) =
-                allocation_members(recipe, &sources, &matches, &outcomes, output, a)?;
+                allocation_members(recipe, &sources, &matches, &outcomes, output, a, cancel)?;
             let mut outcome = crate::allocation::allocate(
                 output,
                 a,
                 &sources[&a.quantity.source],
                 &members,
                 policy,
+                cancel,
             )?;
             diagnostics.append(&mut outcome.warnings);
             allocation_evidence.extend(outcome.partitions.iter().cloned());
@@ -2417,6 +2418,23 @@ fn materialize_populations(
 ) -> Result<BTreeMap<String, serde_json::Value>> {
     let mut info = BTreeMap::new();
     let mut total = 0usize;
+    // Members are retained like source records, so they continue the sources'
+    // `retained_bytes` count, measured the same way (serialized record size).
+    let size = |row: &Row| {
+        serde_json::to_vec(row)
+            .map(|bytes| bytes.len())
+            .map_err(|e| Error::new("SOURCE_ACCESS", "execution", e.to_string()))
+    };
+    let mut retained = 0usize;
+    if !recipe.populations.is_empty() {
+        for (index, row) in sources.values().flatten().enumerate() {
+            if index % 1024 == 0 {
+                check(cancel)?;
+            }
+            retained = retained.saturating_add(size(row)?);
+        }
+    }
+    let source_bytes = retained;
     for p in &recipe.populations {
         check(cancel)?;
         let subject = format!("population:{}", p.id);
@@ -2522,7 +2540,7 @@ fn materialize_populations(
                         value: period.clone(),
                     },
                 );
-                rows.push(Row {
+                let member = Row {
                     fields,
                     reference: SourceReference {
                         source: p.id.clone(),
@@ -2544,7 +2562,23 @@ fn materialize_populations(
                         ),
                         (p.period.field.clone(), serde_json::json!(period)),
                     ]),
-                });
+                };
+                retained = retained.saturating_add(size(&member)?);
+                if retained > policy.limits.retained_bytes {
+                    return Err(Error::new(
+                        "RESOURCE_LIMIT",
+                        "execution",
+                        format!(
+                            "members of population {} bring retained source and member bytes to {retained}, more than limits.retained_bytes ({}); {} members were created",
+                            p.id,
+                            policy.limits.retained_bytes,
+                            rows.len()
+                        ),
+                    )
+                    .with_subject(subject.clone())
+                    .with_check("budget"));
+                }
+                rows.push(member);
             }
         }
         total += members;
@@ -2572,8 +2606,9 @@ fn materialize_populations(
         progress.pass(
             "population.members",
             format!(
-                "full: {total} members across {} populations, each population counted against limits.anchor_rows before materialization; no member inferred from activity",
-                recipe.populations.len()
+                "full: {total} members across {} populations, each population counted against limits.anchor_rows before materialization and {} member bytes against limits.retained_bytes; no member inferred from activity",
+                recipe.populations.len(),
+                retained - source_bytes
             ),
         );
     }
@@ -2631,6 +2666,7 @@ fn allocation_members<'a>(
     outcomes: &Outcomes,
     output: &Output,
     a: &Allocation,
+    cancel: &AtomicBool,
 ) -> Result<(Vec<crate::allocation::Member<'a>>, Vec<Vec<Outcome>>)> {
     let rows = &sources[&output.anchor];
     let identity = recipe
@@ -2647,6 +2683,9 @@ fn allocation_members<'a>(
     let mut members = Vec::with_capacity(rows.len());
     let mut weight_reasons = Vec::with_capacity(rows.len());
     for (index, row) in rows.iter().enumerate() {
+        if index % 1024 == 0 {
+            check(cancel)?;
+        }
         let evaluate = |expr: &Expr, reasons: &mut Vec<Outcome>| -> Result<Value> {
             let prepared = prepare(
                 expr,
