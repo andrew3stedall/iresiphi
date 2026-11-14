@@ -179,3 +179,27 @@ RSS of 1,411,559,424 bytes; `run_bundle` took 7.6 s. A cancellation requested
 
 GitHub reports an expiry of 2027-02-12 for these artifacts. Evidence for this
 commit does not certify later heads; their own PR checks remain authoritative.
+
+## Slice 7 phase 1: verified on both architectures
+
+[PR #38](https://github.com/andrew3stedall/iresiphi/pull/38), commit
+`b1774bc93014259ec9d26107ac11e36bea1a0175`, passed all eight jobs in
+[run 43651658874](https://github.com/andrew3stedall/iresiphi/actions/runs/43651658874)
+on 2026-11-14, including the Rust, Python and Node suites with the deferred
+pipeline tests. The first head, `47e1b09`, failed every Node job before any
+test ran: the Node addon's own `Cargo.lock` did not list the new `futures`
+dependency. `b1774bc` adds it.
+
+The x86 workload under the default profile matches slice 6 byte for byte in
+serialized results (52,133,436 bytes) and bundle size (5,161,798 bytes), with
+process peak RSS down from 1,411,559,424 bytes at `a838be5` to 840,863,744 bytes.
+`run_bundle` took 6.6 s. A cancellation requested 50 ms in returned after 1.0 ms.
+
+| Artifact | ID | SHA-256 digest |
+| --- | --- | --- |
+| x86-distributions | 14136394836 | `792ee1a59357f0eae43759b927e7e1c7053e4730508a76e0998c60dd6076078b` |
+| x86-workload | 14136981353 | `b4f48d3c6c9153dd2e4843a4672d14c23d8987d67351893504b0f9b2acc4598b` |
+| arm-workload (including installed ARM wheels) | 14136883117 | `8934d679556c5bd9ea79c2fc4269099d52940ff8db0b635a087260f04150ab6f` |
+
+GitHub reports an expiry of 2027-02-12 for these artifacts. Evidence for this
+commit does not certify later heads; their own PR checks remain authoritative.
