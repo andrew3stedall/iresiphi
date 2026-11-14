@@ -148,3 +148,29 @@ jobs: ARM and x86 Rust/workloads, CPython 3.12/3.13, Node 22/24, x86 wheel
 audits and clean-image installs. The [evidence record](ci-x86.md#slice-3-fixes-and-slice-4-verified-on-both-architectures)
 links run 43424967912 and artifact identities. Later heads require their own checks.
 No x86 workload was run locally.
+
+## Slice 5: key transfer to a lookup target
+
+The implementation follows [slice 5](../spec/slice-5.md). The policy gains
+`transfers` (`none` by default, or `keys`) and `limits.transfer_keys`. A
+many-to-one lookup whose target is a SQLite table and whose other end is not
+co-located sends the distinct keys of the delivered from records to the target
+as bound parameters. Explain lists planned transfers without opening a source;
+the manifest records key counts and never the values.
+
+| Clause | Status | Reason |
+| --- | --- | --- |
+| 7: a transfer above the key limit is not sent | Met, with a limitation | The transfer is all or nothing. Keys above `limits.transfer_keys` (at most 32,766 values) are not sent in chunks; the target is read in full, or the run is infeasible under `require_source`. |
+| 5: a transfer target is read after every other source | Met, with a disclosed change | With a transfer planned, error precedence across independent faults follows read order rather than declaration order. |
+| 3: every from record contributes keys unless its scan is filtered | Met, with a limitation | A file source has no pushed eligibility, so keys of ineligible records are sent too (D and Z in the fixture). The reduction is smaller than an eligibility-aware transfer would give, and lookup checks keep covering every from record. |
+
+Rust tests in `tests/transfer.rs` cover the CSV-orders/SQLite-customers fixture,
+a SQLite from source in another file with a pushed eligibility, the default-off
+policy and its explanation, the key limit under both placements, a target with
+another use, the disclosed unscanned-date difference, a failed whole-table check,
+duplicate, null, case-differing and empty-string keys, an empty key set,
+three-column keys over `NOCASE` and `NUMERIC` columns, 3,000 keys against a
+9,000-record target under a lookup row limit, UTF-16 fallback and refusal, full
+bound validation coverage, and policy parsing. Python and Node run the fixture
+through their public APIs.
+

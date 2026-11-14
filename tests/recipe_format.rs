@@ -288,6 +288,7 @@ fn saved_recipes_carry_no_bindings_paths_or_secrets() {
         limits: Limits::default(),
         diagnostic_values: false,
         placement: Default::default(),
+        transfers: Default::default(),
     };
     let before = recipe.to_json().unwrap();
     let report =
@@ -316,6 +317,7 @@ fn missing_bindings_fail_only_at_bound_validation_and_run() {
         limits: Limits::default(),
         diagnostic_values: false,
         placement: Default::default(),
+        transfers: Default::default(),
     };
     let bound = validate_bound(&recipe, &Bindings::new(), &policy, "none");
     assert_eq!(first_error(&bound).as_deref(), Some("MISSING_BINDING"));
@@ -708,6 +710,7 @@ fn bound_fixture() -> (tempfile::TempDir, Recipe, Bindings, Policy) {
         limits: Limits::default(),
         diagnostic_values: false,
         placement: Default::default(),
+        transfers: Default::default(),
     };
     (dir, load(&document()).unwrap(), bindings, policy)
 }
@@ -743,6 +746,7 @@ fn schema_only_json_checks_escaped_headers_and_nested_array_pointers() {
         limits: Limits::default(),
         diagnostic_values: false,
         placement: Default::default(),
+        transfers: Default::default(),
     };
     std::fs::write(
         &path,

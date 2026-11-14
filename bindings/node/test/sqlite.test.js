@@ -115,3 +115,44 @@ test('co-located SQLite snapshot reduces lookup targets through the public API',
   assert.deepEqual(snapshots[0],snapshots[2]);
   assert.deepEqual([recipe.hash,recipe.canonicalJson()],original);
 });
+
+test('key transfer reduces a SQLite lookup target from CSV orders under policy', async t => {
+  const f = fixture(t);
+  const orders = path.join(f.root, 'orders.csv');
+  fs.writeFileSync(orders, 'order_no,cust,booked,net,open\n1,A,2026-01-05,60.00,true\n2,A,2026-01-20,40.00,false\n' +
+    '3,B,2026-01-11,200.00,true\n4,C,2026-02-08,120.50,true\n5,Z,2026-02-09,10.00,true\n' +
+    '6,B,2025-12-31,75.25,true\n7,D,2025-11-02,30.00,true\n');
+  const crm = path.join(f.root, 'crm.sqlite');
+  fs.copyFileSync(path.join(__dirname, 'fixtures/sales-colocated.sqlite'), crm);
+  const bindings = {orders:{path:orders, adapter:'csv'}, customers:{path:crm, adapter:'sqlite', settings:{table:'customers'}}};
+  const doc = declaration();
+  doc.sources[1].projection.fields.Since = {path:'Since', data_type:{kind:'date'}, nullable:true};
+  const recipe = new api.Recipe(doc);
+  t.after(() => recipe.close());
+  const original = [recipe.hash, recipe.canonicalJson()];
+  const snapshots = [];
+  for (const [placement, transfers, scanned] of [['local', undefined, undefined], ['require_source', undefined, undefined],
+    ['prefer_source', 'none', undefined], ['local', 'keys', undefined], ['prefer_source', 'keys', 4n], ['require_source', 'keys', 4n]]) {
+    const policy = {...f.policy(placement), ...(transfers ? {transfers} : {})};
+    assert.equal(recipe.validate(bindings, policy, 'full').valid, true);
+    const bound = recipe.explain(bindings, policy).bound;
+    assert.equal(bound.feasible, true);
+    assert.deepEqual(bound.transfers.map(x => x.transfer), scanned ? ['relationship:order_customer/keys'] : []);
+    const result = await api.run(recipe, bindings, policy);
+    try {
+      const customers = result.manifest.sources.customers;
+      assert.equal(customers.rows, 5n);
+      assert.equal(customers.scanned_rows, scanned);
+      if (scanned) {
+        assert.equal(customers.placement.transfer.keys, 5n);
+        assert.equal(customers.placement.reduction, 'transferred_keys');
+      }
+      assert.deepEqual(result.batch('open_orders').map(r => r.order_no), [1n, 3n, 4n, 5n]);
+      snapshots.push([result.batch('open_orders'), result.evidence(), result.evidence('candidate'), result.manifest.counts]);
+    } finally { result.close(); }
+  }
+  for (const snapshot of snapshots.slice(1)) assert.deepEqual(snapshot, snapshots[0]);
+  await assert.rejects(api.run(recipe, bindings, {...f.policy('require_source'), transfers:'keys', limits:{transfer_keys:4}}),
+    {code:'PLACEMENT_INFEASIBLE'});
+  assert.deepEqual([recipe.hash, recipe.canonicalJson()], original);
+});

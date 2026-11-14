@@ -1,6 +1,6 @@
 # SQLite sources and source placement
 
-A source can be a table in a SQLite database file, and an output's eligibility predicate can run inside SQLite instead of in the local executor. The recipe does not change for either: the adapter is named in the binding, and placement is set in the policy. The normative contracts are [slice 3](spec/slice-3.md) and [slice 4](spec/slice-4.md). This page describes what the library does.
+A source can be a table in a SQLite database file, and an output's eligibility predicate can run inside SQLite instead of in the local executor. The recipe does not change for either: the adapter is named in the binding, and placement is set in the policy. The normative contracts are [slice 3](spec/slice-3.md), [slice 4](spec/slice-4.md) and [slice 5](spec/slice-5.md). This page describes what the library does.
 
 ## Binding a table
 
@@ -123,6 +123,29 @@ preserved from slice 3.
 Capabilities declare `relationship_target_reduction` and equal-path co-location.
 Placement does not alter canonical recipe JSON or its hash.
 
+## Key transfer to a lookup target
+
+When a many-to-one lookup's target is a SQLite table and its other end is somewhere else (a CSV, JSON or XLSX file, or a table in a different SQLite file), the two sides do not share a source. The executor can still reduce the target scan by sending it the keys of the records it holds. That is a transfer, and it is off unless the policy permits it:
+
+```python
+policy = b.policy(["/data"], placement="prefer_source", transfers="keys")
+```
+
+| `transfers` | Meaning |
+| --- | --- |
+| `none` (default) | Nothing moves from one source to another. The target is read in full. |
+| `keys` | The executor may send lookup key values of the records it holds to the lookup target's source. |
+
+With `transfers="keys"` and a placement other than `local`, the target scan returns only the records whose key equals a transferred key. The keys are the distinct keys, with no null component, of the `from` records the executor received: every record of a file source, eligible or not, or the scanned records of a SQLite source with a pushed eligibility. They are bound as query parameters on the target's read-only in-memory copy. Nothing is written or staged, no temporary table is created, and nothing leaves the process.
+
+The relationship and its target must meet the same conditions as same-database reduction: many-to-one with no validity or period qualification, direct `from` fields as keys, `int64`, `string`, `date` or `boolean` keys, a target with no other use and no decimal identity. Same-file bindings use same-database reduction instead and need no transfer permission.
+
+`limits.transfer_keys` (default 10,000, never more than 32,766) bounds the key values one transfer sends: distinct keys times key columns. Above it, `prefer_source` reads the target in full and records the reason; `require_source` fails with `PLACEMENT_INFEASIBLE`.
+
+A transfer changes no output row, lookup outcome, diagnostic or evidence record. `tests/transfer.rs` compares each case with the local run. It changes what a reduced scan always changes: the target's `scanned_rows`, the records its row limits count, and the coverage of date text, decimal text and valid UTF-8 checks, which apply to scanned records only. Whole-table checks run first; a failure reads the target in full locally and gives the local diagnostic. A transfer target is read after every other source, so when two sources each have a fault, the one reported can differ from a run without a transfer.
+
+Explain opens nothing and lists each planned transfer under `bound.transfers`: its ID `relationship:<id>/keys`, both sources, the key fields, the mechanism and the limit. When a target stays local because transfers are not permitted, its placement entry says so and names the setting. `require_source` demands a transfer only when `transfers` is `keys`; with `none` the target is local and the run is feasible. The manifest's placement record for a reduced target adds `reduction: transferred_keys` and the number of keys sent, never their values.
+
 ## Not included
 
-Remote databases, credentials, SQL bindings, pushdown of aggregation, joined rows or output filters, transfers and staging are deferred.
+Remote databases, credentials, SQL bindings, pushdown of aggregation, joined rows or output filters, transfers of anything but keys, transfers to sources other than SQLite, and staging are deferred.

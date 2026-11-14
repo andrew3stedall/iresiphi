@@ -72,6 +72,7 @@ impl Case {
             limits: Limits::default(),
             diagnostic_values: false,
             placement: Default::default(),
+            transfers: Default::default(),
         };
         Case {
             _dir: dir,
@@ -191,6 +192,7 @@ fn public_run_enriches_invoice_lines_with_original_cell_evidence() {
         limits: Limits::default(),
         diagnostic_values: false,
         placement: Default::default(),
+        transfers: Default::default(),
     };
     let report =
         ExecutionContext::default().run(&recipe, &bindings, &policy, &AtomicBool::new(false));

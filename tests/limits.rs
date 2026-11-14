@@ -166,6 +166,7 @@ fn xlsx_decompressed_and_cell_budgets_fail_the_run() {
         limits: Limits::default(),
         diagnostic_values: false,
         placement: Default::default(),
+        transfers: Default::default(),
     };
     let ok = ExecutionContext::default().run(&recipe, &bindings, &policy, &go());
     assert_eq!(ok.status, "succeeded", "{:?}", ok.diagnostics);

@@ -140,6 +140,7 @@ fn new(doc: Json) -> Fixture {
         limits: Limits::default(),
         diagnostic_values: false,
         placement: Default::default(),
+        transfers: Default::default(),
     };
     Fixture {
         dir,
