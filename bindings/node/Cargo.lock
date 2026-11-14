@@ -1685,6 +1685,7 @@ dependencies = [
  "chrono",
  "csv",
  "datafusion",
+ "futures",
  "libc",
  "num-bigint 0.4.8",
  "num-traits",
