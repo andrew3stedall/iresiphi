@@ -341,7 +341,7 @@ fn materialize_sources(
                 .filter(|s| plan.transfers.contains_key(&s.id)),
         );
     for source in ordered {
-        check_cancel(cancel)?;
+        check_cancel(cancel).map_err(|e| tag_source(e, &source.id))?;
         let binding = bindings
             .get(&source.id)
             .ok_or_else(|| err("MISSING_BINDING", format!("missing binding {}", source.id)))?;
@@ -495,7 +495,7 @@ fn materialize_sources(
         let mut null_identities = Vec::new();
         let mut batch_bytes = 0usize;
         for (i, row) in rows.iter_mut().enumerate() {
-            check_cancel(cancel)?;
+            check_cancel(cancel).map_err(subject)?;
             let key: Vec<_> = source
                 .identity
                 .iter()
