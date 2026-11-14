@@ -6,8 +6,7 @@ The Matt Pocock engineering skills and their license are included in those direc
 
 ## Execution architecture
 
-Run every workload requiring x86 through a GitHub Actions workflow on an x86
-runner. ARM-compatible builds, tests and processing may run locally on ARM.
-For local development, use native ARM tools and artifacts; use GitHub Actions
-for x86 builds, container checks and release certification. Follow
-[CI and processor architecture](docs/ci.md) for the workflow and evidence rules.
+Run all builds through GitHub Actions, including ARM-compatible builds. Run
+architecture-specific workloads on the matching GitHub-hosted runner. Do not
+build locally on ARM. Follow [CI and processor architecture](docs/ci.md) for
+the workflow and evidence rules.
