@@ -132,3 +132,23 @@ subject. `a5b5578` attributes it to the source being read.
 
 GitHub reports an expiry of 2027-02-12 for these artifacts. Evidence for this
 commit does not certify later heads; their own PR checks remain authoritative.
+
+## Allocation cancellation, member bytes and rename codes: verified on both architectures
+
+[PR #36](https://github.com/andrew3stedall/iresiphi/pull/36), commit
+`6fb7b6f52c2ae3d7d216e6a9b139df65817672f9`, passed all eight jobs in
+[run 43578207362](https://github.com/andrew3stedall/iresiphi/actions/runs/43578207362)
+on 2026-11-14: native ARM and x86 Rust suites with the 100,000-line workload,
+Node 22.16.0 and 24.11.1 on both architectures, and x86 wheel audits with clean
+installs. The Rust suites include the new allocation cancellation, population
+`retained_bytes` and rename-code tests. The full Rust suite was not completed
+locally; this run is the only full pass.
+
+| Artifact | ID | SHA-256 digest |
+| --- | --- | --- |
+| x86-distributions | 14107243438 | `4f1b76f80a82744c7d3d69ff26aed8eb456e036c0a8a2fba7949b7ebd2cc6e0b` |
+| x86-workload | 14106967336 | `d874a3b427f1ac7e0d6fed1501bf3bb692dc7c5f09987a4bea98d2d3d6c5c8b7` |
+| arm-workload (including installed ARM wheels) | 14107667682 | `408eb9f4f4269a64be9fa38b8ef3f6b6b7e4c4a7134b061ae5f409a6cbe856db` |
+
+GitHub reports an expiry of 2027-02-12 for these artifacts. Evidence for this
+commit does not certify later heads; their own PR checks remain authoritative.
