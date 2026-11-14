@@ -951,7 +951,7 @@ fn target_text_coverage_and_whole_group_fallback() {
     // First target's invalid date is exposed only when the entire group falls back.
     let error = f.failure();
     assert!(!error.samples.is_empty(), "{error:?}");
-    assert_eq!(error.samples[0].source, "customers");
+    assert_eq!(&*error.samples[0].source, "customers");
     f.policy.placement = Placement::Local;
     let local = f.failure();
     f.policy.placement = Placement::RequireSource;

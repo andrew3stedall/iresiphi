@@ -416,9 +416,9 @@ fn materialize_sources(
         );
         let parsed = std::time::Instant::now();
         let reference = SourceReference {
-            source: source.id.clone(),
-            binding: binding_identity(binding)?,
-            fingerprint,
+            source: source.id.as_str().into(),
+            binding: binding_identity(binding)?.into(),
+            fingerprint: fingerprint.into(),
             location: String::new(),
         };
         let max = if recipe
@@ -507,7 +507,7 @@ fn materialize_sources(
                 let key = serde_json::to_string(&key).map_err(io_error)?;
                 identities.entry(key).or_default().push(i);
             }
-            let size = serde_json::to_vec(row).map_err(io_error)?.len();
+            let size = crate::admission::serialized_size(row).map_err(io_error)?;
             limit(
                 size <= policy.limits.batch_bytes,
                 "single decoded record bytes",
@@ -566,8 +566,8 @@ fn materialize_sources(
                 SourceRead {
                     adapter: binding.adapter.clone(),
                     capabilities: adapter_capabilities(&binding.adapter),
-                    binding: reference.binding.clone(),
-                    fingerprint: reference.fingerprint.clone(),
+                    binding: reference.binding.to_string(),
+                    fingerprint: reference.fingerprint.to_string(),
                     bytes_read: bytes.len(),
                     shared_read: recipe
                         .sources
@@ -750,6 +750,19 @@ impl ValueFailures {
     }
 }
 
+/// Field names shared by every record a source projection reads.
+pub(crate) fn projected_names(source: &Source) -> crate::record::FieldNames {
+    std::sync::Arc::new(source.projection.fields.keys().cloned().collect())
+}
+/// An empty record of a projection; filling its fields in name order keeps
+/// the shared name list (docs/spec/slice-7.md).
+pub(crate) fn blank_row(names: &crate::record::FieldNames, reference: &SourceReference) -> Row {
+    Row {
+        fields: crate::record::FieldMap::with_names(names.clone()),
+        raw: crate::record::FieldMap::with_names(names.clone()),
+        reference: reference.clone(),
+    }
+}
 struct RowCollector<'a> {
     rows: Vec<Row>,
     bytes: usize,
@@ -770,7 +783,7 @@ impl<'a> RowCollector<'a> {
             self.rows.len() < self.policy.limits.lookup_rows,
             "source row count",
         )?;
-        let size = serde_json::to_vec(&row).map_err(io_error)?.len();
+        let size = crate::admission::serialized_size(&row).map_err(io_error)?;
         if self.rows.len() % self.policy.limits.batch_rows.max(1) == 0 {
             self.batch_bytes = 0;
         }
@@ -1158,15 +1171,12 @@ fn read_json(
             .collect(),
         None => vec![&root],
     };
+    let names = projected_names(source);
     let mut rows = RowCollector::new(policy);
     let mut failures = ValueFailures::default();
     for (index, record) in records.into_iter().enumerate() {
         check_cancel(cancel)?;
-        let mut row = Row {
-            fields: BTreeMap::new(),
-            raw: BTreeMap::new(),
-            reference: reference.clone(),
-        };
+        let mut row = blank_row(&names, &reference);
         row.reference.location = source
             .projection
             .array
@@ -1407,6 +1417,7 @@ fn read_csv(
                 .ok_or_else(|| err("INVALID_PROJECTION", format!("missing CSV column {path}")))
         })
         .collect::<Result<_>>()?;
+    let names = projected_names(source);
     let mut rows = RowCollector::new(policy);
     let mut failures = ValueFailures::default();
     let mut index = 0usize;
@@ -1424,11 +1435,7 @@ fn read_csv(
                 ),
             ));
         }
-        let mut row = Row {
-            fields: BTreeMap::new(),
-            raw: BTreeMap::new(),
-            reference: reference.clone(),
-        };
+        let mut row = blank_row(&names, &reference);
         row.reference.location = format!("record:{number}");
         let filled = (|| -> Result<()> {
             for (name, field, col) in &columns {
@@ -1950,17 +1957,14 @@ fn read_xlsx(
                 })
         })
         .collect::<Result<_>>()?;
+    let names = projected_names(source);
     let mut rows = RowCollector::new(policy);
     let mut failures = ValueFailures::default();
     let end_row = range.end().unwrap().0;
     let date_system = if epoch1904 { "1904" } else { "1900" };
     for row_index in header_row + 1..=end_row {
         check_cancel(cancel)?;
-        let mut row = Row {
-            fields: BTreeMap::new(),
-            raw: BTreeMap::new(),
-            reference: reference.clone(),
-        };
+        let mut row = blank_row(&names, &reference);
         row.reference.location = format!("{sheet}!{}", row_index + 1);
         let filled = (|| -> Result<()> {
             for (name, field, col) in &columns {

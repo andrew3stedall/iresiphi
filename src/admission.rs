@@ -93,6 +93,15 @@ impl std::io::Write for Counter {
     }
 }
 
+/// Measure serialized transport size without allocating a second copy of it.
+pub(crate) fn serialized_size<T: serde::Serialize + ?Sized>(
+    value: &T,
+) -> serde_json::Result<usize> {
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.0)
+}
+
 /// Typed schema shared by memory results and bundle tables.
 /// Typed output columns shared by memory results, the manifest and `schema.json`,
 /// including measure ownership and grain metadata from validation.

@@ -18,6 +18,7 @@ package is a thin layer over opaque handles:
 """
 
 import os
+from copy import deepcopy
 
 from . import build
 from . import _native
@@ -25,6 +26,8 @@ from .errors import HandleClosedError, IresiphiError, RunCancelled, RunInterrupt
 
 __all__ = [
     "Recipe",
+    "Pipeline",
+    "plan",
     "Catalog",
     "ExecutionContext",
     "RunResult",
@@ -86,3 +89,31 @@ def run(recipe, bindings, policy, cancel=None, destination=None):
     """Run on a fresh ``ExecutionContext``; see ``ExecutionContext.run``."""
     return ExecutionContext().run(recipe, bindings, policy, cancel=cancel,
                                   destination=destination)
+
+
+class Pipeline:
+    """Deferred recipe, bindings and policy; no sources open until collect/run.
+
+    Each execution observes current sources. collect retains its results;
+    execution currently materializes source rows even with a destination.
+    """
+
+    def __init__(self, recipe, bindings, policy):
+        self._recipe = Recipe.from_json(recipe.to_json())
+        self._bindings = deepcopy(bindings)
+        self._policy = deepcopy(policy)
+
+    def explain(self):
+        return self._recipe.explain(self._bindings, self._policy)
+
+    def collect(self, cancel=None):
+        return run(self._recipe, self._bindings, self._policy, cancel=cancel)
+
+    def run(self, destination, cancel=None):
+        return run(self._recipe, self._bindings, self._policy,
+                   cancel=cancel, destination=destination)
+
+
+def plan(recipe, bindings, policy):
+    """Bind a recipe without source access or execution."""
+    return Pipeline(recipe, bindings, policy)

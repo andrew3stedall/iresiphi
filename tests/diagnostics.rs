@@ -91,7 +91,7 @@ fn lookup_diagnostics_are_complete_bounded_records_without_values() {
     assert_eq!(d.count_status, "exact");
     assert_eq!(d.samples.len(), 1);
     assert_eq!(d.samples[0].location, "/lines/0");
-    assert_eq!(d.samples[0].source, "a");
+    assert_eq!(&*d.samples[0].source, "a");
     assert!(!d.samples_truncated);
     assert!(d.remediation.as_deref().is_some_and(|r| !r.is_empty()));
     assert!(d.values.is_none());

@@ -249,18 +249,23 @@ pub struct Binding {
     pub settings: BTreeMap<String, serde_json::Value>,
 }
 pub type Bindings = BTreeMap<String, Binding>;
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Where one record came from. `source`, `binding` and `fingerprint` are the
+/// same for every record of a read, so records share them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SourceReference {
-    pub source: String,
-    pub binding: String,
-    pub fingerprint: String,
+    pub source: std::sync::Arc<str>,
+    pub binding: std::sync::Arc<str>,
+    pub fingerprint: std::sync::Arc<str>,
     pub location: String,
 }
+/// One source record: typed values and the original projected values, keyed by
+/// field name. Records of one source share their field names
+/// ([`crate::record::FieldMap`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Row {
-    pub fields: BTreeMap<String, Value>,
+    pub fields: crate::record::FieldMap<Value>,
     pub reference: SourceReference,
-    pub raw: BTreeMap<String, serde_json::Value>,
+    pub raw: crate::record::FieldMap<serde_json::Value>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]

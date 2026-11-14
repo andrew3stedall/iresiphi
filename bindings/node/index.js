@@ -86,4 +86,17 @@ async function run(recipe, bindings, policy, {signal, destination} = {}) {
     return result;
   } finally { signal?.removeEventListener('abort', cancel); }
 }
-module.exports = {Recipe, Run, run, IresiphiError};
+class Pipeline {
+  #recipe; #bindings; #policy;
+  constructor(recipe, bindings, policy) {
+    this.#recipe = new Recipe(recipe.toJson());
+    this.#bindings = copy(bindings); this.#policy = copy(policy);
+  }
+  explain() { return this.#recipe.explain(this.#bindings, this.#policy); }
+  collect(settings) { return run(this.#recipe, this.#bindings, this.#policy, settings); }
+  run(destination, settings = {}) {
+    return run(this.#recipe, this.#bindings, this.#policy, {...settings, destination});
+  }
+}
+function plan(recipe, bindings, policy) { return new Pipeline(recipe, bindings, policy); }
+module.exports = {Recipe, Run, Pipeline, plan, run, IresiphiError};

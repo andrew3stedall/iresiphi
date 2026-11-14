@@ -143,7 +143,7 @@ fn json_header_fields_carry_onto_each_array_record_without_cartesian_product() {
         assert_eq!(row.fields["supplier"], s("A"));
         assert_eq!(row.fields["id"], s(&(i + 1).to_string()));
         assert_eq!(row.reference.location, format!("/lines/{i}"));
-        assert_eq!(row.reference.source, "lines");
+        assert_eq!(&*row.reference.source, "lines");
     }
     // Pointing a scalar field at an unrelated array never expands it.
     let one = One::new(
@@ -351,8 +351,8 @@ fn source_references_fingerprint_the_bytes_read_and_name_a_safe_binding_identity
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    assert!(rows.iter().all(|r| r.reference.fingerprint == digest));
-    let identity = rows[0].reference.binding.clone();
+    assert!(rows.iter().all(|r| *r.reference.fingerprint == *digest));
+    let identity = rows[0].reference.binding.to_string();
     assert!(!identity.is_empty());
     assert_ne!(
         identity, "lines",
@@ -364,7 +364,10 @@ fn source_references_fingerprint_the_bytes_read_and_name_a_safe_binding_identity
         "binding identity must not leak machine paths"
     );
     // Stable for the same binding...
-    assert_eq!(one.read().unwrap()[0].reference.binding, identity);
+    assert_eq!(
+        &*one.read().unwrap()[0].reference.binding,
+        identity.as_str()
+    );
     // ...and distinct when the same bytes are rebound from elsewhere.
     let copy = one.dir.path().join("copy");
     std::fs::write(&copy, bytes).unwrap();
@@ -372,8 +375,8 @@ fn source_references_fingerprint_the_bytes_read_and_name_a_safe_binding_identity
     rebound.policy = one.policy.clone();
     rebound.bindings.get_mut("lines").unwrap().path = copy;
     let rows = rebound.read().unwrap();
-    assert_eq!(rows[0].reference.fingerprint, digest);
-    assert_ne!(rows[0].reference.binding, identity);
+    assert_eq!(&*rows[0].reference.fingerprint, digest.as_str());
+    assert_ne!(&*rows[0].reference.binding, identity.as_str());
 }
 
 // ----------------------------------------------------------------------- CSV dialect
