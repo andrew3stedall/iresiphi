@@ -9,6 +9,18 @@ use num_bigint::BigInt;
 use num_traits::{One, Signed, Zero};
 use serde_json::{Value as Json, json};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Members processed between cancellation checks inside one allocation.
+const CANCEL_STRIDE: usize = 1024;
+
+fn check(cancel: &AtomicBool, index: usize) -> Result<()> {
+    if index % CANCEL_STRIDE == 0 && cancel.load(Ordering::Acquire) {
+        Err(Error::new("CANCELLED", "execution", "run cancelled"))
+    } else {
+        Ok(())
+    }
+}
 
 fn ten(power: u32) -> BigInt {
     BigInt::from(10).pow(power)
@@ -56,7 +68,8 @@ pub(crate) fn split(
     weights: &[BigInt],
     policy: ResidualPolicy,
     rank: &[usize],
-) -> Split {
+    cancel: &AtomicBool,
+) -> Result<Split> {
     let total: BigInt = weights.iter().sum();
     let negative = units.is_negative();
     let magnitude = units.abs();
@@ -64,7 +77,8 @@ pub(crate) fn split(
     match policy {
         ResidualPolicy::LargestRemainder => {
             let mut remainders = Vec::with_capacity(weights.len());
-            for w in weights {
+            for (i, w) in weights.iter().enumerate() {
+                check(cancel, i)?;
                 let n = &magnitude * w;
                 assigned.push(&n / &total);
                 remainders.push(n % &total);
@@ -77,6 +91,7 @@ pub(crate) fn split(
                     .cmp(&remainders[a])
                     .then(rank[a].cmp(&rank[b]))
             });
+            check(cancel, 0)?;
             for i in order {
                 if !remaining.is_positive() {
                     break;
@@ -87,7 +102,8 @@ pub(crate) fn split(
         }
         ResidualPolicy::Report => {
             let two = BigInt::from(2);
-            for w in weights {
+            for (i, w) in weights.iter().enumerate() {
+                check(cancel, i)?;
                 let n = &magnitude * w;
                 let mut q = &n / &total;
                 let twice = (n % &total) * &two;
@@ -104,10 +120,10 @@ pub(crate) fn split(
         }
     }
     let sum: BigInt = assigned.iter().sum();
-    Split {
+    Ok(Split {
         residual: units - sum,
         assigned,
-    }
+    })
 }
 
 fn gcd(mut a: BigInt, mut b: BigInt) -> BigInt {
@@ -224,6 +240,7 @@ pub(crate) fn allocate(
     quantities: &[Row],
     members: &[Member<'_>],
     policy: &Policy,
+    cancel: &AtomicBool,
 ) -> Result<Outcome> {
     let subject = format!("output:{}/allocation:{}", output.id, allocation.name);
     let fail = |code: &str, check: &str, message: String, affected: Vec<&SourceReference>| {
@@ -240,7 +257,8 @@ pub(crate) fn allocate(
     // Weights: negative is always an error; null is an error unless declared zero.
     let mut weights: Vec<Option<(BigInt, u8)>> = Vec::with_capacity(members.len());
     let (mut negative, mut null) = (vec![], vec![]);
-    for m in members {
+    for (i, m) in members.iter().enumerate() {
+        check(cancel, i)?;
         if !m.recipient {
             weights.push(None);
             continue;
@@ -344,6 +362,7 @@ pub(crate) fn allocate(
         _ => "undeclared".to_string(),
     };
     for (p, row) in quantities.iter().enumerate() {
+        check(cancel, 0)?;
         let recipients = by_partition.get(&p).cloned().unwrap_or_default();
         let weight_sum: BigInt = recipients
             .iter()
@@ -417,7 +436,13 @@ pub(crate) fn allocate(
         for (position, &i) in by_identity.iter().enumerate() {
             rank[i] = position;
         }
-        let result = split(&units, &partition_weights, allocation.residual, &rank);
+        let result = split(
+            &units,
+            &partition_weights,
+            allocation.residual,
+            &rank,
+            cancel,
+        )?;
         let sum: BigInt = result.assigned.iter().sum();
         // Conservation: assigned sum plus residual equals the quantity exactly.
         let conserved = &sum + &result.residual == units
@@ -438,6 +463,7 @@ pub(crate) fn allocate(
         }
         let limit = ten(u32::from(allocation.precision));
         for (k, &i) in recipients.iter().enumerate() {
+            check(cancel, k)?;
             if result.assigned[k].abs() >= limit {
                 return Err(Error::new(
                     "ARITHMETIC_OVERFLOW",
@@ -528,6 +554,7 @@ pub(crate) fn allocate(
         .iter()
         .enumerate()
         .map(|(i, m)| {
+            check(cancel, i)?;
             let status = member_status[i];
             let value = assigned[i]
                 .as_ref()
@@ -562,13 +589,13 @@ pub(crate) fn allocate(
                 "exact_share_status": share_status,
                 "assigned": crate::adapters::plain_value(&value),
             });
-            Assignment {
+            Ok(Assignment {
                 value,
                 unresolved,
                 evidence,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
     // Overall totals exist only when every partition is in one currency.
     let single = by_currency.len() <= 1;
     let summary = json!({
@@ -632,4 +659,46 @@ pub(crate) fn allocate(
         summary,
         warnings,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn weights(n: usize) -> (Vec<BigInt>, Vec<usize>) {
+        ((1..=n).map(BigInt::from).collect(), (0..n).collect())
+    }
+
+    #[test]
+    fn a_split_stops_when_cancellation_is_requested() {
+        let (w, rank) = weights(3);
+        for policy in [ResidualPolicy::LargestRemainder, ResidualPolicy::Report] {
+            let error = split(
+                &BigInt::from(100),
+                &w,
+                policy,
+                &rank,
+                &AtomicBool::new(true),
+            )
+            .err()
+            .expect("a cancelled split returns no shares");
+            assert_eq!(error.code, "CANCELLED");
+        }
+    }
+
+    #[test]
+    fn a_split_without_cancellation_conserves_its_quantity() {
+        let (w, rank) = weights(CANCEL_STRIDE * 2 + 5);
+        let units = BigInt::from(1_000_003);
+        let result = split(
+            &units,
+            &w,
+            ResidualPolicy::LargestRemainder,
+            &rank,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(result.residual.is_zero());
+        assert_eq!(result.assigned.iter().sum::<BigInt>(), units);
+    }
 }

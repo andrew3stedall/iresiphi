@@ -311,6 +311,16 @@ impl Write for BudgetWriter<'_> {
         self.file.flush()
     }
 }
+/// The diagnostic code for a failed no-replace rename, by `errno`.
+fn publication_code(errno: Option<i32>) -> &'static str {
+    match errno {
+        Some(libc::EEXIST | libc::ENOTEMPTY) => "DESTINATION_EXISTS",
+        Some(libc::EXDEV) => "CROSS_DEVICE",
+        Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP) => "PUBLICATION_UNSUPPORTED",
+        _ => "PUBLICATION_FAILED",
+    }
+}
+
 fn writer_error(message: String) -> Error {
     let code = if message.contains("CANCELLED") {
         "CANCELLED"
@@ -511,12 +521,7 @@ pub fn publish_bundle(
         };
         if rc != 0 {
             let error = std::io::Error::last_os_error();
-            let code = match error.raw_os_error() {
-                Some(libc::EEXIST | libc::ENOTEMPTY) => "DESTINATION_EXISTS",
-                Some(libc::EXDEV) => "CROSS_DEVICE",
-                Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP) => "PUBLICATION_UNSUPPORTED",
-                _ => "PUBLICATION_FAILED",
-            };
+            let code = publication_code(error.raw_os_error());
             return Err(fail(code, format!("no-replace rename: {error}")));
         }
         Ok(total)
@@ -744,4 +749,26 @@ pub fn read_bundle(bundle: &Path) -> Result<BTreeMap<String, Vec<BTreeMap<String
         tables.insert(table.clone(), rows);
     }
     Ok(tables)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::publication_code;
+
+    #[test]
+    fn a_failed_rename_is_classified_by_errno() {
+        for (errno, code) in [
+            (libc::EEXIST, "DESTINATION_EXISTS"),
+            (libc::ENOTEMPTY, "DESTINATION_EXISTS"),
+            (libc::EXDEV, "CROSS_DEVICE"),
+            (libc::ENOSYS, "PUBLICATION_UNSUPPORTED"),
+            (libc::EINVAL, "PUBLICATION_UNSUPPORTED"),
+            (libc::EOPNOTSUPP, "PUBLICATION_UNSUPPORTED"),
+            (libc::EACCES, "PUBLICATION_FAILED"),
+            (libc::EIO, "PUBLICATION_FAILED"),
+        ] {
+            assert_eq!(publication_code(Some(errno)), code, "errno {errno}");
+        }
+        assert_eq!(publication_code(None), "PUBLICATION_FAILED");
+    }
 }
