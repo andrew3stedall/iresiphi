@@ -65,6 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         limits: Limits::default(),
         diagnostic_values: false,
         placement: Default::default(),
+        transfers: Default::default(),
     };
     let recipe = Recipe::from_json(RECIPE)?;
     let report = iresiphi::validate(&recipe);

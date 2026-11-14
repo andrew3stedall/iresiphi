@@ -19,6 +19,7 @@ fn fixture(adapter: &str, contents: &[u8]) -> (tempfile::TempDir, Recipe, Bindin
         limits: Limits::default(),
         diagnostic_values: false,
         placement: Default::default(),
+        transfers: Default::default(),
     };
     (dir, recipe, bindings, policy)
 }

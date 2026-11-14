@@ -132,6 +132,7 @@ pub fn fixture(root: &Path) -> (Recipe, Bindings, Policy) {
         limits: Limits::default(),
         diagnostic_values: false,
         placement: Default::default(),
+        transfers: Default::default(),
     };
     (recipe, bindings, policy)
 }

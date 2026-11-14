@@ -280,6 +280,8 @@ pub struct Limits {
     pub retained_bytes: usize,
     pub batch_rows: usize,
     pub batch_bytes: usize,
+    /// Key values one transfer may send to a source (docs/spec/slice-5.md).
+    pub transfer_keys: usize,
 }
 impl Default for Limits {
     fn default() -> Self {
@@ -299,6 +301,7 @@ impl Default for Limits {
             retained_bytes: 256 << 20,
             batch_rows: 8192,
             batch_bytes: 16 << 20,
+            transfer_keys: 10_000,
         }
     }
 }
@@ -314,6 +317,20 @@ pub struct Policy {
     /// Where operations may run (docs/spec/slice-3.md). Local unless stated.
     #[serde(default)]
     pub placement: Placement,
+    /// What may move between environments (docs/spec/slice-5.md). None unless stated.
+    #[serde(default)]
+    pub transfers: Transfers,
+}
+/// Data movement the policy permits. It is run policy, never recipe meaning.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Transfers {
+    /// Nothing moves from one source to another.
+    #[default]
+    None,
+    /// The executor may send lookup key values of delivered records to the
+    /// lookup target's source, to reduce what that source returns.
+    Keys,
 }
 /// Execution placement policy. It is run policy, never recipe meaning.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]

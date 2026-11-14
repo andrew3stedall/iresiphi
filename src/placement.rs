@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 type Reasoned<T> = std::result::Result<T, String>;
 
 /// A literal bound into a pushed predicate.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SqlValue {
     Integer(i64),
     Text(String),
@@ -39,6 +39,81 @@ pub struct Plan {
     pub decisions: Vec<serde_json::Value>,
     pub reductions: BTreeMap<String, String>,
     pub candidates: Vec<(String, String)>,
+    /// Key transfers by target source ID (docs/spec/slice-5.md). The target's
+    /// condition is built at run time from the delivered from records.
+    pub transfers: BTreeMap<String, Transfer>,
+    /// One record per planned transfer, for explain.
+    pub transfer_records: Vec<serde_json::Value>,
+}
+
+/// A many-to-one lookup whose SQLite target is reduced to keys the executor
+/// transfers from the delivered records of a source elsewhere.
+#[derive(Debug, Clone)]
+pub struct Transfer {
+    /// Stage ID of the reduced target scan: `relationship:<id>/target`.
+    pub stage: String,
+    /// Transfer ID: `relationship:<id>/keys`.
+    pub id: String,
+    pub from: String,
+    pub from_keys: Vec<String>,
+    /// Target key operands, stripped of affinity and collation.
+    pub target_keys: Vec<String>,
+}
+
+/// SQLite's default bound-parameter ceiling; a transfer never exceeds it
+/// whatever `limits.transfer_keys` says.
+pub const TRANSFER_PARAMETERS: usize = 32_766;
+
+impl Transfer {
+    /// Distinct keys of `rows` with no null component, in key order.
+    pub(crate) fn keys(&self, rows: &[Row]) -> Result<std::collections::BTreeSet<Vec<SqlValue>>> {
+        let mut keys = std::collections::BTreeSet::new();
+        'rows: for row in rows {
+            let mut key = Vec::with_capacity(self.from_keys.len());
+            for field in &self.from_keys {
+                key.push(match row.fields.get(field) {
+                    Some(Value::Int64 { value }) => {
+                        SqlValue::Integer(value.parse().map_err(|_| {
+                            Error::new("INVALID_VALUE", "source", "an int64 key is out of range")
+                        })?)
+                    }
+                    Some(Value::String { value } | Value::Date { value }) => {
+                        SqlValue::Text(value.clone())
+                    }
+                    Some(Value::Boolean { value }) => SqlValue::Integer((*value).into()),
+                    // Null keys match nothing. Decimal keys are never planned.
+                    _ => continue 'rows,
+                });
+            }
+            keys.insert(key);
+        }
+        Ok(keys)
+    }
+
+    /// The target condition selecting exactly the records whose key is in `keys`.
+    pub(crate) fn pushed(&self, keys: std::collections::BTreeSet<Vec<SqlValue>>) -> Pushed {
+        let sql = if keys.is_empty() {
+            "0".to_string()
+        } else if self.target_keys.len() == 1 {
+            format!(
+                "({} IN ({}))",
+                self.target_keys[0],
+                vec!["?"; keys.len()].join(", ")
+            )
+        } else {
+            let tuple = format!("({})", vec!["?"; self.target_keys.len()].join(", "));
+            format!(
+                "(({}) IN (VALUES {}))",
+                self.target_keys.join(", "),
+                vec![tuple; keys.len()].join(", ")
+            )
+        };
+        Pushed {
+            stage: self.stage.clone(),
+            sql,
+            parameters: keys.into_iter().flatten().collect(),
+        }
+    }
 }
 
 /// True when `adapter` can evaluate a negotiated filter during its scan.
@@ -349,6 +424,10 @@ pub fn plan(recipe: &Recipe, bindings: &Bindings, policy: &Policy) -> Result<Pla
         let (Some(a), Some(b)) = (bindings.get(&r.from), bindings.get(&r.to)) else {
             continue;
         };
+        if r.from != r.to && b.adapter == "sqlite" && !colocated(a, b) {
+            plan_transfer(&mut plan, recipe, r, policy)?;
+            continue;
+        }
         if r.from == r.to || !colocated(a, b) {
             continue;
         }
@@ -376,52 +455,8 @@ pub fn plan(recipe: &Recipe, bindings: &Bindings, policy: &Policy) -> Result<Pla
         }
         let reason = if policy.placement == Placement::Local {
             Some("the policy places every operation in the local executor".to_string())
-        } else if r.cardinality != Cardinality::ManyToOne
-            || r.validity.is_some()
-            || r.period.is_some()
-        {
-            Some("only many_to_one without validity or period qualification can be reduced".into())
-        } else if r
-            .from_keys
-            .iter()
-            .any(|k| !from.projection.fields.contains_key(k))
-        {
-            Some("every from key must be a field of the from source itself".into())
-        } else if recipe.outputs.iter().any(|o| o.anchor == r.to)
-            || recipe
-                .relationships
-                .iter()
-                .any(|other| (other.to == r.to && other.id != r.id) || other.from == r.to)
-            || recipe.populations.iter().any(|p| {
-                p.recipients == r.to || p.period.from.as_ref().is_some_and(|f| f.source == r.to)
-            })
-            || recipe
-                .outputs
-                .iter()
-                .flat_map(|o| &o.allocations)
-                .any(|a| a.quantity.source == r.to)
-        {
-            Some("the target source has another use that needs every record".into())
-        } else if r
-            .from_keys
-            .iter()
-            .any(|k| matches!(from.projection.fields[k].data_type, Type::Decimal { .. }))
-            || r.to_keys
-                .iter()
-                .any(|k| matches!(to.projection.fields[k].data_type, Type::Decimal { .. }))
-        {
-            Some("decimal keys cannot be reduced with exact executor equality".into())
-        } else if to
-            .identity
-            .iter()
-            .any(|k| matches!(to.projection.fields[k].data_type, Type::Decimal { .. }))
-        {
-            Some(
-                "the target has a decimal identity whose uniqueness sqlite cannot check exactly"
-                    .into(),
-            )
         } else {
-            None
+            reduction_reason(recipe, r, from, to)
         };
         if let Some(reason) = reason {
             if policy.placement == Placement::RequireSource {
@@ -486,6 +521,158 @@ pub fn plan(recipe: &Recipe, bindings: &Bindings, policy: &Policy) -> Result<Pla
         return Err(error);
     }
     Ok(plan)
+}
+
+/// Why a many-to-one target cannot be reduced to the keys of its from records,
+/// from the recipe alone. Shared by same-database reduction and key transfer.
+fn reduction_reason(
+    recipe: &Recipe,
+    r: &Relationship,
+    from: &Source,
+    to: &Source,
+) -> Option<String> {
+    let decimal = |source: &Source, field: &String| {
+        matches!(
+            source.projection.fields[field].data_type,
+            Type::Decimal { .. }
+        )
+    };
+    if r.cardinality != Cardinality::ManyToOne || r.validity.is_some() || r.period.is_some() {
+        Some("only many_to_one without validity or period qualification can be reduced".into())
+    } else if r
+        .from_keys
+        .iter()
+        .any(|k| !from.projection.fields.contains_key(k))
+    {
+        Some("every from key must be a field of the from source itself".into())
+    } else if recipe.outputs.iter().any(|o| o.anchor == r.to)
+        || recipe
+            .relationships
+            .iter()
+            .any(|other| (other.to == r.to && other.id != r.id) || other.from == r.to)
+        || recipe.populations.iter().any(|p| {
+            p.recipients == r.to || p.period.from.as_ref().is_some_and(|f| f.source == r.to)
+        })
+        || recipe
+            .outputs
+            .iter()
+            .flat_map(|o| &o.allocations)
+            .any(|a| a.quantity.source == r.to)
+    {
+        Some("the target source has another use that needs every record".into())
+    } else if r.from_keys.iter().any(|k| decimal(from, k))
+        || r.to_keys.iter().any(|k| decimal(to, k))
+    {
+        Some("decimal keys cannot be reduced with exact executor equality".into())
+    } else if to.identity.iter().any(|k| decimal(to, k)) {
+        Some(
+            "the target has a decimal identity whose uniqueness sqlite cannot check exactly".into(),
+        )
+    } else {
+        None
+    }
+}
+
+/// Plan the key transfer of one relationship whose target is a SQLite table
+/// and whose from source is elsewhere (docs/spec/slice-5.md).
+fn plan_transfer(
+    plan: &mut Plan,
+    recipe: &Recipe,
+    r: &Relationship,
+    policy: &Policy,
+) -> Result<()> {
+    let (Some(from), Some(to)) = (
+        recipe.sources.iter().find(|s| s.id == r.from),
+        recipe.sources.iter().find(|s| s.id == r.to),
+    ) else {
+        return Ok(());
+    };
+    if r.to_keys
+        .iter()
+        .any(|k| !to.projection.fields.contains_key(k))
+    {
+        return Err(Error::new(
+            "INVALID_RELATIONSHIP",
+            "planning",
+            "target keys must be declared fields",
+        ));
+    }
+    let stage = format!("relationship:{}/target", r.id);
+    let id = format!("relationship:{}/keys", r.id);
+    let mut decision = json!({
+        "operation": stage,
+        "source": format!("source:{}", r.to),
+        "policy": policy.placement,
+        "transfers": policy.transfers,
+    });
+    let reason = if policy.placement == Placement::Local {
+        Some("the policy places every operation in the local executor".to_string())
+    } else if policy.transfers == Transfers::None {
+        Some(format!(
+            "the policy permits no transfers; reducing this target needs the keys of {} sent to its source (transfers: keys)",
+            r.from
+        ))
+    } else {
+        reduction_reason(recipe, r, from, to)
+    };
+    if let Some(reason) = reason {
+        // Requiring source placement binds a transfer only when the policy
+        // also permits it: neither policy setting overrides the other.
+        if policy.placement == Placement::RequireSource && policy.transfers == Transfers::Keys {
+            return Err(Error::new(
+                "PLACEMENT_INFEASIBLE",
+                "planning",
+                format!("policy placement require_source cannot be met for {stage}: {reason}"),
+            )
+            .with_subject(stage)
+            .with_remediation(
+                "Use placement prefer_source or local, or transfers none; the policy is not overridden.",
+            ));
+        }
+        decision["placement"] = json!("local");
+        decision["reason"] = json!(reason);
+        plan.decisions.push(decision);
+        return Ok(());
+    }
+    decision["placement"] = json!("source");
+    decision["reduction"] = json!("transferred_keys");
+    decision["transfer"] = json!(id);
+    decision["coverage"] = json!(
+        "whole-table source checks; text formats and valid UTF-8 checked for scanned records only"
+    );
+    plan.decisions.push(decision);
+    plan.transfer_records.push(json!({
+        "transfer": id,
+        "from": format!("source:{}", r.from),
+        "to": format!("source:{}", r.to),
+        "operation": stage,
+        "content": "distinct key values, with no null component, of the from records delivered to the executor",
+        "fields": r.from_keys,
+        "mechanism": "bound query parameters on the target's in-memory snapshot; nothing is written or staged",
+        "limit": {"transfer_keys": policy.limits.transfer_keys.min(TRANSFER_PARAMETERS)},
+        "rows": null,
+        "estimate_status": "unknown",
+    }));
+    plan.transfers.insert(
+        r.to.clone(),
+        Transfer {
+            stage,
+            id,
+            from: r.from.clone(),
+            from_keys: r.from_keys.clone(),
+            target_keys: r
+                .to_keys
+                .iter()
+                .map(|t| {
+                    format!(
+                        "+iresiphi_target.{} COLLATE BINARY",
+                        quoted(column(&to.projection.fields[t]))
+                    )
+                })
+                .collect(),
+        },
+    );
+    Ok(())
 }
 
 /// Declared spellings, deliberately without Path component equality.

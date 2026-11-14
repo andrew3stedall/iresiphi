@@ -109,6 +109,7 @@ fn fixture_doc(doc: Json, statements: &[&str]) -> Fixture {
         limits: Limits::default(),
         diagnostic_values: false,
         placement: Placement::Local,
+        transfers: Default::default(),
     };
     Fixture {
         dir,

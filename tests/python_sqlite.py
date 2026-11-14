@@ -120,6 +120,55 @@ class SQLitePlacement(unittest.TestCase):
             self.assertEqual(snapshots[0], snapshots[2])
             self.assertEqual((recipe.hash, recipe.canonical_json()), original)
 
+    def test_key_transfer_reduces_a_sqlite_target_from_csv_orders(self):
+        """Slice 5: orders in CSV, customers in SQLite, keys sent under policy."""
+        (self.root / 'orders.csv').write_text(
+            'order_no,cust,booked,net,open\n' + ''.join(
+                f'{n},{c},{d},{net},{"true" if o else "false"}\n'
+                for n, c, d, net, o in ORDERS + [(7, 'D', '2025-11-02', '30.00', 1)]),
+            encoding='utf-8')
+        with sqlite3.connect(self.root / 'crm.sqlite') as db:
+            db.execute('CREATE TABLE customers (CustNo TEXT, SalesArea TEXT, Since TEXT)')
+            db.executemany('INSERT INTO customers VALUES (?, ?, ?)', [
+                ('A', 'North', '2020-01-01'), ('B', 'North', None),
+                ('C', 'South', '2021-06-30'), ('D', 'West', '2022-02-02'),
+                ('E', 'East', '2023-03-03')])
+        bindings = {'orders': b.binding(str(self.root / 'orders.csv'), 'csv'),
+                    'customers': b.binding(str(self.root / 'crm.sqlite'), 'sqlite', table='customers')}
+        doc = declaration()
+        doc['sources'][1]['projection']['fields']['Since'] = b.field('Since', b.date_type(), nullable=True)
+        with iresiphi.Recipe(doc) as recipe:
+            original = recipe.hash, recipe.canonical_json()
+            snapshots = []
+            for placement, transfers, scanned in [
+                    ('local', None, None), ('require_source', None, None), ('prefer_source', 'none', None),
+                    ('local', 'keys', None), ('prefer_source', 'keys', 4), ('require_source', 'keys', 4)]:
+                policy = b.policy([str(self.root)], placement=placement, transfers=transfers)
+                self.assertTrue(recipe.validate(bindings, policy, 'full')['valid'])
+                bound = recipe.explain(bindings, policy)['bound']
+                self.assertTrue(bound['feasible'])
+                self.assertEqual([t['transfer'] for t in bound['transfers']],
+                                 ['relationship:order_customer/keys'] if scanned else [])
+                with iresiphi.run(recipe, bindings, policy) as result:
+                    customers = result.manifest['sources']['customers']
+                    self.assertEqual(customers['rows'], 5)
+                    self.assertEqual(customers.get('scanned_rows'), scanned)
+                    if scanned:
+                        self.assertEqual(customers['placement']['transfer']['keys'], 5)
+                        self.assertEqual(customers['placement']['reduction'], 'transferred_keys')
+                    self.assertEqual([r['order_no'] for r in result.batch('open_orders')], [1, 3, 4, 5])
+                    snapshots.append((result.batch('open_orders'), result.evidence(),
+                                      result.evidence('candidate'), result.manifest['counts']))
+            for snapshot in snapshots[1:]:
+                self.assertEqual(snapshot, snapshots[0])
+            limited = b.policy([str(self.root)], placement='require_source', transfers='keys',
+                               limits={'transfer_keys': 4})
+            with self.assertRaises(iresiphi.IresiphiError) as raised:
+                iresiphi.run(recipe, bindings, limited)
+            self.assertEqual(raised.exception.code, 'PLACEMENT_INFEASIBLE')
+            self.assertEqual((recipe.hash, recipe.canonical_json()), original)
+        self.assertNotIn('transfers', b.policy([str(self.root)]))
+
     def test_falsy_placement_is_preserved_and_rejected(self):
         for placement in ['', False, 0]:
             policy = self.policy(placement)

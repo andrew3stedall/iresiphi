@@ -693,6 +693,7 @@ fn json_run(
         limits: Limits::default(),
         diagnostic_values: false,
         placement: Default::default(),
+        transfers: Default::default(),
     };
     ExecutionContext::default().run(&recipe, &bindings, &policy, &AtomicBool::new(false))
 }

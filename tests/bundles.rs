@@ -28,6 +28,7 @@ fn fixture() -> (tempfile::TempDir, Recipe, Bindings, Policy) {
         limits: Limits::default(),
         diagnostic_values: false,
         placement: Default::default(),
+        transfers: Default::default(),
     };
     (dir, recipe, bindings, policy)
 }

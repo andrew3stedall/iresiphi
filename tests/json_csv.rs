@@ -55,6 +55,7 @@ fn policy(root: &Path) -> Policy {
         limits: Limits::default(),
         diagnostic_values: false,
         placement: Default::default(),
+        transfers: Default::default(),
     }
 }
 

@@ -24,7 +24,8 @@ fn default_profile_matches_the_decision_and_is_recorded_in_every_manifest() {
         "xlsx_bytes": 256 * MIB, "worksheet_cells": 1_000_000, "field_bytes": MIB,
         "json_depth": 64, "anchor_rows": 100_000, "component_rows": 1_000_000,
         "lookup_rows": 100_000, "candidate_pairs": 1_000_000, "output_bytes": 256 * MIB,
-        "retained_bytes": 256 * MIB, "batch_rows": 8192, "batch_bytes": 16 * MIB
+        "retained_bytes": 256 * MIB, "batch_rows": 8192, "batch_bytes": 16 * MIB,
+        "transfer_keys": 10_000
     });
     assert_eq!(serde_json::to_value(&limits).unwrap(), expected);
 
@@ -166,6 +167,7 @@ fn xlsx_decompressed_and_cell_budgets_fail_the_run() {
         limits: Limits::default(),
         diagnostic_values: false,
         placement: Default::default(),
+        transfers: Default::default(),
     };
     let ok = ExecutionContext::default().run(&recipe, &bindings, &policy, &go());
     assert_eq!(ok.status, "succeeded", "{:?}", ok.diagnostics);

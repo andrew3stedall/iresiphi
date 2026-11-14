@@ -5,7 +5,7 @@ export type Data = null | boolean | string | number | bigint | Data[] | {[key: s
 export type RecordData = {[key: string]: unknown};
 export interface Binding {path: string; adapter: 'json' | 'csv' | 'xlsx' | 'sqlite'; settings?: {[key: string]: Data}}
 export type Bindings = {[source: string]: Binding};
-export interface Policy {allowed_read_roots: string[]; allowed_output_roots: string[]; limits?: {[key: string]: number | bigint}; diagnostic_values?: boolean; placement?: 'local' | 'prefer_source' | 'require_source'}
+export interface Policy {allowed_read_roots: string[]; allowed_output_roots: string[]; limits?: {[key: string]: number | bigint}; diagnostic_values?: boolean; placement?: 'local' | 'prefer_source' | 'require_source'; transfers?: 'none' | 'keys'}
 export interface Diagnostic extends RecordData {code: string; phase: string; message: string; severity: string; remediation: string | null}
 export class IresiphiError extends Error {
   readonly code: string; readonly phase: string; readonly record: Diagnostic;

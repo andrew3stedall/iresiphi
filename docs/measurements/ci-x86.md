@@ -105,3 +105,30 @@ durably before publication. Local ENOSYS/futex failures during later development
 runs were not counted as passes; this hosted run supplies verification for the
 reviewed implementation. Evidence for this commit does not certify later heads;
 their own PR checks remain authoritative under [the CI rules](../ci.md).
+
+## Slice 5: verified on both architectures
+
+[PR #35](https://github.com/andrew3stedall/iresiphi/pull/35), commit
+`a5b55780826716927ba0e40559f4b2addf7cc07e`, passed all eight jobs in
+[run 43561011276](https://github.com/andrew3stedall/iresiphi/actions/runs/43561011276)
+on 2026-11-14: native ARM and x86 Rust suites with formatting, dependency
+notices and the 100,000-line workload, installed CPython 3.12 and 3.13 wheels,
+Node 22.16.0 and 24.11.1 on both architectures, x86 wheel audits with clean
+installs, and Terraform validation. The Rust, Python and Node suites include the
+slice 5 key-transfer tests.
+
+Two earlier heads of the PR failed and are not passes. `7a879c0` failed
+`tests/limits.rs` on both architectures: the default-profile expectation did not
+list `transfer_keys`. `725748d` failed
+`a_run_cancelled_during_a_sqlite_scan_reports_cancelled` on x86 only: a
+cancellation observed between sources or in the identity pass carried no source
+subject. `a5b5578` attributes it to the source being read.
+
+| Artifact | ID | SHA-256 digest |
+| --- | --- | --- |
+| x86-distributions | 14100528192 | `f9edd3649b164438c46e0eedbfbc996b5fb6c43b1dd8a416bb75440948c60cfe` |
+| x86-workload | 14100500860 | `7395d0f8ae83e38748fb05823e166f0e54cb4ffd8c2511a867cdd1c71ed71193` |
+| arm-workload (including installed ARM wheels) | 14100480750 | `429171609e11a7bb9c6eb00c7d3423eec060cb841083297deb310b83be86d154` |
+
+GitHub reports an expiry of 2027-02-12 for these artifacts. Evidence for this
+commit does not certify later heads; their own PR checks remain authoritative.

@@ -121,6 +121,7 @@ fn ledger() -> Ledger {
         limits: Limits::default(),
         diagnostic_values: false,
         placement: Default::default(),
+        transfers: Default::default(),
     };
     Ledger {
         _root: root,

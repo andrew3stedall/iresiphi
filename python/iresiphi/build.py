@@ -297,13 +297,19 @@ def binding(path, adapter, **settings):
     return {"path": path, "adapter": adapter, "settings": settings}
 
 
-def policy(read_roots, output_roots=(), limits=None, diagnostic_values=False, placement=None):
-    """`placement` is "local" (the default), "prefer_source" or "require_source"."""
+def policy(read_roots, output_roots=(), limits=None, diagnostic_values=False, placement=None,
+           transfers=None):
+    """`placement` is "local" (the default), "prefer_source" or "require_source".
+
+    `transfers` is "none" (the default) or "keys": whether lookup key values may
+    be sent to a lookup target's source to reduce what it returns."""
     declared = {"allowed_read_roots": list(read_roots),
                 "allowed_output_roots": list(output_roots),
                 "diagnostic_values": diagnostic_values}
     if placement is not None:
         declared["placement"] = placement
+    if transfers is not None:
+        declared["transfers"] = transfers
     if limits:
         declared["limits"] = dict(limits)
     return declared

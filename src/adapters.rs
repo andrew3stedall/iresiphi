@@ -328,13 +328,74 @@ fn materialize_sources(
             }
         }
     }
-    for source in &recipe.sources {
-        check_cancel(cancel)?;
+    // A transfer target is read after every other source, so the keys of its
+    // delivered from records exist before its scan (docs/spec/slice-5.md).
+    let ordered = recipe
+        .sources
+        .iter()
+        .filter(|s| !plan.transfers.contains_key(&s.id))
+        .chain(
+            recipe
+                .sources
+                .iter()
+                .filter(|s| plan.transfers.contains_key(&s.id)),
+        );
+    for source in ordered {
+        check_cancel(cancel).map_err(|e| tag_source(e, &source.id))?;
         let binding = bindings
             .get(&source.id)
             .ok_or_else(|| err("MISSING_BINDING", format!("missing binding {}", source.id)))?;
         let subject = |e: Error| tag_source(e, &source.id);
         check_text_settings(binding).map_err(subject)?;
+        // Build the transferred key condition, or the reason it stays local.
+        let mut transferred = None;
+        let mut transfer_fallback = None;
+        let mut transfer_pushed = None;
+        if let Some(transfer) = plan.transfers.get(&source.id) {
+            let from: &Vec<Row> = result.get(&transfer.from).ok_or_else(|| {
+                err(
+                    "MISSING_BINDING",
+                    format!("missing binding {}", transfer.from),
+                )
+            })?;
+            let keys = transfer.keys(from).map_err(subject)?;
+            let values = keys.len().saturating_mul(transfer.from_keys.len());
+            let allowed = policy
+                .limits
+                .transfer_keys
+                .min(crate::placement::TRANSFER_PARAMETERS);
+            if values > allowed {
+                let reason = format!(
+                    "the transfer {} would send {values} key values, above limits.transfer_keys ({allowed})",
+                    transfer.id
+                );
+                if policy.placement == Placement::RequireSource {
+                    return Err(Error::new(
+                        "PLACEMENT_INFEASIBLE",
+                        "source",
+                        format!(
+                            "policy placement require_source cannot be met for {}: {reason}",
+                            transfer.stage
+                        ),
+                    )
+                    .with_subject(transfer.stage.clone())
+                    .with_remediation(
+                        "Raise limits.transfer_keys, or use placement prefer_source or local, or transfers none; the policy is not overridden.",
+                    ));
+                }
+                transfer_pushed = Some(transfer.pushed(Default::default()));
+                transfer_fallback = Some(sqlite::Fallback::Data(reason));
+            } else {
+                transferred = Some(serde_json::json!({
+                    "id": transfer.id,
+                    "from": format!("source:{}", transfer.from),
+                    "keys": keys.len(),
+                    "key_values": values,
+                    "mechanism": "bound query parameters on the in-memory snapshot; nothing was written or staged",
+                }));
+                transfer_pushed = Some(transfer.pushed(keys));
+            }
+        }
         let accessed = std::time::Instant::now();
         let snapshot = snapshots
             .get(binding.path.as_os_str().as_encoded_bytes())
@@ -387,10 +448,16 @@ fn materialize_sources(
                 &reference,
                 &admission,
                 cancel,
-                plan.pushed.get(&source.id),
-                fallbacks.get(&source.id),
+                transfer_pushed.as_ref().or(plan.pushed.get(&source.id)),
+                transfer_fallback.as_ref().or(fallbacks.get(&source.id)),
             )
-            .map(|read| {
+            .map(|mut read| {
+                if let (Some(placement), Some(transferred)) = (&mut read.placement, transferred) {
+                    if placement["scan"] == "source" {
+                        placement["reduction"] = serde_json::json!("transferred_keys");
+                        placement["transfer"] = transferred;
+                    }
+                }
                 scan = Some((read.total_rows, read.placement));
                 read.rows
             }),
@@ -428,7 +495,7 @@ fn materialize_sources(
         let mut null_identities = Vec::new();
         let mut batch_bytes = 0usize;
         for (i, row) in rows.iter_mut().enumerate() {
-            check_cancel(cancel)?;
+            check_cancel(cancel).map_err(subject)?;
             let key: Vec<_> = source
                 .identity
                 .iter()
@@ -577,7 +644,8 @@ pub(crate) fn adapter_capabilities(adapter: &str) -> serde_json::Value {
         serde_json::json!({
             "location": "local", "typed_read": true,
             "pushdown": true,
-            "pushdown_operations": ["anchor_eligibility_filter", "relationship_target_reduction"],
+            "pushdown_operations": ["anchor_eligibility_filter", "relationship_target_reduction", "relationship_target_key_transfer"],
+            "transfers_accepted": ["keys"],
             "co_location": "equal declared path spelling, byte-for-byte",
             "pushdown_types": ["int64", "string", "date", "boolean"],
             "streaming": false,
@@ -2253,6 +2321,11 @@ pub fn inspect_schemas(recipe: &Recipe, bindings: &Bindings, policy: &Policy) ->
             .get(&source.id)
             .ok_or_else(|| err("MISSING_BINDING", format!("missing binding {}", source.id)))?;
         if binding.adapter == "sqlite" {
+            // A transfer target compares text at the source, like any pushed scan.
+            let transfer_stage = plan
+                .transfers
+                .get(&source.id)
+                .map(|t| t.pushed(Default::default()));
             sqlite::inspect_connection(
                 source,
                 binding,
@@ -2267,6 +2340,7 @@ pub fn inspect_schemas(recipe: &Recipe, bindings: &Bindings, policy: &Policy) ->
                         })
                         .find_map(|id| plan.pushed.get(id))
                         .or_else(|| plan.pushed.get(&source.id))
+                        .or(transfer_stage.as_ref())
                 } else {
                     None
                 },

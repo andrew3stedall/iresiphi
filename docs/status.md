@@ -78,13 +78,29 @@ links the run and immutable artifact identities. Later heads require their own
 passing checks. Local evidence and remaining contract limitations are recorded
 in [unmet.md](measurements/unmet.md).
 
+## Slice 5: key transfer to a lookup target
+
+[Slice 5](spec/slice-5.md) adds the first transfer. Under `transfers: keys` and a
+placement other than `local`, a many-to-one lookup whose target is a SQLite table
+and whose other end is a file or a different database sends the distinct keys of
+the delivered `from` records to the target as bound parameters, and the target
+returns only matching records. Transfers are off by default; `require_source`
+demands one only when the policy permits it. Explain lists planned transfers
+without opening a source, and the manifest records key counts, never values.
+
+Rust acceptance and parity cases are in `tests/transfer.rs`; Python and Node run
+the CSV-orders/SQLite-customers fixture through their public APIs. Hosted
+ARM/x86, Python, Node and packaging gates passed at `a5b5578`; see the
+[verified run](measurements/ci-x86.md#slice-5-verified-on-both-architectures).
+Remaining limitations are in [unmet.md](measurements/unmet.md).
+
 ## Remaining scope
 
 The broad product specification
 [#1](https://github.com/andrew3stedall/iresiphi/issues/1) remains a roadmap
-umbrella. Later slices added Node bindings, allocation and a SQLite source with eligibility filtering and same-database
-lookup target reduction. Still deferred: remote and dataframe connectors, other
-pushdown, transfers and hybrid execution, and other platforms. These
+umbrella. Later slices added Node bindings, allocation, a SQLite source with eligibility filtering and same-database
+lookup target reduction, and key transfer to a SQLite lookup target. Still deferred: remote and dataframe connectors, other
+pushdown, other transfers, staging and wider hybrid execution, and other platforms. These
 require their own bounded delivery specifications; they are not claims of this
 preview.
 
