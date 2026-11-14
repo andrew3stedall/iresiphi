@@ -89,8 +89,10 @@ demands one only when the policy permits it. Explain lists planned transfers
 without opening a source, and the manifest records key counts, never values.
 
 Rust acceptance and parity cases are in `tests/transfer.rs`; Python and Node run
-the CSV-orders/SQLite-customers fixture through their public APIs. Verification
-evidence is recorded in [unmet.md](measurements/unmet.md).
+the CSV-orders/SQLite-customers fixture through their public APIs. Hosted
+ARM/x86, Python, Node and packaging gates passed at `a5b5578`; see the
+[verified run](measurements/ci-x86.md#slice-5-verified-on-both-architectures).
+Remaining limitations are in [unmet.md](measurements/unmet.md).
 
 ## Remaining scope
 

@@ -174,3 +174,9 @@ three-column keys over `NOCASE` and `NUMERIC` columns, 3,000 keys against a
 bound validation coverage, and policy parsing. Python and Node run the fixture
 through their public APIs.
 
+Local ARM runs passed `transfer` (17), `sqlite` (27), `sqlite_adversarial` (21),
+`limits`, `delivery`, `json_csv`, `xlsx`, `preview` and `bundles`; the full suite
+and the Python and Node fixtures were not completed locally. Hosted verification
+at `a5b55780826716927ba0e40559f4b2addf7cc07e` passed all eight jobs; the
+[evidence record](ci-x86.md#slice-5-verified-on-both-architectures) links run
+43561011276 and its artifacts. Later heads require their own checks.
