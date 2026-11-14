@@ -110,6 +110,7 @@ The policy sets allowed read and output roots and these limits. The values below
 | `retained_bytes` | 256 MiB | Retained source materialization and memory results |
 | `batch_rows` | 8,192 | Rows per batch |
 | `batch_bytes` | 16 MiB | Decoded bytes per batch; one larger record is rejected |
+| `transfer_keys` | 10,000 | Key values one transfer may send to a lookup target (see [key transfer](sqlite.md#key-transfer-to-a-lookup-target)); never more than 32,766 |
 
 A run that exceeds a limit fails with `RESOURCE_LIMIT` and publishes nothing. Each execution context runs one run at a time, and another attempt gets `RUN_BUSY`. Execution uses two partitions.
 
