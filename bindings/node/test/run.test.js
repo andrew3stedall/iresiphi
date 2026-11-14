@@ -7,7 +7,7 @@ const api = require('..');
 const golden = JSON.parse(fs.readFileSync('../../tests/fixtures/two_suppliers.parity.json', 'utf8'));
 const root = path.resolve('test/fixtures');
 const bindings = Object.fromEntries(['a','b','mapping','rates','components','enrichment'].map(id => [id, {path: path.join(root, id === 'enrichment' ? 'enrichment.xlsx' : `${id}.${['a','b'].includes(id) ? 'json' : 'csv'}`), adapter: id === 'enrichment' ? 'xlsx' : ['a','b'].includes(id) ? 'json' : 'csv', ...(id === 'enrichment' ? {settings: {sheet: 'Review', header_row: 1}} : {settings:{}})}]));
-const policy = {allowed_read_roots: [root], allowed_output_roots: [os.tmpdir()]};
+const policy = {allowed_read_roots: [root], allowed_output_roots: [os.tmpdir()], evidence: 'full'}; // The shared golden counts evidence for every line.
 const recipe = () => new api.Recipe(golden.canonical_json);
 const normalize = value => JSON.parse(JSON.stringify(value, (_, v) => typeof v === 'bigint' ? Number(v) : v)); // Only bounded fixture metadata, never domain scalars.
 const sorted = rows => [...rows].sort((a,b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
@@ -119,6 +119,21 @@ test('duplicate identity and unsupported division match shared error golden', as
       assert.equal(diagnostic.code, expected.code); assert.equal(diagnostic.phase, expected.phase);
     }
   } finally { fs.rmSync(directory,{recursive:true,force:true}); }
+});
+test('default evidence level keeps results and records only unresolved lines', async () => {
+  const full = await api.run(recipe(), bindings, policy);
+  const {evidence, ...unstated} = policy;
+  const result = await api.run(recipe(), bindings, unstated);
+  assert.equal(result.status, 'succeeded_with_unresolved');
+  for (const name of Object.keys(golden.expected.tables)) assert.deepEqual(result.batch(name), full.batch(name));
+  assert.deepEqual(normalize(result.manifest.totals), golden.expected.totals);
+  assert.equal(result.manifest.policy.evidence, 'problems');
+  assert.equal(result.manifest.evidence.level, 'problems');
+  assert.deepEqual(result.evidence('primary'), full.evidence('primary').filter(record => record.status !== 'matched'));
+  assert.equal(result.evidence('primary').length, 1);
+  assert.ok(result.evidence('candidate').length < golden.expected.evidence_counts.candidate);
+  full.close(); result.close();
+  await assert.rejects(api.run(recipe(), bindings, {...unstated, evidence: 'none'}), {code:'INVALID_POLICY', phase:'policy'});
 });
 test('argument diagnostics retain Python-compatible codes and phases', async () => {
   await assert.rejects(api.run(recipe(), {}, {}), {code:'INVALID_POLICY', phase:'policy'});

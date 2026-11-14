@@ -289,6 +289,7 @@ fn saved_recipes_carry_no_bindings_paths_or_secrets() {
         diagnostic_values: false,
         placement: Default::default(),
         transfers: Default::default(),
+        evidence: iresiphi::model::Evidence::Full,
     };
     let before = recipe.to_json().unwrap();
     let report =
@@ -318,6 +319,7 @@ fn missing_bindings_fail_only_at_bound_validation_and_run() {
         diagnostic_values: false,
         placement: Default::default(),
         transfers: Default::default(),
+        evidence: iresiphi::model::Evidence::Full,
     };
     let bound = validate_bound(&recipe, &Bindings::new(), &policy, "none");
     assert_eq!(first_error(&bound).as_deref(), Some("MISSING_BINDING"));
@@ -711,6 +713,7 @@ fn bound_fixture() -> (tempfile::TempDir, Recipe, Bindings, Policy) {
         diagnostic_values: false,
         placement: Default::default(),
         transfers: Default::default(),
+        evidence: iresiphi::model::Evidence::Full,
     };
     (dir, load(&document()).unwrap(), bindings, policy)
 }
@@ -747,6 +750,7 @@ fn schema_only_json_checks_escaped_headers_and_nested_array_pointers() {
         diagnostic_values: false,
         placement: Default::default(),
         transfers: Default::default(),
+        evidence: iresiphi::model::Evidence::Full,
     };
     std::fs::write(
         &path,

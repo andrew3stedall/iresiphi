@@ -320,6 +320,22 @@ pub struct Policy {
     /// What may move between environments (docs/spec/slice-5.md). None unless stated.
     #[serde(default)]
     pub transfers: Transfers,
+    /// Which lines a run records evidence for (docs/spec/slice-6.md). Lines
+    /// that did not resolve unless stated.
+    #[serde(default)]
+    pub evidence: Evidence,
+}
+/// How much per-line evidence a run records. It is run policy, never recipe
+/// meaning: output rows, counts, totals and diagnostics are the same either way.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Evidence {
+    /// Primary, candidate and detail evidence for lines whose status is not
+    /// `matched`. Resolved lines are counted, not recorded.
+    #[default]
+    Problems,
+    /// Evidence for every selected line.
+    Full,
 }
 /// Data movement the policy permits. It is run policy, never recipe meaning.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]

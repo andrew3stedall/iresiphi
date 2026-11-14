@@ -114,7 +114,7 @@ The policy sets allowed read and output roots and these limits. The values below
 
 A run that exceeds a limit fails with `RESOURCE_LIMIT` and publishes nothing. Each execution context runs one run at a time, and another attempt gets `RUN_BUSY`. Execution uses two partitions.
 
-These limits do not cap process memory. DataFusion does not track every allocation, the adapters hold each source's rows in memory, and Python owns any values it copies out. The manifest reports the tracked engine reservation peak (`engine_peak_reservation`) separately from the process's peak resident set (`peak_rss`, read from `/proc/self/status`). That peak covers the whole process lifetime, not one run. If you need a hard memory ceiling, run Iresiphi in an OS-isolated process with its own limits. [The 100,000-line measurement](measurements/workload-100k.md) shows what one complete run used on one machine. At that size the default `output_bytes` and `retained_bytes` are too small for the evidence the run produces (757 MB), so that run raised both to 1 GiB.
+These limits do not cap process memory. DataFusion does not track every allocation, the adapters hold each source's rows in memory, and Python owns any values it copies out. The manifest reports the tracked engine reservation peak (`engine_peak_reservation`) separately from the process's peak resident set (`peak_rss`, read from `/proc/self/status`). That peak covers the whole process lifetime, not one run. If you need a hard memory ceiling, run Iresiphi in an OS-isolated process with its own limits. [The 100,000-line measurement](measurements/workload-100k.md) shows what one complete run used on one machine. That measurement recorded evidence for every line (now `evidence: full`), which at that size produces 757 MB and needs `output_bytes` and `retained_bytes` raised to 1 GiB. Under the default evidence level the same workload runs within the default limits.
 
 ## Explicit populations and allocation
 
@@ -157,6 +157,12 @@ Bundle CSV tables use UTF-8, commas, RFC 4180 quoting, LF line endings and one h
 Every non-null value whose text starts with a backslash gets one more backslash before CSV quoting. To read a field back: exact `\N` is null; otherwise remove one backslash only from a doubled-backslash prefix, then parse the text by the column type in `schema.json`. `schema.json` documents this rule. Spreadsheet programs and generic CSV readers do not apply it, so open bundle tables with `iresiphi::sink::read_bundle` (Rust) or `iresiphi.read_bundle` (Python), or apply the rule yourself.
 
 A bundle holds one CSV file per output, three evidence tables (`_evidence`, `_candidate_evidence`, `_detail_evidence`, each one JSON record per row), `_allocation_evidence` when the recipe allocates, and `_reconciliation`, a table of full-population, comparable and unresolved totals per output, currency and numeric column. `schema.json` gives each table's typed columns, and `manifest.json` carries the complete run record.
+
+### Evidence level
+
+By default a run records evidence only for lines that did not resolve: those whose `_status` is not `matched`. Each such line gets its primary record in `_evidence`, every lookup candidate in `_candidate_evidence` and every component in `_detail_evidence`. Resolved lines are counted in the manifest, and their output rows carry `_status`, but no evidence is written for them. When every line resolves, the three tables are empty.
+
+Set `"evidence": "full"` in the policy to record evidence for every selected line, for example to audit a result. Output rows, counts, totals and diagnostics are the same under both levels; the manifest's `evidence.level` records which one ran. Full evidence is large: at 100,000 lines it is about 757 MB, which needs `output_bytes` and `retained_bytes` raised explicitly. [Slice 6](spec/slice-6.md) is the contract.
 
 ## Snapshot limitations
 

@@ -94,6 +94,20 @@ ARM/x86, Python, Node and packaging gates passed at `a5b5578`; see the
 [verified run](measurements/ci-x86.md#slice-5-verified-on-both-architectures).
 Remaining limitations are in [unmet.md](measurements/unmet.md).
 
+## Slice 6: evidence for problem lines by default
+
+[Slice 6](spec/slice-6.md) records a developer decision: the library describes how
+datasets connect and should not have to emit much data. A run now records
+primary, candidate and detail evidence only for lines that did not resolve. A
+policy asks for the earlier per-line trace with `evidence: full`. Output rows,
+counts, totals and diagnostics are the same under both levels. The 100,000-line
+workload no longer raises its byte limits.
+
+Rust cases are in `tests/evidence.rs`; Python and Node check the default level on
+the two-supplier fixture. The earlier suites state `evidence: full` and keep
+their expectations. Hosted verification is recorded in
+[the evidence record](measurements/ci-x86.md) once it has run at the commit.
+
 ## Remaining scope
 
 The broad product specification
@@ -107,7 +121,7 @@ preview.
 Before any package publication, recheck crate/PyPI names and account ownership,
 retain the exact release commit's CI artifacts durably, and review its dependency
 inventory. Publication is outside the current implementation request. The
-100,000-line workload's policy declares 1 GiB output/retention limits
-(`generate_fixture.py --byte-limit 1073741824`); the default 256 MiB profile
-refuses its evidence volume. Process RSS remains a
+100,000-line workload runs under the default limits and evidence level; with
+`evidence: full` its evidence volume needs 1 GiB output/retention limits
+(`generate_fixture.py --evidence full --byte-limit 1073741824`). Process RSS remains a
 measurement, not a hard memory bound.

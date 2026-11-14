@@ -2,6 +2,27 @@
 
 Recorded 2026-11-12 for ticket #24. These are observations of a few runs on one shared development machine. They are not benchmarks, not comparisons with any other tool, and not promises about time or memory on any other machine.
 
+## Default evidence level (slice 6)
+
+Recorded 2026-11-14 on the same ARM machine, with the same fixture and a release build of the [slice 6](../spec/slice-6.md) change. The policy is the generated one with no raised limits and no stated evidence level, so the run records evidence only for the one line that did not resolve. Everything below this section describes runs that recorded evidence for every line, which the policy now requests with `evidence: full`.
+
+| | Every line recorded (run B below) | Default level |
+| --- | ---: | ---: |
+| Limits | `output_bytes` and `retained_bytes` raised to 1 GiB | defaults (256 MiB) |
+| Status | `succeeded_with_unresolved` | `succeeded_with_unresolved` |
+| `run_bundle` wall time | 110.6 s | 18.4 s |
+| Process peak RSS | 5.14 GB | 1.42 GB |
+| Serialized results and evidence | 757,303,499 bytes | 52,133,436 bytes |
+| Bundle bytes written | 815,129,474 | 5,162,009 |
+| Primary / candidate / detail evidence records | 100,000 / 299,998 / 150,000 | 1 / 1 / 2 |
+| Resolved / unresolved lines | 99,999 / 1 | 99,999 / 1 |
+
+Phases of the default-level run: parse 6.38 s, conversion 0.77 s, data validation 0.43 s, execution 9.32 s, evidence 0.32 s, total before delivery 18.04 s. The two runs were not made under the same machine load, so compare the sizes and counts, not the seconds, closely.
+
+Cancellation at the default level: a request 1.5 s into the run (parsing) returned after 0.13 s; a request 12 s in (building output rows) returned after 0.78 s. The earlier 25.2 s delay during output building is consistent with freeing the per-line evidence, which the default level no longer builds; it was not re-measured under `evidence: full`.
+
+The serialized results are larger than the bundle because in-memory rows carry a type tag on every value and the bundle's CSV does not. Peak RSS is still several times the input size: the adapters and executor hold every source record in memory.
+
 ## Summary
 
 The workload's policy now declares `output_bytes` and `retained_bytes` of 1 GiB (`generate_fixture.py --byte-limit 1073741824`). Run B below is the passing ARM run under that policy. The library defaults stay at 256 MiB, and run A records why the workload needs the higher limits.
