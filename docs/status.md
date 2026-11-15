@@ -133,8 +133,19 @@ carries no tables or evidence; the bundle does. Because it keeps no results,
 workload's bundle matched phase 1 outside its manifest and its peak fell to
 0.82 GB at `1a80353` (see the
 [verified run](measurements/ci-x86.md#slice-7-phase-2-verified-on-both-architectures));
-source records still set the peak. Streamed anchors
-and spilled lookup targets are the later phases.
+source records still set the peak.
+
+Phase 3 streams anchors. A source read only as the anchor of outputs is checked
+in full on its first read, which keeps only each record's identity and
+relationship key fields and its reference. Lookups and the checks over every
+anchor record run over those key records unchanged, and each output decodes
+the source's bytes again in batches. `limits.retained_bytes` counts the key
+records. Results, evidence, diagnostics and bundle tables are unchanged.
+On hosted x86 the workload's results
+matched phase 2 and its peak fell to 0.71 GB at `8f2c7d9` (see the
+[verified run](measurements/ci-x86.md#slice-7-phase-3-verified-on-both-architectures)).
+Lookup targets, detail sources and populations are still held whole and now set
+the peak; spilling targets larger than memory is phase 4.
 
 ## Remaining scope
 

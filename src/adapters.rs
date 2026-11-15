@@ -260,8 +260,10 @@ fn materialize_sources(
     policy: &Policy,
     cancel: &AtomicBool,
     mut reads: Option<&mut BTreeMap<String, SourceRead>>,
-) -> Result<BTreeMap<String, Vec<Row>>> {
+    streamed: &BTreeSet<String>,
+) -> Result<(BTreeMap<String, Vec<Row>>, Streams)> {
     let mut result = BTreeMap::new();
+    let mut deferred = BTreeMap::new();
     let mut total = 0;
     let mut expanded = 0;
     let mut retained = 0usize;
@@ -400,12 +402,14 @@ fn materialize_sources(
         let snapshot = snapshots
             .get(binding.path.as_os_str().as_encoded_bytes())
             .filter(|_| binding.adapter == "sqlite");
-        let owned_bytes;
-        let bytes = if let Some(snapshot) = snapshot {
-            &snapshot.bytes
+        let owned_bytes = if snapshot.is_some() {
+            Vec::new()
         } else {
-            owned_bytes = read_bytes(binding, policy, &mut total, cancel).map_err(subject)?;
-            &owned_bytes
+            read_bytes(binding, policy, &mut total, cancel).map_err(subject)?
+        };
+        let bytes: &[u8] = match snapshot {
+            Some(snapshot) => &snapshot.bytes,
+            None => &owned_bytes,
         };
         let fingerprint = snapshot
             .map(|s| s.fingerprint.clone())
@@ -440,7 +444,15 @@ fn materialize_sources(
         admission.limits.lookup_rows = max;
         admission.limits.retained_bytes = policy.limits.retained_bytes.saturating_sub(retained);
         let mut scan = None;
-        let mut rows = match binding.adapter.as_str() {
+        // A streamed anchor keeps only its key records (docs/spec/slice-7.md, phase 3).
+        let streaming = streamed.contains(&source.id);
+        let mut held = RowCollector::new(&admission);
+        let mut keyed = streaming.then(|| KeyCollector::new(recipe, source, &admission));
+        let sink: &mut dyn RowSink = match keyed.as_mut() {
+            Some(keyed) => keyed,
+            None => &mut held,
+        };
+        match binding.adapter.as_str() {
             "sqlite" => sqlite::read(
                 source,
                 binding,
@@ -450,6 +462,7 @@ fn materialize_sources(
                 cancel,
                 transfer_pushed.as_ref().or(plan.pushed.get(&source.id)),
                 transfer_fallback.as_ref().or(fallbacks.get(&source.id)),
+                sink,
             )
             .map(|mut read| {
                 if let (Some(placement), Some(transferred)) = (&mut read.placement, transferred) {
@@ -459,22 +472,26 @@ fn materialize_sources(
                     }
                 }
                 scan = Some((read.total_rows, read.placement));
-                read.rows
             }),
-            "json" => read_json(source, &bytes, &reference, &admission, cancel),
-            "csv" => read_csv(source, binding, &bytes, &reference, &admission, cancel),
+            "json" => read_json(source, bytes, &reference, &admission, cancel, sink),
+            "csv" => read_csv(source, binding, bytes, &reference, &admission, cancel, sink),
             "xlsx" => read_xlsx(
                 source,
                 binding,
-                &bytes,
+                bytes,
                 &reference,
                 &admission,
                 &mut expanded,
                 cancel,
+                sink,
             ),
             _ => return Err(err("UNSUPPORTED_CAPABILITY", "unsupported source adapter")),
         }
         .map_err(subject)?;
+        let (mut rows, conversion_us) = match keyed {
+            Some(keyed) => keyed.finish().map_err(subject)?,
+            None => (held.rows, 0),
+        };
         let max = if recipe
             .outputs
             .iter()
@@ -587,14 +604,56 @@ fn materialize_sources(
                         .map(|_| rows.len()),
                     placement: scan.and_then(|(_, placement)| placement),
                     access_us,
-                    parse_us: micros(parsed),
-                    conversion_us: 0,
+                    parse_us: micros(parsed).saturating_sub(conversion_us),
+                    conversion_us,
+                    streamed: streaming.then(|| {
+                        serde_json::json!({
+                            "kept_fields": key_fields(recipe, source).to_vec(),
+                            "reads": 1 + recipe
+                                .outputs
+                                .iter()
+                                .filter(|o| o.anchor == source.id)
+                                .count(),
+                            "batch_rows": policy.limits.batch_rows.max(1),
+                            "statement": "Only the identity and relationship key fields of each record and its reference are held; each output anchored here decodes the same bytes again in batches.",
+                        })
+                    }),
+                },
+            );
+        }
+        if streaming {
+            deferred.insert(
+                source.id.clone(),
+                Deferred {
+                    source: source.clone(),
+                    binding: binding.clone(),
+                    bytes: owned_bytes,
+                    reference: reference.clone(),
+                    admission: admission.clone(),
+                    pushed: plan.pushed.get(&source.id).cloned(),
+                    fallback: fallbacks.get(&source.id).cloned(),
+                    rows: rows.len(),
                 },
             );
         }
         result.insert(source.id.clone(), rows);
     }
-    Ok(result)
+    // A streamed SQLite anchor reads its open snapshot again.
+    let snapshots = if deferred
+        .values()
+        .any(|d: &Deferred| d.binding.adapter == "sqlite")
+    {
+        snapshots
+    } else {
+        BTreeMap::new()
+    };
+    Ok((
+        result,
+        Streams {
+            sources: deferred,
+            snapshots,
+        },
+    ))
 }
 
 /// What one run actually read for a source: its safe (path-free) binding identity,
@@ -628,6 +687,11 @@ pub struct SourceRead {
     /// Converting the observations to typed Arrow batches and back.
     #[serde(default)]
     pub conversion_us: u64,
+    /// Present when the executor streamed this source as an output anchor: the
+    /// fields it held of each record and how many times it read the source
+    /// (docs/spec/slice-7.md, phase 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub streamed: Option<serde_json::Value>,
 }
 
 /// Concrete capabilities of the built-in source readers. Describing a reader
@@ -763,6 +827,12 @@ pub(crate) fn blank_row(names: &crate::record::FieldNames, reference: &SourceRef
         reference: reference.clone(),
     }
 }
+/// Where an adapter delivers the records it decodes, in source order.
+pub(crate) trait RowSink {
+    fn push(&mut self, row: Row) -> Result<()>;
+}
+
+/// Holds every admitted record of a source.
 struct RowCollector<'a> {
     rows: Vec<Row>,
     bytes: usize,
@@ -778,6 +848,8 @@ impl<'a> RowCollector<'a> {
             policy,
         }
     }
+}
+impl RowSink for RowCollector<'_> {
     fn push(&mut self, row: Row) -> Result<()> {
         limit(
             self.rows.len() < self.policy.limits.lookup_rows,
@@ -798,6 +870,264 @@ impl<'a> RowCollector<'a> {
             "retained source materialization bytes",
         )?;
         self.rows.push(row);
+        Ok(())
+    }
+}
+
+/// Fields a streamed anchor keeps of each record: its identity and the fields
+/// its relationships key on (docs/spec/slice-7.md, phase 3). Lookups, transfers,
+/// identity checks and detail parents read nothing else of an anchor record.
+pub(crate) fn key_fields(recipe: &Recipe, source: &Source) -> crate::record::FieldNames {
+    let mut names: BTreeSet<&String> = source.identity.iter().collect();
+    for rel in recipe.relationships.iter().filter(|r| r.from == source.id) {
+        names.extend(rel.from_keys.iter().filter(|k| !k.contains('.')));
+        names.extend(rel.validity.as_ref().map(|v| &v.date));
+        names.extend(rel.period.as_ref().map(|p| &p.key));
+    }
+    std::sync::Arc::new(
+        names
+            .into_iter()
+            .filter(|name| source.projection.fields.contains_key(*name))
+            .cloned()
+            .collect(),
+    )
+}
+
+/// First read of a streamed anchor. Every record is admitted and crosses the
+/// typed-batch boundary as a held record would; then only its key fields and
+/// its reference are kept. `limits.retained_bytes` counts what is kept.
+struct KeyCollector<'a> {
+    policy: &'a Policy,
+    fields: Vec<(String, Field)>,
+    keep: crate::record::FieldNames,
+    /// Decoded records waiting for typed conversion; at most one batch.
+    pending: Vec<Row>,
+    rows: Vec<Row>,
+    bytes: usize,
+    batch_bytes: usize,
+    conversion_us: u64,
+}
+impl<'a> KeyCollector<'a> {
+    fn new(recipe: &Recipe, source: &Source, policy: &'a Policy) -> Self {
+        Self {
+            policy,
+            fields: source
+                .projection
+                .fields
+                .iter()
+                .map(|(n, f)| (n.clone(), f.clone()))
+                .collect(),
+            keep: key_fields(recipe, source),
+            pending: Vec::new(),
+            rows: Vec::new(),
+            bytes: 0,
+            batch_bytes: 0,
+            conversion_us: 0,
+        }
+    }
+    fn convert(&mut self) -> Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let converted = std::time::Instant::now();
+        typed_batch(&self.fields, std::mem::take(&mut self.pending))?;
+        self.conversion_us = self.conversion_us.saturating_add(micros(converted));
+        Ok(())
+    }
+    /// The kept records, in source order, and the time spent converting.
+    fn finish(mut self) -> Result<(Vec<Row>, u64)> {
+        self.convert()?;
+        Ok((self.rows, self.conversion_us))
+    }
+}
+impl RowSink for KeyCollector<'_> {
+    fn push(&mut self, row: Row) -> Result<()> {
+        limit(
+            self.rows.len() < self.policy.limits.lookup_rows,
+            "source row count",
+        )?;
+        let size = crate::admission::serialized_size(&row).map_err(io_error)?;
+        if self.rows.len() % self.policy.limits.batch_rows.max(1) == 0 {
+            self.batch_bytes = 0;
+        }
+        self.batch_bytes = self.batch_bytes.saturating_add(size);
+        limit(
+            self.batch_bytes <= self.policy.limits.batch_bytes,
+            "decoded batch bytes",
+        )?;
+        let mut kept = Row {
+            fields: crate::record::FieldMap::with_names(self.keep.clone()),
+            raw: crate::record::FieldMap::new(),
+            reference: row.reference.clone(),
+        };
+        for name in self.keep.iter() {
+            if let Some(value) = row.fields.get(name) {
+                kept.fields.insert(name.clone(), value.clone());
+            }
+        }
+        let size = crate::admission::serialized_size(&kept).map_err(io_error)?;
+        self.bytes = self.bytes.saturating_add(size);
+        limit(
+            self.bytes <= self.policy.limits.retained_bytes,
+            "retained source materialization bytes",
+        )?;
+        self.rows.push(kept);
+        self.pending.push(row);
+        if self.pending.len() >= self.policy.limits.batch_rows.max(1) {
+            self.convert()?;
+        }
+        Ok(())
+    }
+}
+
+/// A later read of a streamed anchor: records reach `each` in batches, with the
+/// position of each batch's first record.
+struct Batches<'a> {
+    rows: Vec<Row>,
+    size: usize,
+    first: usize,
+    each: &'a mut dyn FnMut(usize, &[Row]) -> Result<()>,
+}
+impl Batches<'_> {
+    fn flush(&mut self) -> Result<()> {
+        if !self.rows.is_empty() {
+            (self.each)(self.first, &self.rows)?;
+            self.first += self.rows.len();
+            self.rows.clear();
+        }
+        Ok(())
+    }
+}
+impl RowSink for Batches<'_> {
+    fn push(&mut self, row: Row) -> Result<()> {
+        self.rows.push(row);
+        if self.rows.len() >= self.size {
+            self.flush()?;
+        }
+        Ok(())
+    }
+}
+
+/// What a later read of one streamed anchor needs: its declarations, the bytes
+/// the first read fingerprinted (a SQLite source reads its open snapshot), the
+/// admission and the placement that read used.
+struct Deferred {
+    source: Source,
+    binding: Binding,
+    bytes: Vec<u8>,
+    reference: SourceReference,
+    admission: Policy,
+    pushed: Option<crate::placement::Pushed>,
+    fallback: Option<sqlite::Fallback>,
+    rows: usize,
+}
+
+/// Streamed anchors of one run (docs/spec/slice-7.md, phase 3). The executor
+/// holds their key records only; each output anchored at one reads its records
+/// again from here, in batches. Every read decodes the same bytes, so every
+/// read sees the records the first read checked.
+#[derive(Default)]
+pub(crate) struct Streams {
+    sources: BTreeMap<String, Deferred>,
+    snapshots: BTreeMap<Vec<u8>, SqliteSnapshot>,
+}
+impl Streams {
+    pub(crate) fn contains(&self, id: &str) -> bool {
+        self.sources.contains_key(id)
+    }
+    /// Decode streamed anchor `id` again and hand its records to `each` in
+    /// batches of at most `size`. Errors from `each` are returned unchanged.
+    pub(crate) fn read(
+        &self,
+        id: &str,
+        size: usize,
+        cancel: &AtomicBool,
+        each: &mut dyn FnMut(usize, &[Row]) -> Result<()>,
+    ) -> Result<()> {
+        let deferred = self
+            .sources
+            .get(id)
+            .ok_or_else(|| err("INVALID_SOURCE", format!("{id} is not streamed")))?;
+        let mut batches = Batches {
+            rows: Vec::with_capacity(size.max(1)),
+            size: size.max(1),
+            first: 0,
+            each,
+        };
+        let (source, binding, reference, policy) = (
+            &deferred.source,
+            &deferred.binding,
+            &deferred.reference,
+            &deferred.admission,
+        );
+        // A later read never charges the workbook expansion budget again.
+        let mut expanded = 0;
+        let read = match binding.adapter.as_str() {
+            "sqlite" => {
+                let snapshot = self
+                    .snapshots
+                    .get(binding.path.as_os_str().as_encoded_bytes())
+                    .ok_or_else(|| err("SOURCE_ACCESS", "SQLite snapshot is not open"))?;
+                sqlite::read(
+                    source,
+                    binding,
+                    &snapshot.conn,
+                    reference,
+                    policy,
+                    cancel,
+                    deferred.pushed.as_ref(),
+                    deferred.fallback.as_ref(),
+                    &mut batches,
+                )
+                .map(|_| ())
+            }
+            "json" => read_json(
+                source,
+                &deferred.bytes,
+                reference,
+                policy,
+                cancel,
+                &mut batches,
+            ),
+            "csv" => read_csv(
+                source,
+                binding,
+                &deferred.bytes,
+                reference,
+                policy,
+                cancel,
+                &mut batches,
+            ),
+            "xlsx" => read_xlsx(
+                source,
+                binding,
+                &deferred.bytes,
+                reference,
+                policy,
+                &mut expanded,
+                cancel,
+                &mut batches,
+            ),
+            _ => Err(err("UNSUPPORTED_CAPABILITY", "unsupported source adapter")),
+        };
+        read.and_then(|()| batches.flush()).map_err(|e| {
+            // Cancellation noticed by the reader is the run's cancellation.
+            if e.code == "CANCELLED" {
+                Error::new("CANCELLED", "execution", "run cancelled")
+            } else {
+                e
+            }
+        })?;
+        if batches.first != deferred.rows {
+            return Err(err(
+                "SOURCE_CHANGED",
+                format!(
+                    "a later read of {id} decoded {} records, the first read {}",
+                    batches.first, deferred.rows
+                ),
+            )
+            .with_subject(format!("source:{id}")));
+        }
         Ok(())
     }
 }
@@ -1146,7 +1476,8 @@ fn read_json(
     reference: &SourceReference,
     policy: &Policy,
     cancel: &AtomicBool,
-) -> Result<Vec<Row>> {
+    rows: &mut dyn RowSink,
+) -> Result<()> {
     for path in source
         .projection
         .array
@@ -1172,7 +1503,6 @@ fn read_json(
         None => vec![&root],
     };
     let names = projected_names(source);
-    let mut rows = RowCollector::new(policy);
     let mut failures = ValueFailures::default();
     for (index, record) in records.into_iter().enumerate() {
         check_cancel(cancel)?;
@@ -1221,7 +1551,7 @@ fn read_json(
         }
     }
     failures.finish()?;
-    Ok(rows.rows)
+    Ok(())
 }
 
 fn setting_byte(binding: &Binding, key: &str, default: u8) -> Result<u8> {
@@ -1394,7 +1724,8 @@ fn read_csv(
     reference: &SourceReference,
     policy: &Policy,
     cancel: &AtomicBool,
-) -> Result<Vec<Row>> {
+    rows: &mut dyn RowSink,
+) -> Result<()> {
     let dialect = CsvDialect::from_binding(binding)?;
     let mut reader = CsvRecords::new(bytes, &dialect, policy.limits.field_bytes, cancel);
     let headers = reader
@@ -1418,7 +1749,6 @@ fn read_csv(
         })
         .collect::<Result<_>>()?;
     let names = projected_names(source);
-    let mut rows = RowCollector::new(policy);
     let mut failures = ValueFailures::default();
     let mut index = 0usize;
     while let Some(record) = reader.next_record()? {
@@ -1463,7 +1793,7 @@ fn read_csv(
         }
     }
     failures.finish()?;
-    Ok(rows.rows)
+    Ok(())
 }
 
 fn xml_attr(event: &quick_xml::events::BytesStart<'_>, name: &str) -> Result<Option<String>> {
@@ -1906,7 +2236,8 @@ fn read_xlsx(
     policy: &Policy,
     expanded: &mut usize,
     cancel: &AtomicBool,
-) -> Result<Vec<Row>> {
+    rows: &mut dyn RowSink,
+) -> Result<()> {
     let settings = xlsx_settings(source, binding)?;
     let preflight = xlsx_preflight(bytes, &policy.limits, expanded, cancel)?;
     let sheet = settings.sheet.as_str();
@@ -1958,7 +2289,6 @@ fn read_xlsx(
         })
         .collect::<Result<_>>()?;
     let names = projected_names(source);
-    let mut rows = RowCollector::new(policy);
     let mut failures = ValueFailures::default();
     let end_row = range.end().unwrap().0;
     let date_system = if epoch1904 { "1904" } else { "1900" };
@@ -2094,7 +2424,7 @@ fn read_xlsx(
         }
     }
     failures.finish()?;
-    Ok(rows.rows)
+    Ok(())
 }
 
 /// One owned typed batch and its source observations. Exact decimals and dates use
@@ -2235,7 +2565,7 @@ pub fn read_batches<'a>(
     policy: &Policy,
     cancel: &'a AtomicBool,
 ) -> Result<BTreeMap<String, SourceBatches<'a>>> {
-    let rows = materialize_sources(recipe, bindings, policy, cancel, None)?;
+    let (rows, _) = materialize_sources(recipe, bindings, policy, cancel, None, &BTreeSet::new())?;
     into_batches(recipe, policy, cancel, rows)
 }
 
@@ -2288,10 +2618,33 @@ pub fn read_sources_observed(
     policy: &Policy,
     cancel: &AtomicBool,
 ) -> Result<(BTreeMap<String, Vec<Row>>, BTreeMap<String, SourceRead>)> {
+    read_for_run(recipe, bindings, policy, cancel, &BTreeSet::new())
+        .map(|(rows, reads, _)| (rows, reads))
+}
+
+/// The executor's read. Sources in `streamed` are checked in full but only
+/// their key records are returned; [`Streams`] reads their records again
+/// (docs/spec/slice-7.md, phase 3).
+pub(crate) fn read_for_run(
+    recipe: &Recipe,
+    bindings: &Bindings,
+    policy: &Policy,
+    cancel: &AtomicBool,
+    streamed: &BTreeSet<String>,
+) -> Result<(
+    BTreeMap<String, Vec<Row>>,
+    BTreeMap<String, SourceRead>,
+    Streams,
+)> {
     let mut reads = BTreeMap::new();
-    let rows = materialize_sources(recipe, bindings, policy, cancel, Some(&mut reads))?;
+    let (mut rows, streams) =
+        materialize_sources(recipe, bindings, policy, cancel, Some(&mut reads), streamed)?;
+    // Key records already crossed the typed-batch boundary as whole records.
+    let mut result: BTreeMap<String, Vec<Row>> = streamed
+        .iter()
+        .filter_map(|id| rows.remove_entry(id))
+        .collect();
     let sources = into_batches(recipe, policy, cancel, rows)?;
-    let mut result = BTreeMap::new();
     for (id, batches) in sources {
         let converted = std::time::Instant::now();
         let mut rows = Vec::new();
@@ -2304,7 +2657,7 @@ pub fn read_sources_observed(
         }
         result.insert(id, rows);
     }
-    Ok((result, reads))
+    Ok((result, reads, streams))
 }
 
 /// Bound validation's schema inspection (`data_checks = "none"`): open every bound

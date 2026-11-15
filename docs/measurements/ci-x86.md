@@ -229,3 +229,38 @@ requested 50 ms in returned after 1.1 ms on x86 and 0.9 ms on ARM.
 
 GitHub reports an expiry of 2027-02-13 for these artifacts. Evidence for this
 commit does not certify later heads; their own PR checks remain authoritative.
+
+## Slice 7 phase 3: verified on both architectures
+
+[PR #41](https://github.com/andrew3stedall/iresiphi/pull/41), commit
+`8f2c7d9fb4819e6925d0c4a68a491038541b7594`, passed all eight jobs in
+[run 43714425240](https://github.com/andrew3stedall/iresiphi/actions/runs/43714425240)
+on 2026-11-15, including the new streamed-anchor cases in `tests/streaming.rs`.
+
+The workload's two JSON documents (`a`, `b`) streamed: each kept `date`, `id`,
+`invoice`, `raw` and `supplier` of its 50,000 records and was read twice. The
+lookup targets and the component detail were held. Results match phase 2:
+serialized results and evidence are unchanged at 52,133,436 bytes, with the
+same counts (99,999 resolved, 1 unresolved), evidence records (1 / 1 / 2) and
+one `LOOKUP_UNMATCHED` warning. The bundle wrote 5,162,328 bytes on both
+architectures, 529 more than phase 2 on x86; the two new `streamed` read records
+in `manifest.json` add 558 bytes before timing digits vary. The workload
+artifacts do not keep the bundle files, so the tables were not compared byte for
+byte here; `tests/streaming.rs` compares bundles across batch sizes.
+
+Process peak RSS fell from 819,257,344 bytes at phase 2 to 709,414,912 bytes
+on x86 (813,649,920 to 702,570,496 on ARM). The held targets (100,000 workbook
+rows and 150,000 components) now set the peak; phase 4 addresses them.
+`run_bundle` took 6.2 s on x86 and 7.1 s on ARM, against 7.8 s and 6.1 s at
+phase 2; runner timing varies, so the second decode of each anchor is not
+separately visible. A cancellation requested 50 ms in returned after 2.0 ms on
+x86 and 0.9 ms on ARM, during source parsing.
+
+| Artifact | ID | SHA-256 digest |
+| --- | --- | --- |
+| x86-distributions | 14162906661 | `94f2e66acc028dc1c93f848fe03b58cdaef4b1207ea7e554aadb1e994c87cdfb` |
+| x86-workload | 14162055927 | `295e365298c750fed180fe5df47075ba1acf6d2a1fa408500dce90b908a273bb` |
+| arm-workload (including installed ARM wheels) | 14162195499 | `f4953cda04b95d5e2e7fb7df1902f88cab76e4b1d7bf46db9a43211d5dc19a1d` |
+
+GitHub reports an expiry of 2027-02-13 for these artifacts. Evidence for this
+commit does not certify later heads; their own PR checks remain authoritative.
