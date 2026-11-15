@@ -79,7 +79,8 @@ fn memory_and_bundle_share_typed_schema_and_manifest_and_csv_round_trips_exactly
             .collect()
     };
     assert_eq!(by_id(&tables["review"]), by_id(&memory.tables["review"]));
-    assert_eq!(by_id(&tables["review"]), by_id(&bundled.tables["review"]));
+    // A bundle run writes rows as it produces them and keeps none.
+    assert!(bundled.tables.is_empty() && bundled.evidence.is_empty());
     let evidence: Vec<serde_json::Value> = tables["_evidence"]
         .iter()
         .map(|row| match &row["record_json"] {
@@ -251,7 +252,7 @@ fn cancellation_after_commit_cannot_revoke_the_bundle() {
         read_json(&f.destination().join("manifest.json"))["complete"],
         true
     );
-    assert!(!report.tables.is_empty());
+    assert_eq!(read_bundle(&f.destination()).unwrap()["review"].len(), 3);
 }
 
 #[test]

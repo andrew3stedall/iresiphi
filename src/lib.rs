@@ -5,6 +5,7 @@ pub mod cancel;
 pub mod eval;
 pub mod model;
 pub mod record;
+mod results;
 pub mod scalar;
 pub mod validation;
 pub use model::{Binding, Bindings, Error, Limits, Policy, Recipe};

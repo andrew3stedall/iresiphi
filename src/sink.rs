@@ -11,6 +11,7 @@ use crate::{
 };
 use serde::Serialize;
 use std::{
+    cell::Cell,
     collections::BTreeMap,
     ffi::{CStr, CString},
     fs::File,
@@ -20,6 +21,7 @@ use std::{
         unix::ffi::OsStrExt,
     },
     path::{Component, Path, PathBuf},
+    rc::Rc,
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -133,13 +135,16 @@ fn stage_name(bytes: &[u8]) -> bool {
         .is_some_and(|s| s.len() == 32 && s.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
 }
 /// Only files a stage itself creates; anything else marks a directory as not ours.
+/// A table is written as `part-<n>.csv` and named `table-<n>.csv` at commit.
 fn staged_file_name(bytes: &[u8]) -> bool {
     bytes == SCHEMA_FILE.as_bytes()
         || bytes == MANIFEST_FILE.as_bytes()
-        || bytes
-            .strip_prefix(b"table-")
-            .and_then(|s| s.strip_suffix(b".csv"))
-            .is_some_and(|n| !n.is_empty() && n.iter().all(u8::is_ascii_digit))
+        || [&b"table-"[..], &b"part-"[..]].iter().any(|prefix| {
+            bytes
+                .strip_prefix(*prefix)
+                .and_then(|s| s.strip_suffix(b".csv"))
+                .is_some_and(|n| !n.is_empty() && n.iter().all(u8::is_ascii_digit))
+        })
 }
 
 /// A path that could not be removed, with the operating-system error.
@@ -248,6 +253,20 @@ impl Stage {
         }
         Ok(file)
     }
+    /// Rename a file this stage created; cleanup then removes it by its new name.
+    fn rename(&mut self, from: &str, to: &str) -> Result<()> {
+        let (from, to) = (name(from.as_bytes())?, name(to.as_bytes())?);
+        let fd = self.directory.as_raw_fd();
+        if unsafe { libc::renameat(fd, from.as_ptr(), fd, to.as_ptr()) } != 0 {
+            return Err(io_error(std::io::Error::last_os_error()));
+        }
+        for file in &mut self.files {
+            if *file == from {
+                *file = to.clone();
+            }
+        }
+        Ok(())
+    }
     /// Remove exactly the files this stage created, then the stage itself. Never recursive.
     fn cleanup(&mut self) -> Vec<Leftover> {
         if self.done {
@@ -289,9 +308,10 @@ impl Drop for Stage {
     }
 }
 
+/// Every file of one bundle shares one byte budget, `limits.output_bytes`.
 struct BudgetWriter<'a> {
     file: File,
-    total: &'a mut usize,
+    total: Rc<Cell<usize>>,
     limit: usize,
     cancel: &'a AtomicBool,
 }
@@ -300,11 +320,11 @@ impl Write for BudgetWriter<'_> {
         if self.cancel.load(Ordering::Acquire) {
             return Err(std::io::Error::other("CANCELLED"));
         }
-        if bytes.len() > self.limit.saturating_sub(*self.total) {
+        if bytes.len() > self.limit.saturating_sub(self.total.get()) {
             return Err(std::io::Error::other("RESOURCE_LIMIT"));
         }
         let count = self.file.write(bytes)?;
-        *self.total += count;
+        self.total.set(self.total.get() + count);
         Ok(count)
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -331,22 +351,6 @@ fn writer_error(message: String) -> Error {
     };
     fail(code, message)
 }
-fn write_json(
-    stage: &mut Stage,
-    filename: &str,
-    value: &impl serde::Serialize,
-    total: &mut usize,
-    policy: &Policy,
-    cancel: &AtomicBool,
-) -> Result<()> {
-    let writer = BudgetWriter {
-        file: stage.file(filename)?,
-        total,
-        limit: policy.limits.output_bytes,
-        cancel,
-    };
-    serde_json::to_writer(writer, value).map_err(|e| writer_error(e.to_string()))
-}
 
 /// CSV text for one value: `\N` is null and a leading backslash on any non-null
 /// representation is doubled, so empty text and literal `\N` stay distinct.
@@ -366,45 +370,7 @@ fn csv_text(value: &Value) -> String {
     }
 }
 
-fn write_csv(
-    stage: &mut Stage,
-    filename: &str,
-    rows: &[BTreeMap<String, Value>],
-    columns: &[String],
-    total: &mut usize,
-    policy: &Policy,
-    cancel: &AtomicBool,
-) -> Result<()> {
-    let budget = BudgetWriter {
-        file: stage.file(filename)?,
-        total,
-        limit: policy.limits.output_bytes,
-        cancel,
-    };
-    let mut writer = csv::WriterBuilder::new()
-        .terminator(csv::Terminator::Any(b'\n'))
-        .from_writer(budget);
-    writer
-        .write_record(columns)
-        .map_err(|e| writer_error(e.to_string()))?;
-    for row in rows {
-        if cancel.load(Ordering::Acquire) {
-            return Err(fail("CANCELLED", "cancelled writing CSV"));
-        }
-        if row.len() != columns.len() || columns.iter().any(|column| !row.contains_key(column)) {
-            return Err(fail(
-                "INVALID_SCHEMA",
-                "output row does not match declared columns",
-            ));
-        }
-        writer
-            .write_record(columns.iter().map(|column| csv_text(&row[column])))
-            .map_err(|e| writer_error(e.to_string()))?;
-    }
-    writer.flush().map_err(|e| writer_error(e.to_string()))
-}
-
-fn schema_columns(schema: &serde_json::Value, table: &str) -> Result<Vec<String>> {
+pub(crate) fn schema_columns(schema: &serde_json::Value, table: &str) -> Result<Vec<String>> {
     schema
         .get(table)
         .and_then(|table| table.get("columns"))
@@ -426,6 +392,276 @@ fn schema_columns(schema: &serde_json::Value, table: &str) -> Result<Vec<String>
         .collect()
 }
 
+/// One table being written: its CSV writer, the columns every row must have and
+/// the staging file it writes until commit names it.
+struct TableFile<'a> {
+    writer: csv::Writer<BudgetWriter<'a>>,
+    columns: Vec<String>,
+    filename: String,
+}
+
+/// A bundle written while its run produces rows (docs/spec/slice-7.md, phase 2).
+///
+/// [`Staged::open`] approves the destination before the run reads anything.
+/// [`Staged::start`] creates the run-owned staging directory; each table is a CSV
+/// file written row by row. [`Staged::commit`] names the files, writes the schema
+/// and the complete-marker manifest, and publishes with one no-replace rename.
+/// Dropping an uncommitted stage removes what it wrote.
+pub(crate) struct Staged<'a> {
+    parent: Option<File>,
+    parent_path: PathBuf,
+    destination_name: CString,
+    stage: Option<Stage>,
+    tables: BTreeMap<String, TableFile<'a>>,
+    total: Rc<Cell<usize>>,
+    limit: usize,
+    cancel: &'a dyn Cancellation,
+}
+impl<'a> Staged<'a> {
+    /// Approve `destination` under the output policy and refuse one that exists.
+    pub(crate) fn open(
+        destination: &Path,
+        policy: &Policy,
+        cancel: &'a dyn Cancellation,
+    ) -> Result<Self> {
+        let (parent, destination_name) = approved_parent(destination, policy)?;
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        let exists = unsafe {
+            libc::fstatat(
+                parent.as_raw_fd(),
+                destination_name.as_ptr(),
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if exists == 0 {
+            return Err(fail(
+                "DESTINATION_EXISTS",
+                "destination already exists; inspect its manifest instead of retrying",
+            ));
+        }
+        let access_error = std::io::Error::last_os_error();
+        if access_error.raw_os_error() != Some(libc::ENOENT) {
+            return Err(io_error(access_error));
+        }
+        Ok(Self {
+            parent: Some(parent),
+            parent_path: destination.parent().unwrap_or(Path::new("/")).to_owned(),
+            destination_name,
+            stage: None,
+            tables: BTreeMap::new(),
+            total: Rc::new(Cell::new(0)),
+            limit: policy.limits.output_bytes,
+            cancel,
+        })
+    }
+    /// Create the staging directory, once. The run enters [`RunPhase::Write`].
+    pub(crate) fn start(&mut self) -> Result<()> {
+        if self.stage.is_some() {
+            return Ok(());
+        }
+        let flag = self.cancel.flag();
+        if flag.load(Ordering::Acquire) {
+            return Err(fail("CANCELLED", "cancelled before staging"));
+        }
+        let parent = self
+            .parent
+            .take()
+            .ok_or_else(|| fail("OUTPUT_IO", "staging could not be created"))?;
+        self.stage = Some(Stage::create(parent, &self.parent_path)?);
+        self.cancel.entered(RunPhase::Write);
+        if flag.load(Ordering::Acquire) {
+            return Err(fail("CANCELLED", "cancelled writing the bundle"));
+        }
+        Ok(())
+    }
+    /// Whether `table` has begun.
+    pub(crate) fn has(&self, table: &str) -> bool {
+        self.tables.contains_key(table)
+    }
+    /// Begin `table` with its header row; it is part of the bundle even if no row
+    /// follows. Beginning a table again does nothing.
+    pub(crate) fn begin(&mut self, table: &str, columns: Vec<String>) -> Result<()> {
+        if self.has(table) {
+            return Ok(());
+        }
+        self.start()?;
+        let filename = format!("part-{}.csv", self.tables.len());
+        let stage = self.stage.as_mut().expect("started");
+        let budget = BudgetWriter {
+            file: stage.file(&filename)?,
+            total: self.total.clone(),
+            limit: self.limit,
+            cancel: self.cancel.flag(),
+        };
+        let mut writer = csv::WriterBuilder::new()
+            .terminator(csv::Terminator::Any(b'\n'))
+            .from_writer(budget);
+        writer
+            .write_record(&columns)
+            .map_err(|e| writer_error(e.to_string()))?;
+        self.tables.insert(
+            table.to_owned(),
+            TableFile {
+                writer,
+                columns,
+                filename,
+            },
+        );
+        Ok(())
+    }
+    /// Append one row to a table that has begun.
+    pub(crate) fn row(&mut self, table: &str, row: &BTreeMap<String, Value>) -> Result<()> {
+        if self.cancel.flag().load(Ordering::Acquire) {
+            return Err(fail("CANCELLED", "cancelled writing CSV"));
+        }
+        let file = self
+            .tables
+            .get_mut(table)
+            .ok_or_else(|| fail("INVALID_SCHEMA", format!("table {table} has not begun")))?;
+        if row.len() != file.columns.len()
+            || file.columns.iter().any(|column| !row.contains_key(column))
+        {
+            return Err(fail(
+                "INVALID_SCHEMA",
+                "output row does not match declared columns",
+            ));
+        }
+        file.writer
+            .write_record(file.columns.iter().map(|column| csv_text(&row[column])))
+            .map_err(|e| writer_error(e.to_string()))
+    }
+    fn write_json(&mut self, filename: &str, value: &impl serde::Serialize) -> Result<()> {
+        let stage = self.stage.as_mut().expect("started");
+        let writer = BudgetWriter {
+            file: stage.file(filename)?,
+            total: self.total.clone(),
+            limit: self.limit,
+            cancel: self.cancel.flag(),
+        };
+        serde_json::to_writer(writer, value).map_err(|e| writer_error(e.to_string()))
+    }
+    fn publish(
+        &mut self,
+        schema: &serde_json::Value,
+        manifest: &serde_json::Value,
+    ) -> Result<usize> {
+        self.start()?;
+        let flag = self.cancel.flag();
+        // Files are named by table order, as a bundle written all at once names them.
+        let mut csv_locations = BTreeMap::new();
+        for (index, (table, file)) in std::mem::take(&mut self.tables).into_iter().enumerate() {
+            let TableFile {
+                writer, filename, ..
+            } = file;
+            drop(
+                writer
+                    .into_inner()
+                    .map_err(|e| writer_error(e.to_string()))?,
+            );
+            let published = format!("table-{index}.csv");
+            self.stage
+                .as_mut()
+                .expect("started")
+                .rename(&filename, &published)?;
+            csv_locations.insert(table, published);
+        }
+        let companion = serde_json::json!({"tables":schema,"csv":{"encoding":"UTF-8","delimiter":",","quoting":"RFC4180","record_ending":"LF","header_rows":1,"null":"\\N","non_null_backslash_prefix":"double first backslash","files":csv_locations}});
+        self.write_json(SCHEMA_FILE, &companion)?;
+        let mut complete = manifest
+            .as_object()
+            .cloned()
+            .ok_or_else(|| fail("INVALID_MANIFEST", "manifest must be an object"))?;
+        complete.insert("complete".into(), serde_json::Value::Bool(true));
+        self.write_json(MANIFEST_FILE, &complete)?;
+        if flag.load(Ordering::Acquire) {
+            return Err(fail("CANCELLED", "cancelled before commit"));
+        }
+        let stage = self.stage.as_ref().expect("started");
+        let rc = unsafe {
+            libc::renameat2(
+                stage.parent.as_raw_fd(),
+                stage.name.as_ptr(),
+                stage.parent.as_raw_fd(),
+                self.destination_name.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if rc != 0 {
+            let error = std::io::Error::last_os_error();
+            let code = publication_code(error.raw_os_error());
+            return Err(fail(code, format!("no-replace rename: {error}")));
+        }
+        Ok(self.total.get())
+    }
+    /// Publish the staged tables with the complete type `schema` and a
+    /// complete-marker `manifest` at the destination.
+    ///
+    /// Cancellation is honoured until the no-replace rename. After a successful
+    /// rename the run is committed: no cancellation check follows, and a failure
+    /// while reporting (including a panic in [`Cancellation::entered`]) leaves the
+    /// complete bundle, whose manifest carries the run ID.
+    pub(crate) fn commit(
+        mut self,
+        schema: &serde_json::Value,
+        manifest: &serde_json::Value,
+    ) -> std::result::Result<Published, DeliveryFailure> {
+        match self.publish(schema, manifest) {
+            Ok(bytes) => {
+                let mut stage = self.stage.take().expect("published");
+                stage.done = true;
+                let cleanup = DeliveryCleanup {
+                    staging: Some(stage.path()),
+                    committed: true,
+                    leftovers: vec![],
+                };
+                drop(stage);
+                // Committed: this hook cannot revoke the bundle, whatever it does.
+                self.cancel.entered(RunPhase::Committed);
+                Ok(Published { bytes, cleanup })
+            }
+            Err(error) => Err(self.fail(error)),
+        }
+    }
+    /// Abandon the bundle: remove exactly what this stage wrote and report it.
+    pub(crate) fn abort(&mut self) -> DeliveryCleanup {
+        self.tables.clear();
+        let Some(mut stage) = self.stage.take() else {
+            return DeliveryCleanup::default();
+        };
+        DeliveryCleanup {
+            staging: Some(stage.path()),
+            committed: false,
+            leftovers: stage.cleanup(),
+        }
+    }
+    /// Whether staging was created, so abandoning the bundle has cleanup evidence.
+    pub(crate) fn started(&self) -> bool {
+        self.stage.is_some()
+    }
+    /// Abandon the bundle because of `error`, naming any leftovers in its context.
+    pub(crate) fn fail(&mut self, mut error: Error) -> DeliveryFailure {
+        let cleanup = self.abort();
+        if !cleanup.leftovers.is_empty() {
+            error.context = Some(leftover_context(&cleanup));
+        }
+        DeliveryFailure { error, cleanup }
+    }
+}
+
+/// Diagnostic context naming the staging paths cleanup could not remove.
+pub(crate) fn leftover_context(cleanup: &DeliveryCleanup) -> String {
+    format!(
+        "cleanup left: {}",
+        cleanup
+            .leftovers
+            .iter()
+            .map(|l| format!("{} ({})", l.path.display(), l.error))
+            .collect::<Vec<_>>()
+            .join("; ")
+    )
+}
+
 /// Publishes escaped CSV tables, the caller-provided complete type schema and a
 /// complete-marker manifest as one bundle at a NEW `destination`.
 ///
@@ -441,115 +677,24 @@ pub fn publish_bundle(
     manifest: &serde_json::Value,
     cancel: &dyn Cancellation,
 ) -> std::result::Result<Published, DeliveryFailure> {
-    let mut cleanup = DeliveryCleanup::default();
-    let early = |error: Error| DeliveryFailure {
-        error,
-        cleanup: DeliveryCleanup::default(),
-    };
-    let (parent, destination_name) = approved_parent(destination, policy).map_err(early)?;
-    let parent_path = destination.parent().unwrap_or(Path::new("/"));
-    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-    let exists = unsafe {
-        libc::fstatat(
-            parent.as_raw_fd(),
-            destination_name.as_ptr(),
-            stat.as_mut_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if exists == 0 {
-        return Err(early(fail(
-            "DESTINATION_EXISTS",
-            "destination already exists; inspect its manifest instead of retrying",
-        )));
-    }
-    let access_error = std::io::Error::last_os_error();
-    if access_error.raw_os_error() != Some(libc::ENOENT) {
-        return Err(early(io_error(access_error)));
-    }
-    let flag = cancel.flag();
-    if flag.load(Ordering::Acquire) {
-        return Err(early(fail("CANCELLED", "cancelled before staging")));
-    }
-    let mut stage = Stage::create(parent, parent_path).map_err(early)?;
-    cleanup.staging = Some(stage.path());
-    let outcome = (|| {
-        cancel.entered(RunPhase::Write);
-        let mut total = 0;
-        let mut csv_locations = BTreeMap::new();
-        for (index, (table, rows)) in tables.iter().enumerate() {
-            let columns = schema_columns(schema, table)?;
-            let filename = format!("table-{index}.csv");
-            write_csv(
-                &mut stage, &filename, rows, &columns, &mut total, policy, flag,
-            )?;
-            csv_locations.insert(table.clone(), filename);
-        }
-        let companion = serde_json::json!({"tables":schema,"csv":{"encoding":"UTF-8","delimiter":",","quoting":"RFC4180","record_ending":"LF","header_rows":1,"null":"\\N","non_null_backslash_prefix":"double first backslash","files":csv_locations}});
-        write_json(
-            &mut stage,
-            SCHEMA_FILE,
-            &companion,
-            &mut total,
-            policy,
-            flag,
-        )?;
-        let mut complete = manifest
-            .as_object()
-            .cloned()
-            .ok_or_else(|| fail("INVALID_MANIFEST", "manifest must be an object"))?;
-        complete.insert("complete".into(), serde_json::Value::Bool(true));
-        write_json(
-            &mut stage,
-            MANIFEST_FILE,
-            &complete,
-            &mut total,
-            policy,
-            flag,
-        )?;
-        if flag.load(Ordering::Acquire) {
-            return Err(fail("CANCELLED", "cancelled before commit"));
-        }
-        let rc = unsafe {
-            libc::renameat2(
-                stage.parent.as_raw_fd(),
-                stage.name.as_ptr(),
-                stage.parent.as_raw_fd(),
-                destination_name.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
-        };
-        if rc != 0 {
-            let error = std::io::Error::last_os_error();
-            let code = publication_code(error.raw_os_error());
-            return Err(fail(code, format!("no-replace rename: {error}")));
-        }
-        Ok(total)
-    })();
-    match outcome {
-        Ok(bytes) => {
-            stage.done = true;
-            cleanup.committed = true;
-            drop(stage);
-            // Committed: this hook cannot revoke the bundle, whatever it does.
-            cancel.entered(RunPhase::Committed);
-            Ok(Published { bytes, cleanup })
-        }
-        Err(mut error) => {
-            cleanup.leftovers = stage.cleanup();
-            if !cleanup.leftovers.is_empty() {
-                error.context = Some(format!(
-                    "cleanup left: {}",
-                    cleanup
-                        .leftovers
-                        .iter()
-                        .map(|l| format!("{} ({})", l.path.display(), l.error))
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                ));
+    let mut staged =
+        Staged::open(destination, policy, cancel).map_err(|error| DeliveryFailure {
+            error,
+            cleanup: DeliveryCleanup::default(),
+        })?;
+    let written = (|| -> Result<()> {
+        staged.start()?;
+        for (table, rows) in tables {
+            staged.begin(table, schema_columns(schema, table)?)?;
+            for row in rows {
+                staged.row(table, row)?;
             }
-            Err(DeliveryFailure { error, cleanup })
         }
+        Ok(())
+    })();
+    match written {
+        Ok(()) => staged.commit(schema, manifest),
+        Err(error) => Err(staged.fail(error)),
     }
 }
 

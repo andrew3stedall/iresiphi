@@ -155,22 +155,6 @@ impl<'a> RunControl<'a> {
                 .retain(|m| m != "engine_peak_reservation" && (m != "peak_rss" || !rss_measured));
         }
         if report.status != "failed" && report.status != "cancelled" {
-            let mut counter = Counter(0);
-            if serde_json::to_writer(
-                &mut counter,
-                &(
-                    &report.tables,
-                    &report.evidence,
-                    &report.candidate_evidence,
-                    &report.detail_evidence,
-                ),
-            )
-            .is_ok()
-                && (report.allocation_evidence.is_empty()
-                    || serde_json::to_writer(&mut counter, &report.allocation_evidence).is_ok())
-            {
-                manifest["retained_result_bytes"] = json!(counter.0);
-            }
             manifest["schema"] = serde_json::Value::Object(output_schema(recipe));
         }
     }
@@ -275,48 +259,43 @@ fn reconciliation(manifest: &serde_json::Value) -> crate::engine::Table {
     rows
 }
 
-/// Publish a successful run as one directory bundle; on failure the report keeps
-/// no results and records the delivery outcome and cleanup evidence.
+/// Record on a failed bundle run that nothing was published, and what cleanup did.
+pub(crate) fn undelivered(report: &mut RunReport, cleanup: crate::sink::DeliveryCleanup) {
+    report.manifest["complete"] = json!(false);
+    report.manifest["delivery"] = json!({"kind":"directory_bundle","encoding":"csv",
+        "schema":"schema.json","status":report.status,"committed":false});
+    report.manifest["cleanup"] = json!(cleanup);
+}
+
+/// Commit a successful run's staged bundle: the reconciliation table, the schema
+/// and the complete-marker manifest. On failure the report records the delivery
+/// outcome and cleanup evidence.
 pub(crate) fn deliver(
     report: &mut RunReport,
     recipe: &Recipe,
-    policy: &Policy,
+    bundled: crate::results::Bundled<'_>,
     destination: &std::path::Path,
     control: &RunControl<'_>,
 ) {
     let delivering = std::time::Instant::now();
+    let mut staged = bundled.staged;
     let mut schema = output_schema(recipe);
-    for (name, records) in [
-        ("_evidence", &report.evidence),
-        ("_candidate_evidence", &report.candidate_evidence),
-        ("_detail_evidence", &report.detail_evidence),
-        ("_allocation_evidence", &report.allocation_evidence),
-    ] {
+    for kind in crate::results::Record::ALL {
         // Allocation evidence exists only for recipes that allocate.
-        if name == "_allocation_evidence" && records.is_empty() {
-            continue;
+        if staged.has(kind.table()) {
+            schema.insert(kind.table().into(), crate::results::record_schema());
         }
-        let evidence_table = records
-            .iter()
-            .map(|record| {
-                BTreeMap::from([(
-                    "record_json".into(),
-                    Value::String {
-                        value: record.to_string(),
-                    },
-                )])
-            })
-            .collect();
-        report.tables.insert(name.into(), evidence_table);
-        schema.insert(
-            name.into(),
-            json!({"columns":[{"name":"record_json","type":{"kind":"string"}}]}),
-        );
     }
-    report
-        .tables
-        .insert("_reconciliation".into(), reconciliation(&report.manifest));
     schema.insert("_reconciliation".into(), reconciliation_schema());
+    let schema = serde_json::Value::Object(schema);
+    let reconciled = (|| -> Result<()> {
+        let table = "_reconciliation";
+        staged.begin(table, crate::sink::schema_columns(&schema, table)?)?;
+        for row in reconciliation(&report.manifest) {
+            staged.row(table, &row)?;
+        }
+        Ok(())
+    })();
     // A bundle cannot record its own size: bytes_written is added to the run
     // report only after commit, so it is neither present nor "unknown" inside.
     if let Some(manifest) = report.manifest.as_object_mut() {
@@ -327,14 +306,11 @@ pub(crate) fn deliver(
     }
     report.manifest["delivery"] = json!({"kind":"directory_bundle","encoding":"csv",
         "schema":"schema.json","status":"committed","committed":true});
-    match crate::sink::publish_bundle(
-        destination,
-        policy,
-        &report.tables,
-        &serde_json::Value::Object(schema),
-        &report.manifest,
-        control.cancel(),
-    ) {
+    let published = match reconciled {
+        Ok(()) => staged.commit(&schema, &report.manifest),
+        Err(error) => Err(staged.fail(error)),
+    };
+    match published {
         Ok(published) => {
             // Like bytes_written, publication time is known only after commit,
             // so it is a separate key of the run report, absent from the bundle.
@@ -348,21 +324,13 @@ pub(crate) fn deliver(
             }
         }
         Err(failure) => {
-            let status = if failure.error.code == "CANCELLED" {
+            report.status = if failure.error.code == "CANCELLED" {
                 "cancelled"
             } else {
                 "failed"
-            };
-            report.status = status.into();
-            report.tables.clear();
-            report.evidence.clear();
-            report.candidate_evidence.clear();
-            report.detail_evidence.clear();
-            report.allocation_evidence.clear();
-            report.manifest["complete"] = json!(false);
-            report.manifest["delivery"]["status"] = json!(status);
-            report.manifest["delivery"]["committed"] = json!(false);
-            report.manifest["cleanup"] = json!(failure.cleanup);
+            }
+            .into();
+            undelivered(report, failure.cleanup);
             report.diagnostics.insert(0, failure.error);
         }
     }
