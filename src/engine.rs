@@ -250,6 +250,58 @@ fn batch(
 }
 
 type Matches = BTreeMap<String, Vec<Vec<usize>>>;
+
+/// Sources read only as the anchor of line or grouped outputs
+/// (docs/spec/slice-7.md, phase 3). The executor holds their key records:
+/// identity, relationship keys and references, which is all that lookups,
+/// identity checks, transfers and detail parents read. Each output anchored at
+/// one reads its records again in batches. Every other source is held.
+fn streamed_anchors(recipe: &Recipe) -> std::collections::BTreeSet<String> {
+    recipe
+        .sources
+        .iter()
+        .map(|s| s.id.as_str())
+        .filter(|id| {
+            recipe.outputs.iter().any(|o| o.anchor == *id)
+                && recipe
+                    .outputs
+                    .iter()
+                    .filter(|o| o.anchor == *id)
+                    .all(|o| !o.detail && o.allocations.is_empty())
+                && !recipe.relationships.iter().any(|r| r.to == *id)
+                && !recipe.populations.iter().any(|p| {
+                    p.recipients == *id || p.period.from.as_ref().is_some_and(|f| f.source == *id)
+                })
+                && !recipe
+                    .outputs
+                    .iter()
+                    .flat_map(|o| &o.allocations)
+                    .any(|a| a.quantity.source == *id)
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Records an output line can read: held records, and the current batch of a
+/// streamed anchor, which stands in for that anchor's key records.
+#[derive(Clone, Copy)]
+struct View<'a> {
+    held: &'a BTreeMap<String, Vec<Row>>,
+    /// Streamed anchor, position of the batch's first record, its records.
+    batch: Option<(&'a str, usize, &'a [Row])>,
+}
+impl<'a> View<'a> {
+    fn held(held: &'a BTreeMap<String, Vec<Row>>) -> Self {
+        Self { held, batch: None }
+    }
+    fn row(&self, source: &str, index: usize) -> &'a Row {
+        let held = self.held;
+        match self.batch {
+            Some((anchor, first, rows)) if anchor == source => &rows[index - first],
+            _ => &held[source][index],
+        }
+    }
+}
 fn qualified(rel: &Relationship, left: &Row, right: &Row) -> Result<bool> {
     if let Some(v) = &rel.validity {
         let date = |r: &Row, k: &str| match r.fields.get(k) {
@@ -478,8 +530,15 @@ fn execute(
     check(cancel)?;
     cancel.entered(RunPhase::Parse);
     let phase = Instant::now();
-    let (mut sources, reads) =
-        crate::adapters::read_sources_observed(declared, bindings, policy, cancel)?;
+    // Anchors read only as anchors are streamed: `sources` holds their key
+    // records, and `streams` reads their records again for each output.
+    let (mut sources, reads, streams) = crate::adapters::read_for_run(
+        declared,
+        bindings,
+        policy,
+        cancel,
+        &streamed_anchors(declared),
+    )?;
     for read in reads.values() {
         for (phase, us) in [
             ("source_access", read.access_us),
@@ -973,12 +1032,13 @@ fn execute(
         let parents = output
             .detail
             .then(|| detail_parents(recipe, &sources, &matches, &output.anchor));
-        let anchor_rows = &sources[&output.anchor];
+        // A streamed anchor's key records stand one for one for its records.
+        let anchor_records = sources[&output.anchor].len();
         // Under a pushed eligibility the source holds more records than were scanned.
         let anchor_source_rows = progress
             .reads
             .get(&output.anchor)
-            .map_or(anchor_rows.len(), |read| read.rows);
+            .map_or(anchor_records, |read| read.rows);
         let grouped = !output.aggregates.is_empty();
         results.begin(&output.id)?;
         let mut members: Vec<Member> = vec![];
@@ -987,7 +1047,10 @@ fn execute(
         let evidence_before = results.count(Record::Primary);
         // Selected lines whose evidence the policy does not ask for.
         let mut unrecorded = 0usize;
-        let mut selected: Vec<usize> = vec![];
+        let mut selected = 0usize;
+        // Selected lines whose source location was already selected.
+        let mut repeated = 0usize;
+        let mut locations = std::collections::HashSet::new();
         // Allocation runs over every member before any row is selected, so the
         // output filter never changes a denominator.
         let mut allocations = vec![];
@@ -1022,7 +1085,14 @@ fn execute(
                     .map(|s| s.identity.clone())
             })
             .flatten();
-        for (row_index, row) in anchor_rows.iter().enumerate() {
+        // One anchor line. A streamed anchor's line reads its record from the
+        // current batch (docs/spec/slice-7.md, phase 3).
+        let mut line = |row_index: usize, batch: Option<(usize, &[Row])>| -> Result<()> {
+            let view = View {
+                held: &sources,
+                batch: batch.map(|(first, rows)| (output.anchor.as_str(), first, rows)),
+            };
+            let row = view.row(&output.anchor, row_index);
             check(cancel)?;
             let mut reasons: Vec<Outcome> = vec![];
             let resolve = |reasons: &mut Vec<Outcome>,
@@ -1032,7 +1102,7 @@ fn execute(
              -> Result<Value> {
                 resolve_path(
                     recipe,
-                    &sources,
+                    &view,
                     &matches,
                     &outcomes,
                     (&output.anchor, row_index),
@@ -1043,7 +1113,7 @@ fn execute(
             // Selection predicates read lookups but do not redefine the line's status.
             let select = |predicate: &Expr, values: &BTreeMap<String, Value>| -> Result<bool> {
                 let bound = bind_line(
-                    predicate, recipe, &sources, &matches, output, row_index, values,
+                    predicate, recipe, &view, &matches, output, row_index, values,
                 )?;
                 Ok(matches!(
                     crate::eval::eval(&bound, recipe, &mut |s: &str, f: &str, p: &[String]| {
@@ -1059,7 +1129,7 @@ fn execute(
                     })?,
                     Value::Boolean { value: true }
                 ) {
-                    continue;
+                    return Ok(());
                 }
             }
             eligible += 1;
@@ -1071,7 +1141,7 @@ fn execute(
                         &prepare(
                             &column.expr,
                             recipe,
-                            &sources,
+                            &view,
                             &matches,
                             &output.anchor,
                             row_index,
@@ -1102,7 +1172,7 @@ fn execute(
                 let bound = bind_line(
                     &aggregate.expr,
                     recipe,
-                    &sources,
+                    &view,
                     &matches,
                     output,
                     row_index,
@@ -1200,7 +1270,7 @@ fn execute(
             } else if let Some(predicate) = &output.filter {
                 // Final selection of lines.
                 if !select(predicate, &values)? {
-                    continue;
+                    return Ok(());
                 }
             }
             *statuses.entry(status).or_default() += 1;
@@ -1313,13 +1383,35 @@ fn execute(
             } else {
                 unrecorded += 1;
             }
-            selected.push(row_index);
+            selected += 1;
+            if !locations.insert(row.reference.location.clone()) {
+                repeated += 1;
+            }
             evidence_time += recording.elapsed();
+            Ok(())
+        };
+        if streams.contains(&output.anchor) {
+            streams.read(
+                &output.anchor,
+                policy.limits.batch_rows,
+                cancel,
+                &mut |first: usize, rows: &[Row]| -> Result<()> {
+                    for offset in 0..rows.len() {
+                        line(first + offset, Some((first, rows)))?;
+                    }
+                    Ok(())
+                },
+            )?;
+        } else {
+            for row_index in 0..anchor_records {
+                line(row_index, None)?;
+            }
         }
         check_population(
             output,
-            anchor_rows,
-            &selected,
+            anchor_records,
+            selected,
+            repeated,
             eligible,
             results.count(Record::Primary) - evidence_before + unrecorded,
             if grouped {
@@ -1328,7 +1420,7 @@ fn execute(
                 results.rows_in(&output.id)
             },
         )?;
-        asserted_lines += selected.len();
+        asserted_lines += selected;
 
         let tally = |s: &str| statuses.get(s).copied().unwrap_or(0);
         let count = if grouped {
@@ -1874,23 +1966,18 @@ fn finish_failed(
 /// a final filter keeps every eligible line.
 fn check_population(
     output: &Output,
-    anchor_rows: &[Row],
-    selected: &[usize],
+    anchor_records: usize,
+    selected: usize,
+    repeated: usize,
     eligible: usize,
     evidence_rows: usize,
     output_lines: usize,
 ) -> Result<()> {
-    let mut locations = std::collections::HashSet::with_capacity(selected.len());
-    let repeated = selected
-        .iter()
-        .filter(|&&i| !locations.insert(anchor_rows[i].reference.location.as_str()))
-        .count();
-    let kept_all =
-        output.filter.is_some() || !output.aggregates.is_empty() || selected.len() == eligible;
+    let kept_all = output.filter.is_some() || !output.aggregates.is_empty() || selected == eligible;
     if repeated == 0
-        && evidence_rows == selected.len()
-        && output_lines == selected.len()
-        && eligible <= anchor_rows.len()
+        && evidence_rows == selected
+        && output_lines == selected
+        && eligible <= anchor_records
         && kept_all
     {
         return Ok(());
@@ -1899,10 +1986,8 @@ fn check_population(
         "POPULATION_INVARIANT",
         "execution",
         format!(
-            "output {} broke its population: {} anchor records, {eligible} eligible, {} selected, {output_lines} output lines, {evidence_rows} evidence records, {repeated} repeated",
-            output.id,
-            anchor_rows.len(),
-            selected.len()
+            "output {} broke its population: {anchor_records} anchor records, {eligible} eligible, {selected} selected, {output_lines} output lines, {evidence_rows} evidence records, {repeated} repeated",
+            output.id
         ),
     )
     .with_subject(format!("output:{}", output.id))
@@ -2183,7 +2268,7 @@ fn check_context(
 fn bind_line(
     expr: &Expr,
     recipe: &Recipe,
-    sources: &BTreeMap<String, Vec<Row>>,
+    sources: &View<'_>,
     matches: &Matches,
     output: &Output,
     row_index: usize,
@@ -2317,7 +2402,7 @@ fn reduce(values: &[Value], function: &str) -> Result<Value> {
 fn prepare(
     expr: &Expr,
     recipe: &Recipe,
-    sources: &BTreeMap<String, Vec<Row>>,
+    sources: &View<'_>,
     matches: &Matches,
     anchor: &str,
     row_index: usize,
@@ -2327,7 +2412,7 @@ fn prepare(
     fn visit(
         value: &mut serde_json::Value,
         recipe: &Recipe,
-        sources: &BTreeMap<String, Vec<Row>>,
+        sources: &View<'_>,
         matches: &Matches,
         anchor: &str,
         row_index: usize,
@@ -2372,7 +2457,8 @@ fn prepare(
                         .is_some_and(|s| s.projection.fields.contains_key("currency"))
                 {
                     currencies.push(
-                        sources[anchor][row_index]
+                        sources
+                            .row(anchor, row_index)
                             .fields
                             .get("currency")
                             .cloned()
@@ -2380,7 +2466,7 @@ fn prepare(
                     );
                 }
                 for candidate in &matches[&relationship][row_index] {
-                    let row = &sources[&rel.to][*candidate];
+                    let row = sources.row(&rel.to, *candidate);
                     if let Some(p) = &filter {
                         let v = crate::eval::eval(p, recipe, &mut |source, f, path| {
                             if source != rel.to || !path.is_empty() {
@@ -2420,7 +2506,7 @@ fn prepare(
                     )
                     .with_subject(format!("relationship:{relationship}"))
                     .with_check("aggregate.currency")
-                    .with_affected(1, [&sources[anchor][row_index].reference]));
+                    .with_affected(1, [&sources.row(anchor, row_index).reference]));
                 }
                 // Declared-complete activity: a member with no records has
                 // observed nothing, so its sum is zero rather than unknown.
@@ -2749,7 +2835,7 @@ fn materialize_populations(
 /// to-one `path`. An unresolved lookup yields null and records its outcome.
 fn resolve_path(
     recipe: &Recipe,
-    sources: &BTreeMap<String, Vec<Row>>,
+    sources: &View<'_>,
     matches: &Matches,
     outcomes: &Outcomes,
     (anchor, row): (&str, usize),
@@ -2778,7 +2864,8 @@ fn resolve_path(
     if current != source {
         return Err(Error::new("INVALID_PATH", "execution", source.to_string()));
     }
-    Ok(sources[current][position]
+    Ok(sources
+        .row(current, position)
         .fields
         .get(field)
         .cloned()
@@ -2799,6 +2886,7 @@ fn allocation_members<'a>(
     cancel: &AtomicBool,
 ) -> Result<(Vec<crate::allocation::Member<'a>>, Vec<Vec<Outcome>>)> {
     let rows = &sources[&output.anchor];
+    let view = View::held(sources);
     let identity = recipe
         .sources
         .iter()
@@ -2820,7 +2908,7 @@ fn allocation_members<'a>(
             let prepared = prepare(
                 expr,
                 recipe,
-                sources,
+                &view,
                 matches,
                 &output.anchor,
                 index,
@@ -2829,7 +2917,7 @@ fn allocation_members<'a>(
             crate::eval::eval(&prepared, recipe, &mut |s: &str, f: &str, p: &[String]| {
                 resolve_path(
                     recipe,
-                    sources,
+                    &view,
                     matches,
                     outcomes,
                     (&output.anchor, index),

@@ -13,7 +13,6 @@ use rusqlite::{Connection, config::DbConfig, types::ValueRef};
 
 /// What one scan of a SQLite table produced.
 pub(super) struct Scan {
-    pub rows: Vec<Row>,
     /// Records in the table, whether or not they were scanned.
     pub total_rows: usize,
     /// Placement record for the manifest, when a predicate was planned for this source.
@@ -423,6 +422,7 @@ pub(super) fn read(
     cancel: &AtomicBool,
     pushed: Option<&Pushed>,
     group_fallback: Option<&Fallback>,
+    rows: &mut dyn RowSink,
 ) -> Result<Scan> {
     let _cancellation = QueryCancellation::install(conn, cancel);
     let table = table(&conn, source, binding)?;
@@ -486,7 +486,6 @@ pub(super) fn read(
         .query(rusqlite::params_from_iter(parameters))
         .map_err(sql_error)?;
     let names = crate::adapters::projected_names(source);
-    let mut rows = RowCollector::new(policy);
     let mut failures = ValueFailures::default();
     while let Some(record) = records.next().map_err(sql_error)? {
         check_cancel(cancel)?;
@@ -534,7 +533,6 @@ pub(super) fn read(
         }),
     });
     Ok(Scan {
-        rows: rows.rows,
         total_rows: usize::try_from(total_rows).unwrap_or(usize::MAX),
         placement,
     })
