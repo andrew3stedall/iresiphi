@@ -2,6 +2,7 @@ use crate::{
     admission::{PARTITIONS, RunControl, WORKER_THREAD, busy, engine_batch_rows, run_id},
     cancel::{Cancellation, RunPhase},
     model::*,
+    results::{Record, Results, Retained, Rows},
 };
 use datafusion::{
     arrow::{
@@ -75,7 +76,16 @@ impl ExecutionContext {
             return busy(policy);
         };
         let control = RunControl::new(&cancel, policy);
-        let mut report = self.run_admitted(recipe, bindings, policy, &control);
+        let mut retained = Retained::default();
+        let mut report = self.run_admitted(recipe, bindings, policy, &control, &mut retained);
+        if report.status != "failed" && report.status != "cancelled" {
+            let [evidence, candidates, details, allocations] = retained.records;
+            report.tables = retained.tables;
+            report.evidence = evidence;
+            report.candidate_evidence = candidates;
+            report.detail_evidence = details;
+            report.allocation_evidence = allocations;
+        }
         control.record(&mut report, recipe, policy);
         report
     }
@@ -93,6 +103,7 @@ impl ExecutionContext {
         bindings: &Bindings,
         policy: &Policy,
         cancel: &RunControl<'_>,
+        rows: &mut dyn Rows,
     ) -> RunReport {
         let id = run_id();
         let started = Instant::now();
@@ -118,7 +129,15 @@ impl ExecutionContext {
             "version, references, types, named paths, grain and capabilities",
         );
         let expanded = crate::validation::expand(recipe);
-        match execute(recipe, &expanded, bindings, policy, cancel, &mut progress) {
+        match execute(
+            recipe,
+            &expanded,
+            bindings,
+            policy,
+            cancel,
+            &mut progress,
+            rows,
+        ) {
             Ok(run) => {
                 let manifest = success_manifest(&id, recipe, policy, &progress, &run, started);
                 RunReport {
@@ -129,11 +148,11 @@ impl ExecutionContext {
                         "succeeded"
                     }
                     .into(),
-                    tables: run.tables,
-                    evidence: run.evidence,
-                    candidate_evidence: run.candidate_evidence,
-                    detail_evidence: run.detail_evidence,
-                    allocation_evidence: run.allocation_evidence,
+                    tables: BTreeMap::new(),
+                    evidence: vec![],
+                    candidate_evidence: vec![],
+                    detail_evidence: vec![],
+                    allocation_evidence: vec![],
                     diagnostics: finalize(run.diagnostics, recipe),
                     manifest,
                 }
@@ -345,11 +364,10 @@ impl Outcome {
 type Outcomes = BTreeMap<String, Vec<Outcome>>;
 
 struct Execution {
-    tables: BTreeMap<String, Table>,
-    evidence: Vec<serde_json::Value>,
-    candidate_evidence: Vec<serde_json::Value>,
-    detail_evidence: Vec<serde_json::Value>,
-    allocation_evidence: Vec<serde_json::Value>,
+    /// Records per evidence table, in [`Record`] order.
+    records: [usize; 4],
+    /// Exact serialized size of the result and evidence tables.
+    result_bytes: usize,
     /// Per population output: members, periods, activity coverage and the
     /// empty-member rule.
     populations: BTreeMap<String, serde_json::Value>,
@@ -362,7 +380,7 @@ struct Execution {
     unresolved: usize,
 }
 
-fn evidence_budget(message: impl Into<String>) -> Error {
+pub(crate) fn evidence_budget(message: impl Into<String>) -> Error {
     Error::new("RESOURCE_LIMIT", "evidence", message)
         .with_check("budget.evidence")
         .with_remediation(
@@ -455,6 +473,7 @@ fn execute(
     policy: &Policy,
     cancel: &RunControl<'_>,
     progress: &mut Progress,
+    rows: &mut dyn Rows,
 ) -> Result<Execution> {
     check(cancel)?;
     cancel.entered(RunPhase::Parse);
@@ -935,15 +954,14 @@ fn execute(
         .timings
         .insert("lookups", phase.elapsed().as_millis());
     let phase = Instant::now();
-    let mut tables = BTreeMap::new();
-    let mut evidence = vec![];
-    let mut candidate_evidence = vec![];
-    let mut detail_evidence = vec![];
+    // Rows and evidence go to their destination as they are produced; only
+    // counts, sizes and totals stay here.
+    let mut results = Results::new(rows, policy);
+    results.start()?;
+    let mut totals = ReviewTotals::new(recipe);
     let mut counts = serde_json::Map::new();
-    let mut allocation_evidence = vec![];
     let mut allocation_summaries: BTreeMap<String, serde_json::Value> = BTreeMap::new();
     let mut population_reports: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-    let mut populations: Vec<(&Output, Vec<(String, bool)>)> = vec![];
     // Distinct anchor lines of primary outputs, resolved only if resolved in every
     // output that selects them; a line read by several outputs is counted once.
     let mut lines: BTreeMap<(&str, usize), bool> = BTreeMap::new();
@@ -962,12 +980,11 @@ fn execute(
             .get(&output.anchor)
             .map_or(anchor_rows.len(), |read| read.rows);
         let grouped = !output.aggregates.is_empty();
-        let mut table = vec![];
-        let mut population = vec![];
+        results.begin(&output.id)?;
         let mut members: Vec<Member> = vec![];
         let mut eligible = 0usize;
         let mut statuses: BTreeMap<&'static str, usize> = BTreeMap::new();
-        let evidence_before = evidence.len();
+        let evidence_before = results.count(Record::Primary);
         // Selected lines whose evidence the policy does not ask for.
         let mut unrecorded = 0usize;
         let mut selected: Vec<usize> = vec![];
@@ -987,7 +1004,9 @@ fn execute(
                 cancel,
             )?;
             diagnostics.append(&mut outcome.warnings);
-            allocation_evidence.extend(outcome.partitions.iter().cloned());
+            for partition in std::mem::take(&mut outcome.partitions) {
+                results.record(Record::Allocation, partition)?;
+            }
             allocation_summaries
                 .entry(output.id.clone())
                 .or_insert_with(|| serde_json::json!({}))[a.name.as_str()] =
@@ -1200,7 +1219,6 @@ fn execute(
                 Some(Value::String { value }) => value.clone(),
                 _ => "undeclared".into(),
             };
-            population.push((currency, status == "matched"));
             let recording = Instant::now();
             // Resolved lines are counted, not recorded, unless the policy asks
             // for full evidence (docs/spec/slice-6.md).
@@ -1222,9 +1240,9 @@ fn execute(
                 for &candidate in found {
                     let target = &sources[&rel.to][candidate];
                     if to_one {
-                        candidate_evidence.push(serde_json::json!({"output":output.id,"relationship":rel.id,"anchor":row.reference,"status":outcome.status,"candidate_count":found.len(),"selected":outcome.status == "matched","candidate":target.reference,"original":target.raw}));
+                        results.record(Record::Candidate, serde_json::json!({"output":output.id,"relationship":rel.id,"anchor":row.reference,"status":outcome.status,"candidate_count":found.len(),"selected":outcome.status == "matched","candidate":target.reference,"original":target.raw}))?;
                     } else {
-                        detail_evidence.push(serde_json::json!({"output":output.id,"relationship":rel.id,"parent":row.reference,"detail":target.reference,"original":target.raw}));
+                        results.record(Record::Detail, serde_json::json!({"output":output.id,"relationship":rel.id,"parent":row.reference,"detail":target.reference,"original":target.raw}))?;
                     }
                 }
                 let selected = (to_one && outcome.status == "matched")
@@ -1285,10 +1303,13 @@ fn execute(
                     reference: row.reference.clone(),
                 });
             } else {
-                table.push(values);
+                if !output.detail {
+                    totals.add(&output.id, &values, &currency, status == "matched")?;
+                }
+                results.row(&output.id, values)?;
             }
             if record_line {
-                evidence.push(record);
+                results.record(Record::Primary, record)?;
             } else {
                 unrecorded += 1;
             }
@@ -1300,26 +1321,33 @@ fn execute(
             anchor_rows,
             &selected,
             eligible,
-            evidence.len() - evidence_before + unrecorded,
-            if grouped { members.len() } else { table.len() },
+            results.count(Record::Primary) - evidence_before + unrecorded,
+            if grouped {
+                members.len()
+            } else {
+                results.rows_in(&output.id)
+            },
         )?;
         asserted_lines += selected.len();
 
         let tally = |s: &str| statuses.get(s).copied().unwrap_or(0);
         let count = if grouped {
             let grouping = group(recipe, output, &members, policy)?;
-            table = grouping.rows;
+            let output_rows = grouping.rows.len();
+            for row in grouping.rows {
+                results.row(&output.id, row)?;
+            }
             serde_json::json!({
                 "source_rows": anchor_source_rows,
                 "eligible_rows": eligible,
-                "output_rows": table.len(),
+                "output_rows": output_rows,
                 "group_rows": grouping.groups,
                 "resolved_rows": tally("matched"),
                 "unresolved_rows": members.len() - tally("matched"),
                 "aggregate_null_inputs": grouping.null_inputs,
             })
         } else {
-            let output_rows = table.len();
+            let output_rows = results.rows_in(&output.id);
             let mut count = serde_json::json!({"source_rows":anchor_source_rows,"eligible_rows":eligible,"output_rows":output_rows});
             if output.detail {
                 count["parented_rows"] = tally("matched").into();
@@ -1328,7 +1356,6 @@ fn execute(
             } else {
                 count["resolved_rows"] = tally("matched").into();
                 count["unresolved_rows"] = (output_rows - tally("matched")).into();
-                populations.push((output, population));
             }
             count
         };
@@ -1338,7 +1365,6 @@ fn execute(
             report["activity"] = population_activity(recipe, output, &sources, &matches);
             population_reports.insert(output.id.clone(), report);
         }
-        tables.insert(output.id.clone(), table);
     }
     progress.pass(
         "output.population",
@@ -1351,40 +1377,15 @@ fn execute(
     let resolved = lines.values().filter(|r| **r).count();
     let unresolved = lines.len() - resolved;
     if !allocation_summaries.is_empty() {
-        let partitions: usize = allocation_evidence.len();
+        let partitions = results.count(Record::Allocation);
         progress.pass(
             "allocation.conservation",
             format!("full: {partitions} allocation partitions; assigned sum plus residual equals the source quantity exactly in each"),
         );
     }
-    let totals = review_totals(recipe, &tables, &populations, &allocation_summaries)?;
+    let totals = totals.finish(recipe, &allocation_summaries)?;
     let budgeting = Instant::now();
-    let evidence_rows = candidate_evidence.len() + detail_evidence.len();
-    if evidence_rows > policy.limits.candidate_pairs {
-        return Err(evidence_budget(format!(
-            "{evidence_rows} candidate and detail evidence records exceed limits.candidate_pairs ({})",
-            policy.limits.candidate_pairs
-        )));
-    }
-    let mut bytes = crate::admission::serialized_size(&(
-        &tables,
-        &evidence,
-        &candidate_evidence,
-        &detail_evidence,
-    ))
-    .map_err(engine_error)?;
-    // Allocation evidence counts only when present, so other runs keep their exact size.
-    if !allocation_evidence.is_empty() {
-        bytes += crate::admission::serialized_size(&allocation_evidence).map_err(engine_error)?;
-    }
-    if bytes > policy.limits.output_bytes || bytes > policy.limits.retained_bytes {
-        // The memory result is retained only if it fits; this is a delivery budget.
-        let mut error = evidence_budget(format!(
-            "result and evidence tables ({bytes} bytes) exceed the output/retained byte budget"
-        ));
-        error.phase = "delivery".into();
-        return Err(error);
-    }
+    let result_bytes = results.finish()?;
     evidence_time += budgeting.elapsed();
     let evidence_us = u64::try_from(evidence_time.as_micros()).unwrap_or(u64::MAX);
     *progress.phases.entry("evidence").or_default() += evidence_us;
@@ -1399,23 +1400,20 @@ fn execute(
             } else {
                 format!(
                     "problems only: {} of {asserted_lines} selected lines did not resolve and are recorded; resolved lines are counted, not recorded (policy evidence: problems)",
-                    evidence.len()
+                    results.count(Record::Primary)
                 )
             },
-            evidence.len(),
-            candidate_evidence.len(),
-            detail_evidence.len()
+            results.count(Record::Primary),
+            results.count(Record::Candidate),
+            results.count(Record::Detail)
         ),
     );
     progress
         .timings
         .insert("outputs", phase.elapsed().as_millis());
     Ok(Execution {
-        tables,
-        evidence,
-        candidate_evidence,
-        detail_evidence,
-        allocation_evidence,
+        records: Record::ALL.map(|kind| results.count(kind)),
+        result_bytes,
         populations: population_reports,
         allocations: allocation_summaries,
         diagnostics,
@@ -1501,139 +1499,192 @@ fn currency_json(
         serde_json::json!({"rows":{"population":totals.rows[0],"resolved":totals.rows[1],"unresolved":totals.rows[2]},"columns":columns}),
     )
 }
+/// Totals of one line-grain primary output.
+struct OutputTotals {
+    /// A population output: totals only additive member-grain columns.
+    members: bool,
+    kinds: BTreeMap<String, Numeric>,
+    excluded: serde_json::Map<String, serde_json::Value>,
+    per_currency: BTreeMap<String, CurrencyTotals>,
+}
+
 /// Full-population, comparable (resolved) and unresolved totals of every numeric
-/// column, by currency, per output and combined across the primary outputs.
-fn review_totals(
-    recipe: &Recipe,
-    tables: &BTreeMap<String, Table>,
-    populations: &[(&Output, Vec<(String, bool)>)],
-    allocations: &BTreeMap<String, serde_json::Value>,
-) -> Result<serde_json::Value> {
-    let mut by_output = serde_json::Map::new();
-    let mut combined: BTreeMap<String, CurrencyTotals> = BTreeMap::new();
-    let mut combined_kinds: BTreeMap<String, Option<Numeric>> = BTreeMap::new();
-    for (output, population) in populations {
-        // Population outputs total only what is additive at member grain: owned
-        // measures and allocated columns. Broadcast context is excluded, and
-        // population outputs stay out of the combined review totals.
-        let members = crate::validation::population_output(recipe, output);
-        let mut excluded = serde_json::Map::new();
-        let mut kinds = BTreeMap::new();
-        for column in &output.columns {
-            let kind = match crate::validation::expression_type(&column.expr, recipe) {
-                Ok(Some(Type::Int64)) => Numeric::Int,
-                Ok(Some(Type::Decimal { scale, .. })) => Numeric::Decimal(scale),
-                _ => continue,
-            };
-            if members {
-                if crate::validation::additive(recipe, output, column) {
-                    kinds.insert(column.name.clone(), kind);
-                } else {
-                    let broadcast =
-                        matches!(&column.expr, Expr::Field { path, .. } if !path.is_empty());
-                    excluded.insert(
-                        column.name.clone(),
-                        serde_json::json!({
-                            "transition": if broadcast { "broadcast" } else { "not_owned" },
-                            "reason": "context repeated on each member; summing it would count one coarse value once per member",
-                        }),
-                    );
-                }
-                continue;
-            }
-            kinds.insert(column.name.clone(), kind);
-            let entry = combined_kinds
-                .entry(column.name.clone())
-                .or_insert(Some(kind));
-            if *entry != Some(kind) {
-                *entry = None;
-            }
-        }
-        if members {
-            for a in &output.allocations {
-                kinds.insert(a.name.clone(), Numeric::Decimal(a.scale));
-            }
-        }
-        let mut per_currency: BTreeMap<String, CurrencyTotals> = BTreeMap::new();
-        for (row, (currency, matched)) in tables[&output.id].iter().zip(population) {
-            let mut targets = vec![per_currency.entry(currency.clone()).or_default()];
-            if !members {
-                targets.push(combined.entry(currency.clone()).or_default());
-            }
-            for totals in targets {
-                totals.rows[0] += 1;
-                totals.rows[if *matched { 1 } else { 2 }] += 1;
-                for name in kinds.keys() {
-                    let value = match &row[name] {
-                        Value::Null => None,
-                        Value::Int64 { value } => {
-                            Some(value.parse::<i128>().map_err(engine_error)?)
-                        }
-                        Value::Decimal {
-                            value,
-                            precision,
-                            scale,
-                        } => Some(
-                            crate::scalar::Decimal::parse(value, *precision, *scale)
-                                .map_err(engine_error)?
-                                .coefficient,
-                        ),
-                        _ => return Err(engine_error("numeric column holds a non-numeric value")),
-                    };
-                    let column = totals.columns.entry(name.clone()).or_default();
-                    add(&mut column.population, value)?;
-                    add(
-                        if *matched {
-                            &mut column.comparable
-                        } else {
-                            &mut column.unresolved
-                        },
-                        value,
-                    )?;
-                }
-            }
-        }
-        let mut currencies = serde_json::Map::new();
-        for (currency, totals) in &per_currency {
-            let mut json = currency_json(totals, &kinds)?;
-            if members {
-                json["excluded"] = excluded.clone().into();
-                for a in &output.allocations {
-                    let summary = &allocations[&output.id][a.name.as_str()];
-                    // A quantity that carries a currency is totalled per currency.
-                    let figures = if crate::validation::currency_amount(
-                        recipe,
-                        &a.quantity.source,
-                        &a.quantity.field,
-                    ) {
-                        &summary["by_currency"][currency.as_str()]
+/// column, by currency, per output and combined across the primary outputs. Rows
+/// are added as they are produced, so no output table is needed to total it.
+struct ReviewTotals {
+    outputs: BTreeMap<String, OutputTotals>,
+    combined: BTreeMap<String, CurrencyTotals>,
+    combined_kinds: BTreeMap<String, Option<Numeric>>,
+}
+impl ReviewTotals {
+    /// Every line-grain output that is not a detail output is totalled.
+    fn new(recipe: &Recipe) -> Self {
+        let mut outputs = BTreeMap::new();
+        let mut combined_kinds: BTreeMap<String, Option<Numeric>> = BTreeMap::new();
+        for output in recipe
+            .outputs
+            .iter()
+            .filter(|o| o.aggregates.is_empty() && !o.detail)
+        {
+            // Population outputs total only what is additive at member grain: owned
+            // measures and allocated columns. Broadcast context is excluded, and
+            // population outputs stay out of the combined review totals.
+            let members = crate::validation::population_output(recipe, output);
+            let mut excluded = serde_json::Map::new();
+            let mut kinds = BTreeMap::new();
+            for column in &output.columns {
+                let kind = match crate::validation::expression_type(&column.expr, recipe) {
+                    Ok(Some(Type::Int64)) => Numeric::Int,
+                    Ok(Some(Type::Decimal { scale, .. })) => Numeric::Decimal(scale),
+                    _ => continue,
+                };
+                if members {
+                    if crate::validation::additive(recipe, output, column) {
+                        kinds.insert(column.name.clone(), kind);
                     } else {
-                        summary
-                    };
-                    json["columns"][a.name.as_str()]["allocation"] = serde_json::json!({
-                        "source": summary["quantity"],
-                        "source_total": figures["source_total"],
-                        "assigned_total": figures["assigned_total"],
-                        "residual_total": figures["residual_total"],
-                        "conserved": figures["conserved"],
-                        "scope": "every partition of the quantity source, including members the output filter removed",
-                    });
+                        let broadcast =
+                            matches!(&column.expr, Expr::Field { path, .. } if !path.is_empty());
+                        excluded.insert(
+                            column.name.clone(),
+                            serde_json::json!({
+                                "transition": if broadcast { "broadcast" } else { "not_owned" },
+                                "reason": "context repeated on each member; summing it would count one coarse value once per member",
+                            }),
+                        );
+                    }
+                    continue;
+                }
+                kinds.insert(column.name.clone(), kind);
+                let entry = combined_kinds
+                    .entry(column.name.clone())
+                    .or_insert(Some(kind));
+                if *entry != Some(kind) {
+                    *entry = None;
                 }
             }
-            currencies.insert(currency.clone(), json);
+            if members {
+                for a in &output.allocations {
+                    kinds.insert(a.name.clone(), Numeric::Decimal(a.scale));
+                }
+            }
+            outputs.insert(
+                output.id.clone(),
+                OutputTotals {
+                    members,
+                    kinds,
+                    excluded,
+                    per_currency: BTreeMap::new(),
+                },
+            );
         }
-        by_output.insert(output.id.clone(), currencies.into());
+        Self {
+            outputs,
+            combined: BTreeMap::new(),
+            combined_kinds,
+        }
     }
-    let kinds: BTreeMap<String, Numeric> = combined_kinds
-        .into_iter()
-        .filter_map(|(name, kind)| kind.map(|k| (name, k)))
-        .collect();
-    let mut all = serde_json::Map::new();
-    for (currency, mut totals) in combined {
-        totals.columns.retain(|name, _| kinds.contains_key(name));
-        all.insert(currency, currency_json(&totals, &kinds)?);
+    /// Add one output row in `currency`; `matched` rows are comparable.
+    fn add(
+        &mut self,
+        output: &str,
+        row: &BTreeMap<String, Value>,
+        currency: &str,
+        matched: bool,
+    ) -> Result<()> {
+        let Some(totals) = self.outputs.get_mut(output) else {
+            return Ok(());
+        };
+        let mut targets = vec![totals.per_currency.entry(currency.to_owned()).or_default()];
+        if !totals.members {
+            targets.push(self.combined.entry(currency.to_owned()).or_default());
+        }
+        for target in targets {
+            target.rows[0] += 1;
+            target.rows[if matched { 1 } else { 2 }] += 1;
+            for name in totals.kinds.keys() {
+                let value = match &row[name] {
+                    Value::Null => None,
+                    Value::Int64 { value } => Some(value.parse::<i128>().map_err(engine_error)?),
+                    Value::Decimal {
+                        value,
+                        precision,
+                        scale,
+                    } => Some(
+                        crate::scalar::Decimal::parse(value, *precision, *scale)
+                            .map_err(engine_error)?
+                            .coefficient,
+                    ),
+                    _ => return Err(engine_error("numeric column holds a non-numeric value")),
+                };
+                let column = target.columns.entry(name.clone()).or_default();
+                add(&mut column.population, value)?;
+                add(
+                    if matched {
+                        &mut column.comparable
+                    } else {
+                        &mut column.unresolved
+                    },
+                    value,
+                )?;
+            }
+        }
+        Ok(())
     }
-    Ok(serde_json::json!({"by_output":by_output,"combined":all}))
+    fn finish(
+        self,
+        recipe: &Recipe,
+        allocations: &BTreeMap<String, serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        let mut by_output = serde_json::Map::new();
+        for (id, totals) in &self.outputs {
+            let output = recipe
+                .outputs
+                .iter()
+                .find(|o| &o.id == id)
+                .expect("totalled output is declared");
+            let mut currencies = serde_json::Map::new();
+            for (currency, per_currency) in &totals.per_currency {
+                let mut json = currency_json(per_currency, &totals.kinds)?;
+                if totals.members {
+                    json["excluded"] = totals.excluded.clone().into();
+                    for a in &output.allocations {
+                        let summary = &allocations[&output.id][a.name.as_str()];
+                        // A quantity that carries a currency is totalled per currency.
+                        let figures = if crate::validation::currency_amount(
+                            recipe,
+                            &a.quantity.source,
+                            &a.quantity.field,
+                        ) {
+                            &summary["by_currency"][currency.as_str()]
+                        } else {
+                            summary
+                        };
+                        json["columns"][a.name.as_str()]["allocation"] = serde_json::json!({
+                            "source": summary["quantity"],
+                            "source_total": figures["source_total"],
+                            "assigned_total": figures["assigned_total"],
+                            "residual_total": figures["residual_total"],
+                            "conserved": figures["conserved"],
+                            "scope": "every partition of the quantity source, including members the output filter removed",
+                        });
+                    }
+                }
+                currencies.insert(currency.clone(), json);
+            }
+            by_output.insert(id.clone(), currencies.into());
+        }
+        let kinds: BTreeMap<String, Numeric> = self
+            .combined_kinds
+            .into_iter()
+            .filter_map(|(name, kind)| kind.map(|k| (name, k)))
+            .collect();
+        let mut all = serde_json::Map::new();
+        for (currency, mut totals) in self.combined {
+            totals.columns.retain(|name, _| kinds.contains_key(name));
+            all.insert(currency, currency_json(&totals, &kinds)?);
+        }
+        Ok(serde_json::json!({"by_output":by_output,"combined":all}))
+    }
 }
 
 /// Outputs that read a source: anchored at it or reaching it through relationships.
@@ -1764,15 +1815,16 @@ fn success_manifest(
         "output_schema": crate::validation::output_schema(recipe),
         "evidence": {
             "level": policy.evidence,
-            "primary_rows": run.evidence.len(),
-            "candidate_rows": run.candidate_evidence.len(),
-            "detail_rows": run.detail_evidence.len(),
+            "primary_rows": run.records[0],
+            "candidate_rows": run.records[1],
+            "detail_rows": run.records[2],
             "complete": true,
             "bounds": {"candidate_pairs": policy.limits.candidate_pairs, "output_bytes": policy.limits.output_bytes},
         },
         "checks": {"static": "passed", "data": "passed"},
         "check_results": progress.results(None),
         "complete": true,
+        "retained_result_bytes": run.result_bytes,
     });
     if let (Some(target), serde_json::Value::Object(fields)) = (manifest.as_object_mut(), fields) {
         target.extend(fields);
@@ -1783,7 +1835,7 @@ fn success_manifest(
     }
     if !run.allocations.is_empty() {
         manifest["allocations"] = serde_json::json!(run.allocations);
-        manifest["evidence"]["allocation_rows"] = run.allocation_evidence.len().into();
+        manifest["evidence"]["allocation_rows"] = run.records[3].into();
     }
     manifest
 }
@@ -1930,8 +1982,10 @@ fn orphan_details(
 }
 impl ExecutionContext {
     /// Run `recipe` and deliver one local directory bundle at a NEW `destination`.
-    /// The context stays busy until delivery finishes; after the atomic commit the
-    /// run cannot be cancelled.
+    /// The destination is approved before any source is read, and rows are written
+    /// to run-owned staging as they are produced, so the report keeps no tables or
+    /// evidence. The context stays busy until delivery finishes; after the atomic
+    /// commit the run cannot be cancelled.
     pub fn run_bundle<C: Cancellation + ?Sized>(
         &self,
         recipe: &Recipe,
@@ -1944,12 +1998,41 @@ impl ExecutionContext {
             return busy(policy);
         };
         let control = RunControl::new(&cancel, policy);
-        let mut report = self.run_admitted(recipe, bindings, policy, &control);
+        let staged = match crate::sink::Staged::open(destination, policy, control.cancel()) {
+            Ok(staged) => staged,
+            Err(error) => {
+                let mut report = finish_failed(
+                    run_id(),
+                    error,
+                    Instant::now(),
+                    recipe,
+                    policy,
+                    &Progress::default(),
+                );
+                control.record(&mut report, recipe, policy);
+                crate::admission::undelivered(&mut report, Default::default());
+                return report;
+            }
+        };
+        let schema = serde_json::Value::Object(crate::admission::output_schema(recipe));
+        let mut bundled = crate::results::Bundled::new(staged, schema);
+        let mut report = self.run_admitted(recipe, bindings, policy, &control, &mut bundled);
         control.record(&mut report, recipe, policy);
         if report.status == "failed" || report.status == "cancelled" {
+            // Rows already staged are removed; the cleanup is evidence only if
+            // staging was created.
+            if bundled.staged.started() {
+                let cleanup = bundled.staged.abort();
+                if !cleanup.leftovers.is_empty() {
+                    if let Some(error) = report.diagnostics.first_mut() {
+                        error.context = Some(crate::sink::leftover_context(&cleanup));
+                    }
+                }
+                crate::admission::undelivered(&mut report, cleanup);
+            }
             return report;
         }
-        crate::admission::deliver(&mut report, recipe, policy, destination, &control);
+        crate::admission::deliver(&mut report, recipe, bundled, destination, &control);
         report
     }
 }

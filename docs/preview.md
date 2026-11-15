@@ -107,7 +107,7 @@ The policy sets allowed read and output roots and these limits. The values below
 | `lookup_rows` | 100,000 | Rows of each other source |
 | `candidate_pairs` | 1,000,000 | Qualified lookup candidates, and candidate plus detail evidence records |
 | `output_bytes` | 256 MiB | Serialized results and evidence, and bundle bytes |
-| `retained_bytes` | 256 MiB | Retained source materialization and memory results |
+| `retained_bytes` | 256 MiB | Retained source materialization and memory results (a bundle run retains no results) |
 | `batch_rows` | 8,192 | Rows per batch |
 | `batch_bytes` | 16 MiB | Decoded bytes per batch; one larger record is rejected |
 | `transfer_keys` | 10,000 | Key values one transfer may send to a lookup target (see [key transfer](sqlite.md#key-transfer-to-a-lookup-target)); never more than 32,766 |
@@ -156,7 +156,7 @@ Bundle CSV tables use UTF-8, commas, RFC 4180 quoting, LF line endings and one h
 
 Every non-null value whose text starts with a backslash gets one more backslash before CSV quoting. To read a field back: exact `\N` is null; otherwise remove one backslash only from a doubled-backslash prefix, then parse the text by the column type in `schema.json`. `schema.json` documents this rule. Spreadsheet programs and generic CSV readers do not apply it, so open bundle tables with `iresiphi::sink::read_bundle` (Rust) or `iresiphi.read_bundle` (Python), or apply the rule yourself.
 
-A bundle holds one CSV file per output, three evidence tables (`_evidence`, `_candidate_evidence`, `_detail_evidence`, each one JSON record per row), `_allocation_evidence` when the recipe allocates, and `_reconciliation`, a table of full-population, comparable and unresolved totals per output, currency and numeric column. `schema.json` gives each table's typed columns, and `manifest.json` carries the complete run record.
+A bundle run writes its tables while it runs: each output and evidence row goes to the staging directory as it is produced, and the run report carries no tables or evidence; read the bundle for results. The destination is checked before any source is read. A bundle holds one CSV file per output, three evidence tables (`_evidence`, `_candidate_evidence`, `_detail_evidence`, each one JSON record per row), `_allocation_evidence` when the recipe allocates, and `_reconciliation`, a table of full-population, comparable and unresolved totals per output, currency and numeric column. `schema.json` gives each table's typed columns, and `manifest.json` carries the complete run record.
 
 ### Evidence level
 

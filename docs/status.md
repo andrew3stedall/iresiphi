@@ -120,8 +120,17 @@ also stores each source's field names once instead of in every record, shares
 source identity strings across records, streams lookup candidates out of the join
 engine, and counts byte budgets without building serialized copies. Results and
 serialized bytes are unchanged. Before phase 1 the 100,000-line workload held
-1.11 GB right after reading its 350,004 records. Streamed delivery, streamed
-anchors and spilled lookup targets are the later phases.
+1.11 GB right after reading its 350,004 records; on hosted x86 its process peak
+fell from 1.41 GB to 0.84 GB at `b1774bc` (see the
+[verified run](measurements/ci-x86.md#slice-7-phase-1-verified-on-both-architectures)).
+
+Phase 2 streams delivery. A bundle run approves its destination before reading
+any source, writes each output and evidence row to staging as it is produced,
+and accumulates counts, totals and the result size as rows pass. Its report
+carries no tables or evidence; the bundle does. Because it keeps no results,
+`limits.retained_bytes` no longer bounds a bundle run's results, while
+`limits.output_bytes` still does. Memory runs are unchanged. Streamed anchors
+and spilled lookup targets are the later phases.
 
 ## Remaining scope
 

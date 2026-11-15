@@ -14,11 +14,11 @@ A run read every record of every source into memory before doing anything else. 
 
 Each phase ships on its own, keeps every result, diagnostic, evidence record and serialized byte count identical, and is measured on the 100,000-line workload.
 
-1. **Deferred pipeline and compact records** (this change).
+1. **Deferred pipeline and compact records** (done).
    - `Pipeline` in Rust, `iresiphi.plan(recipe, bindings, policy)` in Python and `plan(...)` in Node own copies of their declarations. Building and explaining one opens no source. `collect()` runs and keeps the results in memory; `run(destination)` runs and delivers a bundle. Each call reads the sources as they are then.
    - Records of one source share one sorted list of field names, so a record holds only its values. Source name, binding and fingerprint are shared by every record of a read. Records serialize exactly as before.
    - Lookup candidates stream out of the join engine one batch at a time instead of being collected first. Byte budgets count serialized bytes without building a serialized copy.
-2. **Streamed delivery.** A bundle run writes output rows and evidence to its staging directory as it produces them, instead of holding the tables until the end. Totals and counts accumulate as rows pass. `collect()` still keeps results, because that is what it is for.
+2. **Streamed delivery** (this change). A bundle run writes output rows and evidence to its staging directory as it produces them, instead of holding the tables until the end. Totals and counts accumulate as rows pass. `collect()` still keeps results, because that is what it is for.
 3. **Streamed anchors.** A source read only as an output's anchor is read in batches and passes through lookups to delivery without being held. Checks that need every anchor record (identity, one-to-one exclusivity, strict cardinality) keep compact per-key state or read the source a second time, and the run fails if its fingerprint changed between reads. Only lookup targets, detail sources and populations are held, indexed by key.
 4. **Targets larger than memory.** Lookup targets beyond a declared budget are spilled to disk or looked up at their source. This needs its own decision on the spill format and on what a target held at a source may cost.
 
@@ -33,3 +33,15 @@ Each phase ships on its own, keeps every result, diagnostic, evidence record and
 ## Out of scope for phase 1
 
 Phases 2 to 4. A fluent builder that composes a pipeline step by step (the recipe builders already compose declarations). Results returned as a lazy stream to the caller.
+
+## Contract for phase 2
+
+1. A bundle run approves its destination (output policy, no existing entry) before it reads any source. A refused destination fails the run with the same diagnostic as before, without opening a source.
+2. Staging is created when output production begins, and the run enters the `write` phase there. Each output table and each evidence table is a CSV file in staging, written row by row as the run produces it. Evidence tables are written as their records are produced.
+3. Counts, review totals, evidence counts and the serialized result size accumulate as rows pass. A budget fails the run as soon as it is exceeded; the final check is exact, at the same boundary as before.
+4. A bundle run's report carries no tables or evidence. The bundle holds them, with the same file names, CSV bytes, `schema.json` and `manifest.json` as before. `retained_result_bytes` in its manifest is the size the memory result would have.
+5. A bundle run keeps no results, so `limits.retained_bytes` bounds only its retained source records and population members. `limits.output_bytes` bounds both the serialized results and the bytes written, as before.
+6. A run that fails or is cancelled after staging was created removes it and records `delivery` (not committed) and `cleanup` in its manifest, as a failed publication did.
+7. Memory runs (`collect()`, `ExecutionContext::run`) are unchanged.
+
+Phase 2 does not change what a run holds while it executes: every source record is still read into memory first, so the process peak is set by sources (phase 3). What it removes is the copy of every output table and evidence record, and their string forms, held until delivery.

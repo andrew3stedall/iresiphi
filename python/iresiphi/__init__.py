@@ -95,7 +95,8 @@ class Pipeline:
     """Deferred recipe, bindings and policy; no sources open until collect/run.
 
     Each execution observes current sources. collect retains its results;
-    execution currently materializes source rows even with a destination.
+    run(destination) writes rows to the bundle as they are produced and keeps
+    none. Both currently hold source rows in memory while they run.
     """
 
     def __init__(self, recipe, bindings, policy):
