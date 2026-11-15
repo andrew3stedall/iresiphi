@@ -154,7 +154,10 @@ under placement `prefer_source` or `require_source`, a SQLite target is queried
 again at its snapshot by rowid instead. Each batch of anchor lines reads the
 target records it reaches. `limits.retained_bytes` counts the key records.
 Results, evidence, diagnostics and bundle tables are unchanged. Detail sources
-and populations are still held whole. Hosted verification is pending.
+and populations are still held whole. On hosted x86 the workload's
+100,000-record enrichment workbook spilled, its results matched phase 3, and
+its peak fell from 0.71 GB to 0.44 GB at `067b31f` (see the
+[verified run](measurements/ci-x86.md#slice-7-phase-4-verified-on-both-architectures)).
 
 ## Remaining scope
 
