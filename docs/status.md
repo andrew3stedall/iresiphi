@@ -141,8 +141,11 @@ relationship key fields and its reference. Lookups and the checks over every
 anchor record run over those key records unchanged, and each output decodes
 the source's bytes again in batches. `limits.retained_bytes` counts the key
 records. Results, evidence, diagnostics and bundle tables are unchanged.
-Lookup targets, detail sources and populations are still held whole; spilling
-targets larger than memory is phase 4.
+On hosted x86 the workload's results
+matched phase 2 and its peak fell to 0.71 GB at `8f2c7d9` (see the
+[verified run](measurements/ci-x86.md#slice-7-phase-3-verified-on-both-architectures)).
+Lookup targets, detail sources and populations are still held whole and now set
+the peak; spilling targets larger than memory is phase 4.
 
 ## Remaining scope
 
