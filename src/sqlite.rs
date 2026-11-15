@@ -410,6 +410,98 @@ fn convert(
     })
 }
 
+/// One stored record as the executor sees it, and the first value that failed
+/// to convert. The first column of `record` is the rowid.
+fn record_row(
+    record: &rusqlite::Row<'_>,
+    table: &Table<'_>,
+    names: &crate::record::FieldNames,
+    reference: &SourceReference,
+    policy: &Policy,
+) -> Result<(Row, Option<Error>)> {
+    let id: i64 = record.get(0).map_err(sql_error)?;
+    let mut row = crate::adapters::blank_row(names, reference);
+    row.reference.location = format!("rowid:{id}");
+    let mut failure = None;
+    for (i, (field, declared, _)) in table.columns.iter().enumerate() {
+        let stored = record.get_ref(i + 1).map_err(sql_error)?;
+        let (converted, raw) = convert(stored, declared, &policy.limits)?;
+        row.raw.insert((*field).clone(), raw);
+        match converted {
+            Ok(value) => {
+                row.fields.insert((*field).clone(), value);
+            }
+            Err(error) => {
+                failure.get_or_insert(error);
+            }
+        }
+    }
+    Ok((row, failure))
+}
+
+/// Rowids bound in one fetch query; far below SQLite's parameter limit.
+const FETCH_ROWIDS: usize = 512;
+
+/// The records at `rowids` (ascending, distinct) of the bound table, read
+/// again from the open snapshot exactly as [`read`] built them
+/// (docs/spec/slice-7.md, phase 4). Every rowid was read before, so a missing
+/// record or a value that no longer converts means the snapshot changed.
+pub(super) fn fetch(
+    source: &Source,
+    binding: &Binding,
+    conn: &Connection,
+    reference: &SourceReference,
+    policy: &Policy,
+    cancel: &AtomicBool,
+    rowids: &[i64],
+) -> Result<Vec<Row>> {
+    let _cancellation = QueryCancellation::install(conn, cancel);
+    let table = table(conn, source, binding)?;
+    let name = quoted(&table.name);
+    let selected = table
+        .columns
+        .iter()
+        .map(|(_, _, column)| quoted(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rowid = table.rowid;
+    let names = crate::adapters::projected_names(source);
+    let mut rows = Vec::with_capacity(rowids.len());
+    for chunk in rowids.chunks(FETCH_ROWIDS) {
+        check_cancel(cancel)?;
+        let marks = vec!["?"; chunk.len()].join(", ");
+        let mut statement = conn
+            .prepare(&format!(
+                "SELECT {rowid}, {selected} FROM {name} AS iresiphi_target WHERE {rowid} IN ({marks}) ORDER BY {rowid}"
+            ))
+            .map_err(sql_error)?;
+        let mut records = statement
+            .query(rusqlite::params_from_iter(chunk.iter()))
+            .map_err(sql_error)?;
+        while let Some(record) = records.next().map_err(sql_error)? {
+            let (row, failure) = record_row(record, &table, &names, reference, policy)?;
+            if let Some(error) = failure {
+                return Err(err(
+                    "SOURCE_CHANGED",
+                    format!("a record read again no longer converts: {}", error.message),
+                ));
+            }
+            rows.push(row);
+        }
+    }
+    if rows.len() != rowids.len() {
+        return Err(err(
+            "SOURCE_CHANGED",
+            format!(
+                "{} of {} records read again were found",
+                rows.len(),
+                rowids.len()
+            ),
+        ));
+    }
+    Ok(rows)
+}
+
 /// Read the bound table as typed, referenced records in ascending rowid order.
 /// With `pushed`, SQLite evaluates the predicate and only passing records cross
 /// into the executor, provided the source-side checks pass over every record.
@@ -489,23 +581,7 @@ pub(super) fn read(
     let mut failures = ValueFailures::default();
     while let Some(record) = records.next().map_err(sql_error)? {
         check_cancel(cancel)?;
-        let id: i64 = record.get(0).map_err(sql_error)?;
-        let mut row = crate::adapters::blank_row(&names, &reference);
-        row.reference.location = format!("rowid:{id}");
-        let mut failure = None;
-        for (i, (field, declared, _)) in table.columns.iter().enumerate() {
-            let stored = record.get_ref(i + 1).map_err(sql_error)?;
-            let (converted, raw) = convert(stored, declared, &policy.limits)?;
-            row.raw.insert((*field).clone(), raw);
-            match converted {
-                Ok(value) => {
-                    row.fields.insert((*field).clone(), value);
-                }
-                Err(error) => {
-                    failure.get_or_insert(error);
-                }
-            }
-        }
+        let (row, failure) = record_row(record, &table, &names, reference, policy)?;
         match failure {
             None => rows.push(row)?,
             Some(error) => failures.record(error, &row.reference)?,

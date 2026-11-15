@@ -287,6 +287,10 @@ pub struct Limits {
     pub batch_bytes: usize,
     /// Key values one transfer may send to a source (docs/spec/slice-5.md).
     pub transfer_keys: usize,
+    /// Serialized bytes of one lookup target's records held in memory. A larger
+    /// target keeps only its key records and reads the records a batch of
+    /// anchor lines matched when it needs them (docs/spec/slice-7.md, phase 4).
+    pub target_bytes: usize,
 }
 impl Default for Limits {
     fn default() -> Self {
@@ -307,6 +311,7 @@ impl Default for Limits {
             batch_rows: 8192,
             batch_bytes: 16 << 20,
             transfer_keys: 10_000,
+            target_bytes: 16 << 20,
         }
     }
 }

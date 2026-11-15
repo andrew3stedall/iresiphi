@@ -264,3 +264,36 @@ x86 and 0.9 ms on ARM, during source parsing.
 
 GitHub reports an expiry of 2027-02-13 for these artifacts. Evidence for this
 commit does not certify later heads; their own PR checks remain authoritative.
+
+## Slice 7 phase 4: verified on both architectures
+
+[PR #42](https://github.com/andrew3stedall/iresiphi/pull/42), commit
+`067b31fd3e62074557c328aa585d98215b11bf25`, passed all eight jobs in
+[run 43745802345](https://github.com/andrew3stedall/iresiphi/actions/runs/43745802345)
+on 2026-11-15, including the new spilled-target cases in `tests/spill.rs`.
+
+Under the default `limits.target_bytes` (16 MiB), the workload's `enrichment`
+workbook spilled: it kept `id` and `supplier` of its 100,000 records and wrote
+80,033,390 bytes to a temporary file. `mapping` and `rates` (two records each)
+stayed within the budget and were held, and the `components` detail is held by
+design. Results match phase 3: serialized results and evidence are unchanged
+at 52,133,436 bytes, with the same counts (99,999 resolved, 1 unresolved) and
+evidence records (1 / 1 / 2). The bundle wrote 5,162,822 bytes on x86, 494
+more than phase 3. The difference is in `manifest.json`, which gains the
+`spilled` read record and whose timing digits vary; the workload artifacts do
+not keep the bundle files to compare the tables byte for byte.
+
+Process peak RSS fell from 709,414,912 bytes at phase 3 to 436,948,992 bytes
+on x86. `run_bundle` took 7.0 s on x86, against 6.2 s at phase 3. A
+cancellation requested 50 ms in returned after 1.7 ms on x86. The ARM job
+passed the same workload assertions; its artifact could not be downloaded to
+this machine, so its peak RSS and timings are not copied here.
+
+| Artifact | ID | SHA-256 digest |
+| --- | --- | --- |
+| x86-distributions | 14174278005 | `078cb6b9a0ce88bd052010010781b2d4458921adbc31714d9d0eb029f2e920a6` |
+| x86-workload | 14174706367 | `11bde5287d1586867a62d14be538e66d778fe7e3aae603322c636337595f638a` |
+| arm-workload (including installed ARM wheels) | 14174216872 | `9f4751436e1c7309bf0e44bb3f15d7d2c2f00672651ac45c7613173d266c4f51` |
+
+GitHub reports an expiry of 2027-02-13 for these artifacts. Evidence for this
+commit does not certify later heads; their own PR checks remain authoritative.

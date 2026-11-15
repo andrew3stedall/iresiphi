@@ -97,6 +97,16 @@ source's bytes again in batches of `limits.batch_rows`. The read record says so
 under `streamed`. Lookup targets, detail sources and populations are held whole.
 See [slice 7, phase 3](spec/slice-7.md#contract-for-phase-3).
 
+A lookup target is held until its records' serialized bytes pass
+`limits.target_bytes`. Over that budget it keeps only each record's identity
+and relationship key fields and its reference, the same as a streamed anchor.
+Its records are written to a temporary file that has no name in any directory,
+and each batch of anchor lines reads back the records it matched. Under placement
+`prefer_source` or `require_source`, a SQLite target is queried again at its
+snapshot by rowid instead. The read record says so under `spilled`. Detail
+sources and populations are still held whole. See
+[slice 7, phase 4](spec/slice-7.md#contract-for-phase-4).
+
 ## Resource profile
 
 The policy sets allowed read and output roots and these limits. The values below are the defaults. They are admission limits, not measured capacity, and any of them can be raised in the policy. The run manifest records the limits each run used.
@@ -115,14 +125,15 @@ The policy sets allowed read and output roots and these limits. The values below
 | `lookup_rows` | 100,000 | Rows of each other source |
 | `candidate_pairs` | 1,000,000 | Qualified lookup candidates, and candidate plus detail evidence records |
 | `output_bytes` | 256 MiB | Serialized results and evidence, and bundle bytes |
-| `retained_bytes` | 256 MiB | Retained source materialization and memory results (a streamed anchor counts its key records; a bundle run retains no results) |
+| `retained_bytes` | 256 MiB | Retained source materialization and memory results (a streamed anchor or spilled target counts its key records; a bundle run retains no results) |
 | `batch_rows` | 8,192 | Rows per batch |
 | `batch_bytes` | 16 MiB | Decoded bytes per batch; one larger record is rejected |
+| `target_bytes` | 16 MiB | Serialized records of one lookup target held in memory; a larger target keeps its key records and reads the rest from a temporary file or its SQLite snapshot |
 | `transfer_keys` | 10,000 | Key values one transfer may send to a lookup target (see [key transfer](sqlite.md#key-transfer-to-a-lookup-target)); never more than 32,766 |
 
 A run that exceeds a limit fails with `RESOURCE_LIMIT` and publishes nothing. Each execution context runs one run at a time, and another attempt gets `RUN_BUSY`. Execution uses two partitions.
 
-These limits do not cap process memory. DataFusion does not track every allocation, the adapters hold each held source's rows and each streamed source's encoded bytes in memory, and Python owns any values it copies out. The manifest reports the tracked engine reservation peak (`engine_peak_reservation`) separately from the process's peak resident set (`peak_rss`, read from `/proc/self/status`). That peak covers the whole process lifetime, not one run. If you need a hard memory ceiling, run Iresiphi in an OS-isolated process with its own limits. [The 100,000-line measurement](measurements/workload-100k.md) shows what one complete run used on one machine. That measurement recorded evidence for every line (now `evidence: full`), which at that size produces 757 MB and needs `output_bytes` and `retained_bytes` raised to 1 GiB. Under the default evidence level the same workload runs within the default limits.
+These limits do not cap process memory. DataFusion does not track every allocation, the adapters hold each held source's rows and each streamed source's encoded bytes in memory, and a spilled target writes its records to a temporary file, and Python owns any values it copies out. The manifest reports the tracked engine reservation peak (`engine_peak_reservation`) separately from the process's peak resident set (`peak_rss`, read from `/proc/self/status`). That peak covers the whole process lifetime, not one run. If you need a hard memory ceiling, run Iresiphi in an OS-isolated process with its own limits. [The 100,000-line measurement](measurements/workload-100k.md) shows what one complete run used on one machine. That measurement recorded evidence for every line (now `evidence: full`), which at that size produces 757 MB and needs `output_bytes` and `retained_bytes` raised to 1 GiB. Under the default evidence level the same workload runs within the default limits.
 
 ## Explicit populations and allocation
 
