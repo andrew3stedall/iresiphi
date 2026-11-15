@@ -203,3 +203,29 @@ process peak RSS down from 1,411,559,424 bytes at `a838be5` to 840,863,744 bytes
 
 GitHub reports an expiry of 2027-02-12 for these artifacts. Evidence for this
 commit does not certify later heads; their own PR checks remain authoritative.
+
+## Slice 7 phase 2: verified on both architectures
+
+[PR #40](https://github.com/andrew3stedall/iresiphi/pull/40), commit
+`1a80353d04e194ea030270da1fb27fc80bc5f912`, passed all eight jobs in
+[run 43700888070](https://github.com/andrew3stedall/iresiphi/actions/runs/43700888070)
+on 2026-11-15, including the new streamed-delivery cases in `tests/bundles.rs`.
+
+The workload streams its bundle under the default profile. Serialized results
+are unchanged at 52,133,436 bytes. The bundle wrote 5,161,799 bytes on x86 and
+5,161,796 bytes on ARM, against 5,161,798 at phase 1. Every byte outside
+`manifest.json` (5,141,918) is the same on both architectures and at phase 1;
+the differences are run timings, run IDs and memory figures in the manifest.
+Process peak RSS fell from 840,863,744 bytes at phase 1 to 819,257,344 bytes
+on x86 (813,649,920 on ARM). Source records still set the peak; phase 3 is
+what lowers it. `run_bundle` took 7.8 s on x86 and 6.1 s on ARM. A cancellation
+requested 50 ms in returned after 1.1 ms on x86 and 0.9 ms on ARM.
+
+| Artifact | ID | SHA-256 digest |
+| --- | --- | --- |
+| x86-distributions | 14156672447 | `0054b4c1fa34dfe9d73a0eaeacaf4c8832f84c389a055b102b182d7576cb0c22` |
+| x86-workload | 14156386667 | `43620c04d735416af4794d9245c791fcd302418b765ec862cf64a6072213a62e` |
+| arm-workload (including installed ARM wheels) | 14156014915 | `1d3a8ab87c1d031b1a4f51e7ae16e6c5573114c272d8935984b4adb2147188d4` |
+
+GitHub reports an expiry of 2027-02-13 for these artifacts. Evidence for this
+commit does not certify later heads; their own PR checks remain authoritative.

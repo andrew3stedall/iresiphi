@@ -129,7 +129,11 @@ any source, writes each output and evidence row to staging as it is produced,
 and accumulates counts, totals and the result size as rows pass. Its report
 carries no tables or evidence; the bundle does. Because it keeps no results,
 `limits.retained_bytes` no longer bounds a bundle run's results, while
-`limits.output_bytes` still does. Memory runs are unchanged. Streamed anchors
+`limits.output_bytes` still does. Memory runs are unchanged. On hosted x86 the
+workload's bundle matched phase 1 outside its manifest and its peak fell to
+0.82 GB at `1a80353` (see the
+[verified run](measurements/ci-x86.md#slice-7-phase-2-verified-on-both-architectures));
+source records still set the peak. Streamed anchors
 and spilled lookup targets are the later phases.
 
 ## Remaining scope
