@@ -147,6 +147,15 @@ matched phase 2 and its peak fell to 0.71 GB at `8f2c7d9` (see the
 Lookup targets, detail sources and populations are still held whole and now set
 the peak; spilling targets larger than memory is phase 4.
 
+Phase 4 spills lookup targets. A target whose records pass `limits.target_bytes`
+(16 MiB by default) keeps only its identity and relationship key fields and its
+reference. Its records go to a temporary file that has no name in any directory;
+under placement `prefer_source` or `require_source`, a SQLite target is queried
+again at its snapshot by rowid instead. Each batch of anchor lines reads the
+target records it reaches. `limits.retained_bytes` counts the key records.
+Results, evidence, diagnostics and bundle tables are unchanged. Detail sources
+and populations are still held whole. Hosted verification is pending.
+
 ## Remaining scope
 
 The broad product specification

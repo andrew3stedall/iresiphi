@@ -261,9 +261,11 @@ fn materialize_sources(
     cancel: &AtomicBool,
     mut reads: Option<&mut BTreeMap<String, SourceRead>>,
     streamed: &BTreeSet<String>,
+    spillable: &BTreeSet<String>,
 ) -> Result<(BTreeMap<String, Vec<Row>>, Streams)> {
     let mut result = BTreeMap::new();
     let mut deferred = BTreeMap::new();
+    let mut targets = BTreeMap::new();
     let mut total = 0;
     let mut expanded = 0;
     let mut retained = 0usize;
@@ -446,11 +448,19 @@ fn materialize_sources(
         let mut scan = None;
         // A streamed anchor keeps only its key records (docs/spec/slice-7.md, phase 3).
         let streaming = streamed.contains(&source.id);
+        // A lookup target over limits.target_bytes keeps only its key records
+        // (docs/spec/slice-7.md, phase 4). A SQLite target is queried again at
+        // its snapshot when placement allows work at the source.
+        let spilling = !streaming && spillable.contains(&source.id);
+        let at_source = binding.adapter == "sqlite" && policy.placement != Placement::Local;
         let mut held = RowCollector::new(&admission);
         let mut keyed = streaming.then(|| KeyCollector::new(recipe, source, &admission));
-        let sink: &mut dyn RowSink = match keyed.as_mut() {
-            Some(keyed) => keyed,
-            None => &mut held,
+        let mut target =
+            spilling.then(|| TargetCollector::new(recipe, source, &admission, at_source));
+        let sink: &mut dyn RowSink = match (keyed.as_mut(), target.as_mut()) {
+            (Some(keyed), _) => keyed,
+            (None, Some(target)) => target,
+            (None, None) => &mut held,
         };
         match binding.adapter.as_str() {
             "sqlite" => sqlite::read(
@@ -488,9 +498,15 @@ fn materialize_sources(
             _ => return Err(err("UNSUPPORTED_CAPABILITY", "unsupported source adapter")),
         }
         .map_err(subject)?;
-        let (mut rows, conversion_us) = match keyed {
-            Some(keyed) => keyed.finish().map_err(subject)?,
-            None => (held.rows, 0),
+        let mut spill = None;
+        let (mut rows, conversion_us) = match (keyed, target) {
+            (Some(keyed), _) => keyed.finish().map_err(subject)?,
+            (None, Some(target)) => {
+                let (rows, conversion_us, store) = target.finish().map_err(subject)?;
+                spill = store;
+                (rows, conversion_us)
+            }
+            (None, None) => (held.rows, 0),
         };
         let max = if recipe
             .outputs
@@ -618,6 +634,21 @@ fn materialize_sources(
                             "statement": "Only the identity and relationship key fields of each record and its reference are held; each output anchored here decodes the same bytes again in batches.",
                         })
                     }),
+                    spilled: spill
+                        .as_ref()
+                        .map(|store| store.describe(recipe, source, rows.len(), policy)),
+                },
+            );
+        }
+        if let Some(store) = spill {
+            targets.insert(
+                source.id.clone(),
+                Target {
+                    source: source.clone(),
+                    binding: binding.clone(),
+                    reference: reference.clone(),
+                    admission: admission.clone(),
+                    store,
                 },
             );
         }
@@ -638,10 +669,14 @@ fn materialize_sources(
         }
         result.insert(source.id.clone(), rows);
     }
-    // A streamed SQLite anchor reads its open snapshot again.
+    // A streamed SQLite anchor, and a target queried at its source, read the
+    // open snapshot again.
     let snapshots = if deferred
         .values()
         .any(|d: &Deferred| d.binding.adapter == "sqlite")
+        || targets
+            .values()
+            .any(|t: &Target| matches!(t.store, Store::Snapshot))
     {
         snapshots
     } else {
@@ -651,6 +686,7 @@ fn materialize_sources(
         result,
         Streams {
             sources: deferred,
+            targets,
             snapshots,
         },
     ))
@@ -692,6 +728,11 @@ pub struct SourceRead {
     /// (docs/spec/slice-7.md, phase 3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub streamed: Option<serde_json::Value>,
+    /// Present when this lookup target exceeded `limits.target_bytes`: the
+    /// fields it held of each record and where its records were read again
+    /// (docs/spec/slice-7.md, phase 4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spilled: Option<serde_json::Value>,
 }
 
 /// Concrete capabilities of the built-in source readers. Describing a reader
@@ -893,6 +934,276 @@ pub(crate) fn key_fields(recipe: &Recipe, source: &Source) -> crate::record::Fie
     )
 }
 
+/// The fields of `row` named in `keep`, and its reference.
+fn key_record(row: &Row, keep: &crate::record::FieldNames) -> Row {
+    let mut kept = Row {
+        fields: crate::record::FieldMap::with_names(keep.clone()),
+        raw: crate::record::FieldMap::new(),
+        reference: row.reference.clone(),
+    };
+    for name in keep.iter() {
+        if let Some(value) = row.fields.get(name) {
+            kept.fields.insert(name.clone(), value.clone());
+        }
+    }
+    kept
+}
+
+/// Fields a lookup target over `limits.target_bytes` keeps of each record
+/// (docs/spec/slice-7.md, phase 4): what a streamed anchor keeps, the fields
+/// relationships into it key on (`to_keys`, validity interval, period date)
+/// and the fields a dotted key of a later relationship reads from it. Matching,
+/// cardinality, interval and identity checks read nothing else of a target.
+pub(crate) fn target_key_fields(recipe: &Recipe, source: &Source) -> crate::record::FieldNames {
+    let mut names: BTreeSet<String> = key_fields(recipe, source).iter().cloned().collect();
+    for rel in recipe.relationships.iter().filter(|r| r.to == source.id) {
+        names.extend(rel.to_keys.iter().cloned());
+        if let Some(v) = &rel.validity {
+            names.insert(v.valid_from.clone());
+            names.insert(v.valid_to.clone());
+        }
+        names.extend(rel.period.as_ref().map(|p| p.date.clone()));
+    }
+    for rel in &recipe.relationships {
+        for key in &rel.from_keys {
+            if let Some((dependency, field)) = key.split_once('.') {
+                if recipe
+                    .relationships
+                    .iter()
+                    .any(|prior| prior.id == dependency && prior.to == source.id)
+                {
+                    names.insert(field.to_owned());
+                }
+            }
+        }
+    }
+    std::sync::Arc::new(
+        names
+            .into_iter()
+            .filter(|name| source.projection.fields.contains_key(name))
+            .collect(),
+    )
+}
+
+/// First read of a lookup target that may exceed `limits.target_bytes`
+/// (docs/spec/slice-7.md, phase 4). Records are held as a held source's are
+/// until their serialized bytes pass the budget. From then on every record,
+/// including those already held, goes to the spill store (a temporary file,
+/// or nothing when the SQLite snapshot is queried again), crosses the
+/// typed-batch boundary in batches, and only its key record is kept.
+/// `limits.retained_bytes` counts what is kept.
+struct TargetCollector<'a> {
+    policy: &'a Policy,
+    fields: Vec<(String, Field)>,
+    keep: crate::record::FieldNames,
+    at_source: bool,
+    /// Held records, or key records once spilling.
+    rows: Vec<Row>,
+    spilling: bool,
+    file: Option<std::io::BufWriter<File>>,
+    /// Start of each written record, and the end of the last.
+    offsets: Vec<u64>,
+    buffer: Vec<u8>,
+    pending: Vec<Row>,
+    decoded_bytes: usize,
+    bytes: usize,
+    batch_bytes: usize,
+    conversion_us: u64,
+}
+impl<'a> TargetCollector<'a> {
+    fn new(recipe: &Recipe, source: &Source, policy: &'a Policy, at_source: bool) -> Self {
+        Self {
+            policy,
+            fields: source
+                .projection
+                .fields
+                .iter()
+                .map(|(n, f)| (n.clone(), f.clone()))
+                .collect(),
+            keep: target_key_fields(recipe, source),
+            at_source,
+            rows: Vec::new(),
+            spilling: false,
+            file: None,
+            offsets: vec![0],
+            buffer: Vec::new(),
+            pending: Vec::new(),
+            decoded_bytes: 0,
+            bytes: 0,
+            batch_bytes: 0,
+            conversion_us: 0,
+        }
+    }
+    /// Switch to spilling: every record held so far is spilled in order.
+    fn begin(&mut self) -> Result<()> {
+        self.spilling = true;
+        if !self.at_source {
+            self.file = Some(std::io::BufWriter::new(spill_file()?));
+        }
+        self.bytes = 0;
+        for row in std::mem::take(&mut self.rows) {
+            self.spill(row)?;
+        }
+        Ok(())
+    }
+    fn spill(&mut self, row: Row) -> Result<()> {
+        if let Some(file) = &mut self.file {
+            use std::io::Write;
+            self.buffer.clear();
+            serde_json::to_writer(&mut self.buffer, &row).map_err(io_error)?;
+            file.write_all(&self.buffer).map_err(spill_error)?;
+            let end = self.offsets[self.offsets.len() - 1] + self.buffer.len() as u64;
+            self.offsets.push(end);
+        }
+        let kept = key_record(&row, &self.keep);
+        let size = crate::admission::serialized_size(&kept).map_err(io_error)?;
+        self.bytes = self.bytes.saturating_add(size);
+        limit(
+            self.bytes <= self.policy.limits.retained_bytes,
+            "retained source materialization bytes",
+        )?;
+        self.rows.push(kept);
+        self.pending.push(row);
+        if self.pending.len() >= self.policy.limits.batch_rows.max(1) {
+            self.convert()?;
+        }
+        Ok(())
+    }
+    fn convert(&mut self) -> Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let converted = std::time::Instant::now();
+        typed_batch(&self.fields, std::mem::take(&mut self.pending))?;
+        self.conversion_us = self.conversion_us.saturating_add(micros(converted));
+        Ok(())
+    }
+    /// The held records, or the key records and the spill store, and the time
+    /// spent converting (held records are converted by the caller).
+    fn finish(mut self) -> Result<(Vec<Row>, u64, Option<Store>)> {
+        self.convert()?;
+        if !self.spilling {
+            return Ok((self.rows, 0, None));
+        }
+        let store = match self.file {
+            Some(writer) => Store::File {
+                file: writer.into_inner().map_err(|e| spill_error(e.error()))?,
+                offsets: self.offsets,
+            },
+            None => Store::Snapshot,
+        };
+        Ok((self.rows, self.conversion_us, Some(store)))
+    }
+}
+impl RowSink for TargetCollector<'_> {
+    fn push(&mut self, row: Row) -> Result<()> {
+        limit(
+            self.rows.len() < self.policy.limits.lookup_rows,
+            "source row count",
+        )?;
+        let size = crate::admission::serialized_size(&row).map_err(io_error)?;
+        if self.rows.len() % self.policy.limits.batch_rows.max(1) == 0 {
+            self.batch_bytes = 0;
+        }
+        self.batch_bytes = self.batch_bytes.saturating_add(size);
+        limit(
+            self.batch_bytes <= self.policy.limits.batch_bytes,
+            "decoded batch bytes",
+        )?;
+        self.decoded_bytes = self.decoded_bytes.saturating_add(size);
+        if !self.spilling && self.decoded_bytes > self.policy.limits.target_bytes {
+            self.begin()?;
+        }
+        if self.spilling {
+            return self.spill(row);
+        }
+        self.bytes = self.bytes.saturating_add(size);
+        limit(
+            self.bytes <= self.policy.limits.retained_bytes,
+            "retained source materialization bytes",
+        )?;
+        self.rows.push(row);
+        Ok(())
+    }
+}
+
+fn spill_error(e: impl fmt::Display) -> Error {
+    err(
+        "RESOURCE_LIMIT",
+        format!("temporary file for a lookup target over limits.target_bytes: {e}"),
+    )
+}
+
+/// A new file in the system temporary directory, readable only by this user
+/// and removed from the directory as soon as it is open: it holds a lookup
+/// target's serialized records for one run and disappears when it is closed.
+fn spill_file() -> Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let path = std::env::temp_dir().join(format!(
+        "iresiphi-spill-{}-{}-{stamp}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(spill_error)?;
+    std::fs::remove_file(&path).map_err(spill_error)?;
+    Ok(file)
+}
+
+/// Where a spilled lookup target's records are read again.
+pub(crate) enum Store {
+    /// Each record's serialized form in an unnamed temporary file; record `i`
+    /// is the bytes `offsets[i]..offsets[i + 1]`.
+    File { file: File, offsets: Vec<u64> },
+    /// The SQLite snapshot the first read queried, by rowid.
+    Snapshot,
+}
+impl Store {
+    fn describe(
+        &self,
+        recipe: &Recipe,
+        source: &Source,
+        records: usize,
+        policy: &Policy,
+    ) -> serde_json::Value {
+        let mut described = serde_json::json!({
+            "kept_fields": target_key_fields(recipe, source).to_vec(),
+            "records": records,
+            "target_bytes": policy.limits.target_bytes,
+        });
+        match self {
+            Store::File { offsets, .. } => {
+                described["store"] = "temporary_file".into();
+                described["spilled_bytes"] = offsets[offsets.len() - 1].into();
+                described["statement"] = "The target's records exceeded limits.target_bytes. Only the identity and relationship key fields of each record and its reference are held; every record was written to a temporary file that has no name in any directory, and each batch of anchor records reads the records it matched from there.".into();
+            }
+            Store::Snapshot => {
+                described["store"] = "source".into();
+                described["statement"] = "The target's records exceeded limits.target_bytes. Only the identity and relationship key fields of each record and its reference are held; each batch of anchor records queries the records it matched from the source's snapshot by rowid.".into();
+            }
+        }
+        described
+    }
+}
+
+/// A spilled lookup target of one run (docs/spec/slice-7.md, phase 4).
+struct Target {
+    source: Source,
+    binding: Binding,
+    reference: SourceReference,
+    admission: Policy,
+    store: Store,
+}
+
 /// First read of a streamed anchor. Every record is admitted and crosses the
 /// typed-batch boundary as a held record would; then only its key fields and
 /// its reference are kept. `limits.retained_bytes` counts what is kept.
@@ -955,16 +1266,7 @@ impl RowSink for KeyCollector<'_> {
             self.batch_bytes <= self.policy.limits.batch_bytes,
             "decoded batch bytes",
         )?;
-        let mut kept = Row {
-            fields: crate::record::FieldMap::with_names(self.keep.clone()),
-            raw: crate::record::FieldMap::new(),
-            reference: row.reference.clone(),
-        };
-        for name in self.keep.iter() {
-            if let Some(value) = row.fields.get(name) {
-                kept.fields.insert(name.clone(), value.clone());
-            }
-        }
+        let kept = key_record(&row, &self.keep);
         let size = crate::admission::serialized_size(&kept).map_err(io_error)?;
         self.bytes = self.bytes.saturating_add(size);
         limit(
@@ -1029,11 +1331,112 @@ struct Deferred {
 #[derive(Default)]
 pub(crate) struct Streams {
     sources: BTreeMap<String, Deferred>,
+    /// Lookup targets over `limits.target_bytes` (phase 4).
+    targets: BTreeMap<String, Target>,
     snapshots: BTreeMap<Vec<u8>, SqliteSnapshot>,
 }
 impl Streams {
     pub(crate) fn contains(&self, id: &str) -> bool {
         self.sources.contains_key(id)
+    }
+    /// Whether any lookup target of this run was spilled.
+    pub(crate) fn spills(&self) -> bool {
+        !self.targets.is_empty()
+    }
+    /// Whether lookup target `id` was spilled; the executor holds its key records.
+    pub(crate) fn spilled(&self, id: &str) -> bool {
+        self.targets.contains_key(id)
+    }
+    /// The records of spilled target `id` at `positions` (ascending, distinct),
+    /// exactly as its first read decoded them. `keys` are its key records.
+    pub(crate) fn fetch(
+        &self,
+        id: &str,
+        keys: &[Row],
+        positions: &[usize],
+        cancel: &AtomicBool,
+    ) -> Result<Vec<Row>> {
+        let target = self
+            .targets
+            .get(id)
+            .ok_or_else(|| err("INVALID_SOURCE", format!("{id} is not spilled")))?;
+        let changed = |what: String| {
+            err(
+                "SOURCE_CHANGED",
+                format!("a record of {id} read again {what}"),
+            )
+            .with_subject(format!("source:{id}"))
+        };
+        let rows = match &target.store {
+            Store::File { file, offsets } => {
+                use std::io::{Seek, SeekFrom};
+                let mut handle: &File = file;
+                let mut rows = Vec::with_capacity(positions.len());
+                let mut buffer = Vec::new();
+                let mut i = 0;
+                // Neighbouring records are read with one read.
+                while i < positions.len() {
+                    check_cancel(cancel)?;
+                    let mut end = i + 1;
+                    while end < positions.len() && positions[end] == positions[end - 1] + 1 {
+                        end += 1;
+                    }
+                    let (first, last) = (positions[i], positions[end - 1]);
+                    let start = offsets[first];
+                    buffer.resize((offsets[last + 1] - start) as usize, 0);
+                    handle
+                        .seek(SeekFrom::Start(start))
+                        .and_then(|_| handle.read_exact(&mut buffer))
+                        .map_err(spill_error)?;
+                    for position in first..=last {
+                        let span = (offsets[position] - start) as usize
+                            ..(offsets[position + 1] - start) as usize;
+                        rows.push(
+                            serde_json::from_slice::<Row>(&buffer[span])
+                                .map_err(|e| changed(format!("did not decode: {e}")))?,
+                        );
+                    }
+                    i = end;
+                }
+                rows
+            }
+            Store::Snapshot => {
+                let rowids = positions
+                    .iter()
+                    .map(|&p| {
+                        keys[p]
+                            .reference
+                            .location
+                            .strip_prefix("rowid:")
+                            .and_then(|n| n.parse::<i64>().ok())
+                            .ok_or_else(|| changed("has no rowid".into()))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let snapshot = self
+                    .snapshots
+                    .get(target.binding.path.as_os_str().as_encoded_bytes())
+                    .ok_or_else(|| err("SOURCE_ACCESS", "SQLite snapshot is not open"))?;
+                sqlite::fetch(
+                    &target.source,
+                    &target.binding,
+                    &snapshot.conn,
+                    &target.reference,
+                    &target.admission,
+                    cancel,
+                    &rowids,
+                )
+                .map_err(|e| tag_source(e, id))?
+            }
+        };
+        for (row, &p) in rows.iter().zip(positions) {
+            if row.reference.location != keys[p].reference.location {
+                return Err(changed(format!(
+                    "is at {}, not {}",
+                    row.reference.location, keys[p].reference.location
+                )));
+            }
+        }
+        Ok(rows)
     }
     /// Decode streamed anchor `id` again and hand its records to `each` in
     /// batches of at most `size`. Errors from `each` are returned unchanged.
@@ -2565,7 +2968,15 @@ pub fn read_batches<'a>(
     policy: &Policy,
     cancel: &'a AtomicBool,
 ) -> Result<BTreeMap<String, SourceBatches<'a>>> {
-    let (rows, _) = materialize_sources(recipe, bindings, policy, cancel, None, &BTreeSet::new())?;
+    let (rows, _) = materialize_sources(
+        recipe,
+        bindings,
+        policy,
+        cancel,
+        None,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    )?;
     into_batches(recipe, policy, cancel, rows)
 }
 
@@ -2618,29 +3029,51 @@ pub fn read_sources_observed(
     policy: &Policy,
     cancel: &AtomicBool,
 ) -> Result<(BTreeMap<String, Vec<Row>>, BTreeMap<String, SourceRead>)> {
-    read_for_run(recipe, bindings, policy, cancel, &BTreeSet::new())
-        .map(|(rows, reads, _)| (rows, reads))
+    read_for_run(
+        recipe,
+        bindings,
+        policy,
+        cancel,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    )
+    .map(|(rows, reads, _)| (rows, reads))
 }
 
 /// The executor's read. Sources in `streamed` are checked in full but only
 /// their key records are returned; [`Streams`] reads their records again
-/// (docs/spec/slice-7.md, phase 3).
+/// (docs/spec/slice-7.md, phase 3). A source in `spillable` that exceeds
+/// `limits.target_bytes` is returned the same way, and [`Streams::fetch`]
+/// reads the records a batch needs (phase 4).
 pub(crate) fn read_for_run(
     recipe: &Recipe,
     bindings: &Bindings,
     policy: &Policy,
     cancel: &AtomicBool,
     streamed: &BTreeSet<String>,
+    spillable: &BTreeSet<String>,
 ) -> Result<(
     BTreeMap<String, Vec<Row>>,
     BTreeMap<String, SourceRead>,
     Streams,
 )> {
     let mut reads = BTreeMap::new();
-    let (mut rows, streams) =
-        materialize_sources(recipe, bindings, policy, cancel, Some(&mut reads), streamed)?;
+    let (mut rows, streams) = materialize_sources(
+        recipe,
+        bindings,
+        policy,
+        cancel,
+        Some(&mut reads),
+        streamed,
+        spillable,
+    )?;
     // Key records already crossed the typed-batch boundary as whole records.
-    let mut result: BTreeMap<String, Vec<Row>> = streamed
+    let keyed: Vec<String> = streamed
+        .iter()
+        .chain(streams.targets.keys())
+        .cloned()
+        .collect();
+    let mut result: BTreeMap<String, Vec<Row>> = keyed
         .iter()
         .filter_map(|id| rows.remove_entry(id))
         .collect();

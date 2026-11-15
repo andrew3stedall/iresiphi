@@ -19,8 +19,8 @@ Each phase ships on its own, keeps every result, diagnostic, evidence record and
    - Records of one source share one sorted list of field names, so a record holds only its values. Source name, binding and fingerprint are shared by every record of a read. Records serialize exactly as before.
    - Lookup candidates stream out of the join engine one batch at a time instead of being collected first. Byte budgets count serialized bytes without building a serialized copy.
 2. **Streamed delivery** (done). A bundle run writes output rows and evidence to its staging directory as it produces them, instead of holding the tables until the end. Totals and counts accumulate as rows pass. `collect()` still keeps results, because that is what it is for.
-3. **Streamed anchors** (this change). A source read only as an output's anchor is not held. The run keeps each record's key fields and reference, which is all that lookups and the checks over every anchor record (identity, one-to-one exclusivity, strict cardinality, detail parents) read, and each output decodes the anchor's records again in batches. Only lookup targets, detail sources and populations are held whole.
-4. **Targets larger than memory.** Lookup targets beyond a declared budget are spilled to disk or looked up at their source. This needs its own decision on the spill format and on what a target held at a source may cost.
+3. **Streamed anchors** (done). A source read only as an output's anchor is not held. The run keeps each record's key fields and reference, which is all that lookups and the checks over every anchor record (identity, one-to-one exclusivity, strict cardinality, detail parents) read, and each output decodes the anchor's records again in batches. Only lookup targets, detail sources and populations are held whole.
+4. **Targets larger than memory** (this change). A lookup target over `limits.target_bytes` keeps only its key records. Each batch of anchor lines reads the target records it reaches, from a temporary file or, for a SQLite target where placement allows, from the source's snapshot.
 
 ## Contract for phase 1
 
@@ -58,3 +58,18 @@ Phase 2 does not change what a run holds while it executes: every source record 
 8. Results, evidence, diagnostics, bundle tables and `retained_result_bytes` are identical to phase 2 for the same inputs. Memory runs stream anchors too.
 
 Phase 3 does not change what a lookup target, detail source or population costs. Those are held whole, and phase 4 decides how a target larger than memory is held.
+
+## Contract for phase 4
+
+The developer decided on 2026-11-16, choosing among the options put to them, that a lookup target over a declared budget keeps its key records like a streamed anchor and reads its other records again when a batch needs them. The records go to a temporary file only when the target is over the budget. Where placement allows work at the source, a SQLite target is queried at its snapshot instead. Detail sources stay held. This is a developer decision.
+
+1. `limits.target_bytes` (default 16 MiB) bounds the serialized bytes of one lookup target's records held in memory. A source can spill when it is read only as the target of to-one relationships. That means no output anchors at it, no one-to-many relationship starts or ends at it, and no population or allocation takes records from it. No output that allocates or anchors at a population may reach it through relationships either. Every other source is held as before.
+2. A target's first read runs every check a held read runs. Its records are held until their serialized bytes pass `limits.target_bytes`. From then on, the run keeps only a key record for each record of the target, including those already held. A key record holds the identity fields, the fields relationships into the target key on (`to_keys`, validity interval, period date), the fields a dotted key reads from it, the fields its own relationships key on, and its source reference.
+3. A spilled file target, or a SQLite target under placement `local`, writes each record's serialized form (the JSON that evidence uses) to a new file in the system temporary directory. The file is created readable only by the run's user and removed from the directory as soon as it is open, so nothing is left behind however the run ends. Under `prefer_source` or `require_source`, a SQLite target writes nothing. It is queried again by rowid at the snapshot its first read used.
+4. Matching, candidate counting, exclusivity, strict cardinality, interval checks, period keys, dotted keys and transfers run over the key records exactly as over held records.
+5. Every output runs its anchor lines in batches of `limits.batch_rows`. Before each batch, the run reads the records of spilled targets that the batch's lines reach through any chain of relationships. The batch's columns, aggregates and evidence read those records. A record read again that does not decode, or is not at the position the first read gave it, fails the run with `SOURCE_CHANGED`. Failing to write or read the temporary file fails the run with `RESOURCE_LIMIT`.
+6. `limits.retained_bytes` counts a spilled target's key records. The temporary file holds at most the target's admitted records, each within `limits.batch_bytes`.
+7. The manifest's read record of a spilled target adds `spilled`. It gives the store (`temporary_file` or `source`), the fields kept, the record count, the budget and, for a file, the bytes written.
+8. Results, evidence, diagnostics, bundle tables and `retained_result_bytes` are identical to phase 3 for the same inputs. Memory runs spill targets too.
+
+Phase 4 does not change what a detail source or population costs. They are held whole. Process memory is still a measurement, not a bound.
