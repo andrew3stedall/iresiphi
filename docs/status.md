@@ -166,7 +166,11 @@ an output anchors at, and an output anchored at a spilled source, a detail
 output included, reads its own records back in batches. A spilled detail can be
 the parent of another detail. Populations, allocation quantities and the sources
 an allocating or population output reaches are still held whole. Cases are in
-`tests/spill.rs`; hosted verification is pending.
+`tests/spill.rs`. On hosted x86 the workload's 150,000-record component detail
+spilled, its results matched phase 4, and its peak fell from 0.44 GB to 0.41 GB
+at `ef87766` (see the
+[verified run](measurements/ci-x86.md#slice-7-phase-5-verified-on-both-architectures)).
+The saving is small because a component keeps four of its five fields as keys.
 
 ## Remaining scope
 
