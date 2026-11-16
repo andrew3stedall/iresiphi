@@ -159,6 +159,19 @@ and populations are still held whole. On hosted x86 the workload's
 its peak fell from 0.71 GB to 0.44 GB at `067b31f` (see the
 [verified run](measurements/ci-x86.md#slice-7-phase-4-verified-on-both-architectures)).
 
+Phase 5 spills detail sources. The developer chose it as the next item on
+2026-11-17. A one-to-many detail over `limits.target_bytes` keeps its key records
+and goes to the same stores as a phase 4 target. So does any relationship target
+an output anchors at, and an output anchored at a spilled source, a detail
+output included, reads its own records back in batches. A spilled detail can be
+the parent of another detail. Populations, allocation quantities and the sources
+an allocating or population output reaches are still held whole. Cases are in
+`tests/spill.rs`. On hosted x86 the workload's 150,000-record component detail
+spilled, its results matched phase 4, and its peak fell from 0.44 GB to 0.41 GB
+at `ef87766` (see the
+[verified run](measurements/ci-x86.md#slice-7-phase-5-verified-on-both-architectures)).
+The saving is small because a component keeps four of its five fields as keys.
+
 ## Remaining scope
 
 The broad product specification

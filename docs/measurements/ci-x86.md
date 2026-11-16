@@ -297,3 +297,42 @@ this machine, so its peak RSS and timings are not copied here.
 
 GitHub reports an expiry of 2027-02-13 for these artifacts. Evidence for this
 commit does not certify later heads; their own PR checks remain authoritative.
+
+## Slice 7 phase 5: verified on both architectures
+
+[PR #43](https://github.com/andrew3stedall/iresiphi/pull/43), commit
+`ef8776616346262d659601396a366e983fab9277`, passed all eight jobs in
+[run 43937531695](https://github.com/andrew3stedall/iresiphi/actions/runs/43937531695)
+on 2026-11-16, including the new spilled-detail cases in `tests/spill.rs`. The
+same cases at the test-only commit `dfa90da` failed in run 43935801270, before
+the executor spilled details.
+
+Under the default `limits.target_bytes` (16 MiB), the workload's `components`
+detail spilled: it kept `id`, `invoice`, `line` and `supplier` of its 150,000
+records and wrote 78,990,174 bytes to a temporary file. The `enrichment`
+workbook spilled as in phase 4. Results match phase 4: serialized results and
+evidence are unchanged at 52,133,436 bytes, with the same counts (99,999
+resolved, 1 unresolved), evidence records (1 / 1 / 2) and one
+`LOOKUP_UNMATCHED` warning. The bundle wrote 5,163,454 bytes on x86, 632 more
+than phase 4. The difference is in `manifest.json`, which gains the components'
+`spilled` read record and whose timing digits vary.
+
+Process peak RSS fell from 436,948,992 bytes at phase 4 to 414,269,440 bytes
+on x86. The saving is small because a component's key record keeps four of its
+five fields: its identity and the three fields its parent lines match on. Only
+`amount` and the original values leave memory. `run_bundle` took 8.7 s on x86,
+against 7.0 s at phase 4; each batch now reads its components back from the
+temporary file. A cancellation requested 50 ms in returned after 2.7 ms on x86.
+On ARM the components spilled the same 78,990,174 bytes, the results matched,
+the bundle wrote 5,163,460 bytes, the peak was 406,855,680 bytes and
+`run_bundle` took 11.1 s; a cancellation returned after 1.1 ms. The phase 4
+ARM artifact was not downloaded, so there is no ARM peak to compare against.
+
+| Artifact | ID | SHA-256 digest |
+| --- | --- | --- |
+| x86-distributions | 14263052194 | `afa62df7b758d4618d25ba79e6b2cf7b33c31154a4bd3c947218162145f532a3` |
+| x86-workload | 14260966775 | `01a73139ea774a2d562a76b49d886072d336462b485d51f58fedf204d821724e` |
+| arm-workload (including installed ARM wheels) | 14262067378 | `bf4b4d1cfecc678d2bc011ca7557d3c27b8b858441ffae0ca1846e5e24e072d6` |
+
+GitHub reports an expiry of 2027-02-14 for these artifacts. Evidence for this
+commit does not certify later heads; their own PR checks remain authoritative.

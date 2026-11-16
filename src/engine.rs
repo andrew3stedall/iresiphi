@@ -282,15 +282,16 @@ fn streamed_anchors(recipe: &Recipe) -> std::collections::BTreeSet<String> {
         .collect()
 }
 
-/// Lookup targets that may be spilled when they exceed `limits.target_bytes`
-/// (docs/spec/slice-7.md, phase 4): sources read only as the target of to-one
-/// relationships. A source that is an output anchor, a one-to-many detail or
-/// parent, a population's recipients or periods, or an allocation quantity is
-/// held, and so is one reachable from an output that allocates or anchors at a
-/// population, since those read their records outside an anchor batch.
+/// Relationship targets that may be spilled when they exceed
+/// `limits.target_bytes` (docs/spec/slice-7.md, phases 4 and 5): to-one lookup
+/// targets and one-to-many details. Every output reads such a source only
+/// within a batch of its anchor lines, including an output anchored at it. A
+/// population's recipients or periods and an allocation quantity are held, and
+/// so is a source that an output allocating or anchored at a population
+/// anchors at or reaches, since those read records outside an anchor batch.
 fn spillable_targets(recipe: &Recipe) -> std::collections::BTreeSet<String> {
     let reachable = |anchor: &str| {
-        let mut seen = std::collections::BTreeSet::new();
+        let mut seen = std::collections::BTreeSet::from([anchor.to_owned()]);
         let mut next = vec![anchor.to_owned()];
         while let Some(source) = next.pop() {
             for rel in recipe.relationships.iter().filter(|r| r.from == source) {
@@ -313,10 +314,6 @@ fn spillable_targets(recipe: &Recipe) -> std::collections::BTreeSet<String> {
         .map(|s| s.id.as_str())
         .filter(|id| {
             recipe.relationships.iter().any(|r| r.to == *id)
-                && !recipe.relationships.iter().any(|r| {
-                    r.cardinality == Cardinality::OneToMany && (r.to == *id || r.from == *id)
-                })
-                && !recipe.outputs.iter().any(|o| o.anchor == *id)
                 && !recipe.populations.iter().any(|p| {
                     p.recipients == *id || p.period.from.as_ref().is_some_and(|f| f.source == *id)
                 })
@@ -331,16 +328,17 @@ fn spillable_targets(recipe: &Recipe) -> std::collections::BTreeSet<String> {
         .collect()
 }
 
-/// Records of spilled lookup targets that one batch of anchor lines reaches,
-/// by source and position.
+/// Records of spilled sources that one batch of anchor lines reads, by source
+/// and position.
 type Fetched = BTreeMap<String, BTreeMap<usize, Row>>;
 static NOTHING_FETCHED: Fetched = BTreeMap::new();
 
-/// Read the records of spilled targets that anchor lines `lines` of `anchor`
-/// reach through any chain of relationships (docs/spec/slice-7.md, phase 4).
-/// Outputs, evidence and aggregates read target records only along those
-/// chains.
-fn fetch_targets(
+/// Read the records of spilled sources that anchor lines `lines` of `anchor`
+/// read (docs/spec/slice-7.md, phases 4 and 5): the lines' own records when
+/// the anchor spilled, and those the lines reach through any chain of
+/// relationships, one-to-many details included. Outputs, evidence and
+/// aggregates read other records only along those chains.
+fn fetch_spilled(
     recipe: &Recipe,
     sources: &BTreeMap<String, Vec<Row>>,
     matches: &Matches,
@@ -353,8 +351,10 @@ fn fetch_targets(
     if !streams.spills() {
         return Ok(fetched);
     }
-    let mut wanted: BTreeMap<&str, std::collections::BTreeSet<usize>> = BTreeMap::new();
-    let mut next: Vec<(&str, Vec<usize>)> = vec![(anchor, lines.collect())];
+    let lines: Vec<usize> = lines.collect();
+    let mut wanted: BTreeMap<&str, std::collections::BTreeSet<usize>> =
+        BTreeMap::from([(anchor, lines.iter().copied().collect())]);
+    let mut next: Vec<(&str, Vec<usize>)> = vec![(anchor, lines)];
     while let Some((source, positions)) = next.pop() {
         for rel in recipe.relationships.iter().filter(|r| r.from == source) {
             let Some(found) = matches.get(&rel.id) else {
@@ -393,7 +393,7 @@ fn fetch_targets(
 
 /// Records an output line can read: held records, the current batch of a
 /// streamed anchor, which stands in for that anchor's key records, and the
-/// records of spilled lookup targets that batch reaches.
+/// records of spilled sources that batch reads.
 #[derive(Clone, Copy)]
 struct View<'a> {
     held: &'a BTreeMap<String, Vec<Row>>,
@@ -416,7 +416,7 @@ impl<'a> View<'a> {
             _ => match self.fetched.get(source) {
                 Some(rows) => rows
                     .get(&index)
-                    .expect("a spilled target record the batch reaches was fetched"),
+                    .expect("a spilled record the batch reads was fetched"),
                 None => &held[source][index],
             },
         }
@@ -652,8 +652,9 @@ fn execute(
     let phase = Instant::now();
     // Anchors read only as anchors are streamed: `sources` holds their key
     // records, and `streams` reads their records again for each output.
-    // Lookup targets over limits.target_bytes hold their key records, and each
-    // batch of anchor lines reads the target records it reaches (phase 4).
+    // Relationship targets over limits.target_bytes, lookup targets and
+    // details alike, hold their key records, and each batch of anchor lines
+    // reads the records it needs (phases 4 and 5).
     let spillable: std::collections::BTreeSet<String> = spillable_targets(declared)
         .intersection(&spillable_targets(recipe))
         .cloned()
@@ -1521,15 +1522,15 @@ fn execute(
             evidence_time += recording.elapsed();
             Ok(())
         };
-        // Lines run in batches of limits.batch_rows; each batch first reads the
-        // records of spilled lookup targets it reaches (phase 4).
+        // Lines run in batches of limits.batch_rows; each batch first fetches
+        // the spilled records its lines read (phases 4 and 5).
         if streams.contains(&output.anchor) {
             streams.read(
                 &output.anchor,
                 policy.limits.batch_rows,
                 cancel,
                 &mut |first: usize, rows: &[Row]| -> Result<()> {
-                    let fetched = fetch_targets(
+                    let fetched = fetch_spilled(
                         recipe,
                         &sources,
                         &matches,
@@ -1549,7 +1550,7 @@ fn execute(
             let mut first = 0;
             while first < anchor_records {
                 let end = anchor_records.min(first + size);
-                let fetched = fetch_targets(
+                let fetched = fetch_spilled(
                     recipe,
                     &sources,
                     &matches,

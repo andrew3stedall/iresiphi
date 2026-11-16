@@ -448,9 +448,10 @@ fn materialize_sources(
         let mut scan = None;
         // A streamed anchor keeps only its key records (docs/spec/slice-7.md, phase 3).
         let streaming = streamed.contains(&source.id);
-        // A lookup target over limits.target_bytes keeps only its key records
-        // (docs/spec/slice-7.md, phase 4). A SQLite target is queried again at
-        // its snapshot when placement allows work at the source.
+        // A lookup target or a one-to-many detail over limits.target_bytes
+        // keeps only its key records (docs/spec/slice-7.md, phases 4 and 5).
+        // A SQLite target is queried again at its snapshot when placement
+        // allows work at the source.
         let spilling = !streaming && spillable.contains(&source.id);
         let at_source = binding.adapter == "sqlite" && policy.placement != Placement::Local;
         let mut held = RowCollector::new(&admission);
@@ -728,7 +729,7 @@ pub struct SourceRead {
     /// (docs/spec/slice-7.md, phase 3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub streamed: Option<serde_json::Value>,
-    /// Present when this lookup target exceeded `limits.target_bytes`: the
+    /// Present when this relationship target exceeded `limits.target_bytes`: the
     /// fields it held of each record and where its records were read again
     /// (docs/spec/slice-7.md, phase 4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -949,11 +950,13 @@ fn key_record(row: &Row, keep: &crate::record::FieldNames) -> Row {
     kept
 }
 
-/// Fields a lookup target over `limits.target_bytes` keeps of each record
-/// (docs/spec/slice-7.md, phase 4): what a streamed anchor keeps, the fields
-/// relationships into it key on (`to_keys`, validity interval, period date)
-/// and the fields a dotted key of a later relationship reads from it. Matching,
-/// cardinality, interval and identity checks read nothing else of a target.
+/// Fields a relationship target over `limits.target_bytes` keeps of each
+/// record (docs/spec/slice-7.md, phases 4 and 5): what a streamed anchor keeps
+/// (identity and the keys of its own relationships, so a spilled detail can be
+/// a parent), the fields relationships into it key on (`to_keys`, validity
+/// interval, period date) and the fields a dotted key of a later relationship
+/// reads from it. Matching, cardinality, interval, identity and detail parent
+/// checks read nothing else of it.
 pub(crate) fn target_key_fields(recipe: &Recipe, source: &Source) -> crate::record::FieldNames {
     let mut names: BTreeSet<String> = key_fields(recipe, source).iter().cloned().collect();
     for rel in recipe.relationships.iter().filter(|r| r.to == source.id) {
@@ -985,8 +988,8 @@ pub(crate) fn target_key_fields(recipe: &Recipe, source: &Source) -> crate::reco
     )
 }
 
-/// First read of a lookup target that may exceed `limits.target_bytes`
-/// (docs/spec/slice-7.md, phase 4). Records are held as a held source's are
+/// First read of a relationship target that may exceed `limits.target_bytes`
+/// (docs/spec/slice-7.md, phases 4 and 5). Records are held as a held source's are
 /// until their serialized bytes pass the budget. From then on every record,
 /// including those already held, goes to the spill store (a temporary file,
 /// or nothing when the SQLite snapshot is queried again), crosses the
@@ -1130,7 +1133,7 @@ impl RowSink for TargetCollector<'_> {
 fn spill_error(e: impl fmt::Display) -> Error {
     err(
         "RESOURCE_LIMIT",
-        format!("temporary file for a lookup target over limits.target_bytes: {e}"),
+        format!("temporary file for a source over limits.target_bytes: {e}"),
     )
 }
 
@@ -1159,7 +1162,7 @@ fn spill_file() -> Result<File> {
     Ok(file)
 }
 
-/// Where a spilled lookup target's records are read again.
+/// Where a spilled source's records are read again.
 pub(crate) enum Store {
     /// Each record's serialized form in an unnamed temporary file; record `i`
     /// is the bytes `offsets[i]..offsets[i + 1]`.
@@ -1184,18 +1187,19 @@ impl Store {
             Store::File { offsets, .. } => {
                 described["store"] = "temporary_file".into();
                 described["spilled_bytes"] = offsets[offsets.len() - 1].into();
-                described["statement"] = "The target's records exceeded limits.target_bytes. Only the identity and relationship key fields of each record and its reference are held; every record was written to a temporary file that has no name in any directory, and each batch of anchor records reads the records it matched from there.".into();
+                described["statement"] = "The target's records exceeded limits.target_bytes. Only the identity and relationship key fields of each record and its reference are held; every record was written to a temporary file that has no name in any directory, and each batch of anchor records reads the records it needs from there: its own when an output is anchored here, and those it reached through relationships.".into();
             }
             Store::Snapshot => {
                 described["store"] = "source".into();
-                described["statement"] = "The target's records exceeded limits.target_bytes. Only the identity and relationship key fields of each record and its reference are held; each batch of anchor records queries the records it matched from the source's snapshot by rowid.".into();
+                described["statement"] = "The target's records exceeded limits.target_bytes. Only the identity and relationship key fields of each record and its reference are held; each batch of anchor records queries the records it needs from the source's snapshot by rowid: its own when an output is anchored here, and those it reached through relationships.".into();
             }
         }
         described
     }
 }
 
-/// A spilled lookup target of one run (docs/spec/slice-7.md, phase 4).
+/// A spilled relationship target of one run (docs/spec/slice-7.md, phases 4
+/// and 5).
 struct Target {
     source: Source,
     binding: Binding,
@@ -1331,7 +1335,7 @@ struct Deferred {
 #[derive(Default)]
 pub(crate) struct Streams {
     sources: BTreeMap<String, Deferred>,
-    /// Lookup targets over `limits.target_bytes` (phase 4).
+    /// Relationship targets over `limits.target_bytes` (phases 4 and 5).
     targets: BTreeMap<String, Target>,
     snapshots: BTreeMap<Vec<u8>, SqliteSnapshot>,
 }
@@ -1339,11 +1343,11 @@ impl Streams {
     pub(crate) fn contains(&self, id: &str) -> bool {
         self.sources.contains_key(id)
     }
-    /// Whether any lookup target of this run was spilled.
+    /// Whether any source of this run was spilled.
     pub(crate) fn spills(&self) -> bool {
         !self.targets.is_empty()
     }
-    /// Whether lookup target `id` was spilled; the executor holds its key records.
+    /// Whether source `id` was spilled; the executor holds its key records.
     pub(crate) fn spilled(&self, id: &str) -> bool {
         self.targets.contains_key(id)
     }
@@ -3044,7 +3048,7 @@ pub fn read_sources_observed(
 /// their key records are returned; [`Streams`] reads their records again
 /// (docs/spec/slice-7.md, phase 3). A source in `spillable` that exceeds
 /// `limits.target_bytes` is returned the same way, and [`Streams::fetch`]
-/// reads the records a batch needs (phase 4).
+/// reads the records a batch needs (phases 4 and 5).
 pub(crate) fn read_for_run(
     recipe: &Recipe,
     bindings: &Bindings,
