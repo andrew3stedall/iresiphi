@@ -20,7 +20,8 @@ Each phase ships on its own, keeps every result, diagnostic, evidence record and
    - Lookup candidates stream out of the join engine one batch at a time instead of being collected first. Byte budgets count serialized bytes without building a serialized copy.
 2. **Streamed delivery** (done). A bundle run writes output rows and evidence to its staging directory as it produces them, instead of holding the tables until the end. Totals and counts accumulate as rows pass. `collect()` still keeps results, because that is what it is for.
 3. **Streamed anchors** (done). A source read only as an output's anchor is not held. The run keeps each record's key fields and reference, which is all that lookups and the checks over every anchor record (identity, one-to-one exclusivity, strict cardinality, detail parents) read, and each output decodes the anchor's records again in batches. Only lookup targets, detail sources and populations are held whole.
-4. **Targets larger than memory** (this change). A lookup target over `limits.target_bytes` keeps only its key records. Each batch of anchor lines reads the target records it reaches, from a temporary file or, for a SQLite target where placement allows, from the source's snapshot.
+4. **Targets larger than memory** (done). A lookup target over `limits.target_bytes` keeps only its key records. Each batch of anchor lines reads the target records it reaches, from a temporary file or, for a SQLite target where placement allows, from the source's snapshot.
+5. **Detail sources larger than memory** (this change). The phase 4 budget and stores apply to one-to-many detail sources too, and to a relationship target that outputs also anchor at. Each output reads its own anchor records, when they spilled, in the same batches.
 
 ## Contract for phase 1
 
@@ -73,3 +74,17 @@ The developer decided on 2026-11-16, choosing among the options put to them, tha
 8. Results, evidence, diagnostics, bundle tables and `retained_result_bytes` are identical to phase 3 for the same inputs. Memory runs spill targets too.
 
 Phase 4 does not change what a detail source or population costs. They are held whole. Process memory is still a measurement, not a bound.
+
+## Contract for phase 5
+
+The developer decided on 2026-11-17, choosing among the open items put to them, that detail sources should be bounded the way phase 4 bounds lookup targets. After phase 4 the workload's 150,000-record component detail was the largest source still held whole. This is a developer decision.
+
+1. `limits.target_bytes` bounds the serialized bytes of any one relationship target's records held in memory: a to-one lookup target or a one-to-many detail. A source can spill when it is the target of at least one relationship and no population or allocation takes records from it. No output that allocates or anchors at a population may anchor at it or reach it through relationships. One-to-many relationships may start or end at it, and other outputs, detail outputs included, may anchor at it. Every other source is held as before. A source streamed under phase 3 is never a relationship target, so it never spills.
+2. The first read, the key record and the stores are those of phase 4 (clauses 2 and 3). The key record therefore also holds the fields a spilled source's own relationships key on, so a spilled detail can be the parent of another detail.
+3. Matching, candidate counting, exclusivity, strict cardinality, interval checks, period keys, dotted keys, transfers, detail parents, orphan detail and population activity counts run over the key records exactly as over held records.
+4. Every output runs its anchor lines in batches of `limits.batch_rows`. Before each batch the run reads that batch's own records when its anchor spilled, and the records of spilled sources the batch's lines reach through any chain of relationships, one-to-many details included. The batch's columns, per-line detail aggregates, selection predicates and candidate and detail evidence read those records. A detail output's parent reference reads only its parent's identity and reference, which the key record holds. Phase 4 clause 5 applies to every record read again.
+5. `limits.retained_bytes` counts a spilled source's key records. `limits.component_rows` and `limits.anchor_rows` apply to a spilled source as to a held one.
+6. The manifest's read record of a spilled source carries `spilled` as in phase 4.
+7. Results, evidence, diagnostics, bundle tables and `retained_result_bytes` are identical to phase 4 for the same inputs. Memory runs spill details too.
+
+Phase 5 does not change what a population or an allocation costs, or what a source reached by one costs. They are held whole. Process memory is still a measurement, not a bound.
