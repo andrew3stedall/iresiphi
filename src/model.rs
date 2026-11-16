@@ -287,9 +287,10 @@ pub struct Limits {
     pub batch_bytes: usize,
     /// Key values one transfer may send to a source (docs/spec/slice-5.md).
     pub transfer_keys: usize,
-    /// Serialized bytes of one lookup target's records held in memory. A larger
-    /// target keeps only its key records and reads the records a batch of
-    /// anchor lines matched when it needs them (docs/spec/slice-7.md, phase 4).
+    /// Serialized bytes of one relationship target's records held in memory,
+    /// for a lookup target or a one-to-many detail. A larger source keeps only
+    /// its key records and reads the records a batch of anchor lines needs
+    /// when it needs them (docs/spec/slice-7.md, phases 4 and 5).
     pub target_bytes: usize,
 }
 impl Default for Limits {

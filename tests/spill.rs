@@ -7,6 +7,7 @@ mod customer_month;
 mod invoice;
 #[path = "support/workbook.rs"]
 mod workbook_support;
+use customer_month::{equal, field, named, not, text as string_literal};
 use iresiphi::{ExecutionContext, RunReport, model::*};
 use serde_json::{Value as Json, json};
 use std::{collections::BTreeMap, path::Path, sync::atomic::AtomicBool};
@@ -292,15 +293,7 @@ fn orders_and_customers() -> (tempfile::TempDir, Recipe, Bindings, Policy) {
             settings: BTreeMap::from([("table".into(), json!("customers"))]),
         },
     );
-    let policy = Policy {
-        allowed_read_roots: vec![dir.path().into()],
-        allowed_output_roots: vec![dir.path().into()],
-        limits: Limits::default(),
-        diagnostic_values: false,
-        placement: Placement::Local,
-        transfers: Transfers::None,
-        evidence: Evidence::Full,
-    };
+    let policy = local_policy(dir.path());
     (dir, recipe, bindings, policy)
 }
 
@@ -335,17 +328,12 @@ fn a_sqlite_target_is_queried_at_its_source_unless_placement_is_local() {
 
 // --- Phase 5: one-to-many details and anchored targets -------------------------
 
-fn named(name: &str, expr: Json) -> Json {
-    json!({"name": name, "expr": expr})
-}
-fn field(source: &str, name: &str) -> Json {
-    json!({"op": "field", "source": source, "field": name})
-}
 /// A per-line aggregate over a one-to-many detail relationship.
 fn aggregate(relationship: &str, function: &str, input: Option<&str>) -> Json {
     json!({"op": "aggregate", "relationship": relationship, "function": function, "field": input})
 }
 
+/// Local placement, no transfers and full evidence.
 fn local_policy(dir: &Path) -> Policy {
     Policy {
         allowed_read_roots: vec![dir.into()],
@@ -366,7 +354,8 @@ const LEDGER_PARTS: &str =
 
 /// Lines with a one-to-many component detail, whose components have a
 /// one-to-many part detail. Lines are only an anchor, so they stream. k6 has
-/// no amount; k7 and p4 have no parent.
+/// no amount; k7 and p4 have no parent. The review drops L2 with an output
+/// filter, and components count the parts whose note is not `second`.
 fn ledger() -> (tempfile::TempDir, Recipe, Bindings, Policy) {
     let dir = tempfile::tempdir().unwrap();
     let mut bindings = Bindings::new();
@@ -410,7 +399,8 @@ fn ledger() -> (tempfile::TempDir, Recipe, Bindings, Policy) {
                 named("currency", field("lines", "currency")),
                 named("billed", field("lines", "billed")),
                 named("components", aggregate("line_components", "count_records", None)),
-                named("component_total", aggregate("line_components", "sum", Some("amount")))]},
+                named("component_total", aggregate("line_components", "sum", Some("amount")))],
+                "filter": not(equal(field("review", "id"), string_literal("L2")))},
             {"id": "by_month", "anchor": "lines", "group_by": ["currency", "month"],
                 "columns": [
                     named("currency", field("lines", "currency")),
@@ -423,7 +413,12 @@ fn ledger() -> (tempfile::TempDir, Recipe, Bindings, Policy) {
             {"id": "components_detail", "anchor": "components", "detail": true, "columns": [
                 named("id", field("components", "id")),
                 named("amount", field("components", "amount")),
-                named("parts", aggregate("component_parts", "count_records", None))]},
+                named("parts", aggregate("component_parts", "count_records", None)),
+                named("kept_parts", {
+                    let mut kept = aggregate("component_parts", "count_records", None);
+                    kept["filter"] = not(equal(field("parts", "note"), string_literal("second")));
+                    kept
+                })]},
             {"id": "parts_detail", "anchor": "parts", "detail": true, "columns": [
                 named("id", field("parts", "id")),
                 named("note", field("parts", "note"))]}]
@@ -459,7 +454,10 @@ fn spilled_details_do_not_change_aggregates_or_detail_outputs() {
     let l1 = row("review", "L1");
     assert_eq!(invoice::text(&l1["components"]), "3");
     assert_eq!(invoice::text(&l1["component_total"]), "6.00");
-    assert_eq!(invoice::text(&row("components_detail", "k1")["parts"]), "2");
+    let k1 = row("components_detail", "k1");
+    assert_eq!(invoice::text(&k1["parts"]), "2");
+    assert_eq!(invoice::text(&k1["kept_parts"]), "1");
+    assert_eq!(held.tables["review"].len(), 3, "the filter drops L2");
     assert_eq!(held.tables["components_detail"].len(), 7);
     assert_eq!(held.tables["parts_detail"].len(), 4);
     assert_eq!(
@@ -759,4 +757,22 @@ fn population_and_allocation_sources_stay_held() {
             "{id}"
         );
     }
+}
+
+/// Row limits apply to a spilled detail as to a held one: seven components
+/// exceed `limits.component_rows` either way, with the same diagnostic.
+#[test]
+fn row_limits_apply_to_a_spilled_detail_as_to_a_held_one() {
+    let (_dir, recipe, bindings, mut policy) = ledger();
+    policy.limits.component_rows = 6;
+    let held = invoice::run(&recipe, &bindings, &policy);
+    assert_eq!(held.status, "failed");
+    assert_eq!(held.diagnostics[0].code, "RESOURCE_LIMIT");
+    policy.limits.target_bytes = 0;
+    let spilled = invoice::run(&recipe, &bindings, &policy);
+    assert_eq!(spilled.status, "failed");
+    assert_eq!(
+        serde_json::to_value(&spilled.diagnostics).unwrap(),
+        serde_json::to_value(&held.diagnostics).unwrap()
+    );
 }
