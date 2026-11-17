@@ -177,6 +177,16 @@ or is missing from the SQLite snapshot fails the run with `SOURCE_CHANGED`. A
 source changed on disk is never seen, so unit tests in `src/adapters.rs` damage
 the run's own store to reach that check.
 
+Phases 6 and 7 are specified, not built. The developer decided on 2026-11-18
+that explicit populations and allocations should be bounded too. A
+customer/month workload (10,000 customers, 12 months, about 350,000
+transactions) lands first and records a baseline with everything held. Phase 6
+runs allocation and activity coverage in member batches, so the sources those
+outputs reach can spill, and keeps only the distinct periods of a period source.
+Phase 7 derives members from their recipient and period instead of storing
+them, and spills a recipient source over the budget. An allocation's quantity
+source stays held, and allocation keeps one entry per member.
+
 ## Remaining scope
 
 The broad product specification
