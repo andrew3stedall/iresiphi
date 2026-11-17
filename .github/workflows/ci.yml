@@ -116,6 +116,8 @@ jobs:
         run: bash scripts/ci/test-arm-wheels.sh
       - name: Measure complete 100,000-line workload and cancellation
         run: bash scripts/ci/workload.sh
+      - name: Measure customer/month population and allocation workload
+        run: bash scripts/ci/customer-month-workload.sh
       - name: Preserve workload evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

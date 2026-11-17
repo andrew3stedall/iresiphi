@@ -12,7 +12,7 @@ A run read every record of every source into memory before doing anything else. 
 
 ## Phases
 
-Each phase ships on its own, keeps every result, diagnostic, evidence record and serialized byte count identical, and is measured on the 100,000-line workload.
+Each phase ships on its own, keeps every result, diagnostic, evidence record and serialized byte count identical, and is measured on the 100,000-line workload. Phases 6 and 7 are measured on the customer/month workload instead, because the 100,000-line workload declares no explicit population or allocation.
 
 1. **Deferred pipeline and compact records** (done).
    - `Pipeline` in Rust, `iresiphi.plan(recipe, bindings, policy)` in Python and `plan(...)` in Node own copies of their declarations. Building and explaining one opens no source. `collect()` runs and keeps the results in memory; `run(destination)` runs and delivers a bundle. Each call reads the sources as they are then.
@@ -21,7 +21,9 @@ Each phase ships on its own, keeps every result, diagnostic, evidence record and
 2. **Streamed delivery** (done). A bundle run writes output rows and evidence to its staging directory as it produces them, instead of holding the tables until the end. Totals and counts accumulate as rows pass. `collect()` still keeps results, because that is what it is for.
 3. **Streamed anchors** (done). A source read only as an output's anchor is not held. The run keeps each record's key fields and reference, which is all that lookups and the checks over every anchor record (identity, one-to-one exclusivity, strict cardinality, detail parents) read, and each output decodes the anchor's records again in batches. Only lookup targets, detail sources and populations are held whole.
 4. **Targets larger than memory** (done). A lookup target over `limits.target_bytes` keeps only its key records. Each batch of anchor lines reads the target records it reaches, from a temporary file or, for a SQLite target where placement allows, from the source's snapshot.
-5. **Detail sources larger than memory** (this change). The phase 4 budget and stores apply to one-to-many detail sources too, and to a relationship target that outputs also anchor at. Each output reads its own anchor records, when they spilled, in the same batches.
+5. **Detail sources larger than memory** (done). The phase 4 budget and stores apply to one-to-many detail sources too, and to a relationship target that outputs also anchor at. Each output reads its own anchor records, when they spilled, in the same batches.
+6. **Bounded population activity** (specified). A customer/month workload lands first and records the baseline. Allocation and activity coverage then run in batches of population members, so sources that population and allocating outputs reach can spill. A period source keeps only its distinct periods.
+7. **Derived members and bounded recipients** (specified). Population members are derived from their recipient and period instead of stored, and a recipient source over the budget spills.
 
 ## Contract for phase 1
 
@@ -88,3 +90,35 @@ The developer decided on 2026-11-17, choosing among the open items put to them, 
 7. Results, evidence, diagnostics, bundle tables and `retained_result_bytes` are identical to phase 4 for the same inputs. Memory runs spill details too.
 
 Phase 5 does not change what a population or an allocation costs, or what a source reached by one costs. They are held whole. Process memory is still a measurement, not a bound.
+
+## Customer/month workload
+
+The developer decided on 2026-11-18, choosing among the options put to them, that explicit populations and allocations should be bounded like the sources phases 3 to 5 bound, in two phases, measured on a new workload. Before phase 6, no population or allocation input could be larger than memory: members, recipients, period sources, allocation quantities and every source a population or allocating output reached were held whole. This is a developer decision.
+
+The workload ships on its own, before phase 6, so that hosted x86 records a baseline in which everything is still held.
+
+1. `scripts/generate_fixture.py --workload customer-month` generates a customer/month workload with the recipe of `examples/customer_month.iresiphi`: 8,000 customers across four sales areas, 12 months taken from the targets' periods, 350,000 transactions dated in those months, and a regional target for each area and month. The 96,000 members stay under the default `limits.anchor_rows`, so the workload runs under default limits. One output anchors at the explicit population with summed sales, a transaction count, the broadcast target and an allocated target under `largest_remainder`.
+2. The generator states the expected totals: sales equal the transaction total, and the allocated total equals the target total.
+3. CI runs the workload on both architectures beside the 100,000-line workload (`scripts/ci/customer-month-workload.sh`), checks those totals, member and partition counts and conservation, and records peak RSS the same way.
+
+## Contract for phase 6
+
+1. A source can spill when it is the target of at least one relationship, no population takes recipients from it and no allocation takes a quantity from it. Outputs that allocate or anchor at an explicit population may reach it through relationships. The rest of phase 5 clause 1 is unchanged. An allocation's quantity source is held.
+2. Allocation reads the population members in batches of `limits.batch_rows`. Before each batch the run reads the records of spilled sources that the batch's members reach, as phase 5 clause 4 does for anchor lines. The recipient filter and weight read those records. Phase 4 clause 5 applies to every record read again.
+3. Allocation keeps one entry per member until it has assigned every partition: identity, recipient flag, weight, partition, currency and the outcomes of the lookups its weight read. `limits.retained_bytes` counts these entries.
+4. Activity coverage, the matched and unmatched activity per relationship from an explicit population, is counted over key records. Its samples are source references, which key records hold.
+5. A source that a population takes periods from is not held for that reason. Its first read runs every check a held read runs, takes the distinct periods and fails with `INVALID_PERIOD` as before. If nothing else reads the source, the run keeps only those periods. Otherwise its other uses decide whether it is held, streamed or spilled.
+6. Members are still stored, and `limits.retained_bytes` still counts them. `limits.anchor_rows` still counts a population's members before any is created.
+7. The manifest's read record of a spilled source carries `spilled` as in phase 4. A source read only for periods records the number of distinct periods it gave. Each allocation's summary gives its entry count and their bytes.
+8. Results, evidence, diagnostics, bundle tables and `retained_result_bytes` are identical to phase 5 for runs within their limits. Because spilled sources count only their key records and allocation entries now count, a run near `limits.retained_bytes` may pass or fail where phase 5 did not. Memory runs bound populations too.
+
+## Contract for phase 7
+
+1. Members are derived, not stored. Member `n` of a population with `P` periods is eligible recipient `n / P` (integer division) in period `n mod P`: recipients in read order, periods in the population's order, as members are numbered today. A member's fields, reference and original values are those a stored member has, built when a batch reads it.
+2. A population's recipient source can spill under `limits.target_bytes` like a phase 4 target, unless an allocation takes a quantity from it. The first read evaluates the population filter on every full record and keeps the positions of eligible recipients. The key record also holds the fields that relationships from the population key on.
+3. Each batch of member lines, and each allocation batch, first reads its recipients' records when they spilled, then the records of spilled sources the members reach. Phase 4 clause 5 applies.
+4. `limits.retained_bytes` counts a spilled recipient source's key records and no member bytes. `limits.anchor_rows` counts members before any batch is read.
+5. The manifest's population record states that members are derived. A spilled recipient source's read record carries `spilled` as in phase 4.
+6. Results, evidence, diagnostics, bundle tables and `retained_result_bytes` are identical to phase 6 for runs within their limits. Members no longer count toward `limits.retained_bytes`, so the boundary moves again. Memory runs derive members too.
+
+Phases 6 and 7 do not change what an allocation's quantity source costs. It is the coarse grain and is held whole. Allocation keeps one entry per member, because a partition's weights must be summed before any share is assigned. Process memory is still a measurement, not a bound.

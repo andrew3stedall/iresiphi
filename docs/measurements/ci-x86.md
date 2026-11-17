@@ -336,3 +336,38 @@ ARM artifact was not downloaded, so there is no ARM peak to compare against.
 
 GitHub reports an expiry of 2027-02-14 for these artifacts. Evidence for this
 commit does not certify later heads; their own PR checks remain authoritative.
+
+## Customer/month workload baseline: verified on both architectures
+
+[PR #45](https://github.com/andrew3stedall/iresiphi/pull/45), commit
+`12dc5a62ebcd666847e00d9eb925ade03262e970`, passed all eight jobs in
+[run 44176529565](https://github.com/andrew3stedall/iresiphi/actions/runs/44176529565)
+on 2026-11-17. It adds the customer/month workload that slice 7 phases 6 and 7
+are measured against, and changes no executor code, so every population input
+is still held.
+
+The workload (fixture `e723f04e…2cd2e0`) reads 11,468,605 bytes: 8,000
+customers, 48 regional targets and 350,000 transactions. Its population has
+96,000 members, of which 64,000 have no transactions and take the declared
+complete sum 0. The run succeeded with no diagnostics. Every member resolved,
+all 350,000 transactions matched a member, sales totalled 71,748,250.00, and the
+allocated target conserved 4,874,640.00 across 48 partitions. Evidence at the
+default level holds the 48 allocation partitions only. Serialized results are
+45,840,368 bytes, and the bundle wrote 5,264,101 bytes on x86 and 5,264,098 on
+ARM; the difference is timing digits in `manifest.json`.
+
+Process peak RSS was 1,184,505,856 bytes on x86 and 1,176,399,872 bytes on ARM,
+against 414,814,208 and 406,921,216 bytes for the 100,000-line workload in the
+same jobs. The customer/month input is a sixth the size of the larger
+workload, but nothing in it streams or spills: members, customers,
+transactions and targets are all held. `run_bundle` took 4.7 s on x86 and
+4.6 s on ARM. Execution took 2.8 s of the x86 run and parsing 0.8 s.
+
+| Artifact | ID | SHA-256 digest |
+| --- | --- | --- |
+| x86-distributions | 14371900594 | `b6c313eba52774221530aa9fa54e9985d2ef2241bebe457bc081a0c77615b373` |
+| x86-workload (including customer/month) | 14370362562 | `841380a98eb87e38957d650107b96eab6f5124bf7548e9f37658e6a5a62c8855` |
+| arm-workload (including customer/month and installed ARM wheels) | 14369483991 | `9a563460caa40546a67277a7d174a1499dd7ff76d9f408061df178f2cddd6fd2` |
+
+GitHub reports an expiry of 2027-02-15 for these artifacts. Evidence for this
+commit does not certify later heads; their own PR checks remain authoritative.

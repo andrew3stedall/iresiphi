@@ -50,6 +50,20 @@ The records eligible to appear in an output before final selection, determined b
 **Output anchor**:
 The source records that establish an output's population and identity, independently of whether related records match.
 
+**Explicit population**:
+Declared recipients crossed with a declared, finite set of periods, used as an output's anchor. It is never inferred from activity or from the requested grain.
+_Avoid_: population (alone, where it could mean an output population)
+
+**Population member**:
+One recipient in one period of an explicit population.
+_Avoid_: member row
+
+**Recipient**:
+A record of the source that an explicit population or an allocation distributes over.
+
+**Activity**:
+Finer records joined to population members by declared keys and a declared period derivation. Activity that matches no member is counted and never widens the population.
+
 **Source record reference**:
 A reference to a particular observation in a bound dataset, distinct from the business identity that may persist across runs.
 
