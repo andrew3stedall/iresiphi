@@ -97,9 +97,9 @@ The developer decided on 2026-11-18, choosing among the options put to them, tha
 
 The workload ships on its own, before phase 6, so that hosted x86 records a baseline in which everything is still held.
 
-1. `scripts/generate_fixture.py` generates a customer/month workload in the shape of `examples/customer_month.iresiphi`: 10,000 customers across a few sales areas, 12 months, about 350,000 transactions dated in those months, and a regional target for each area and month. One output anchors at the explicit population with summed sales, a transaction count, the broadcast target and an allocated target under `largest_remainder`.
+1. `scripts/generate_fixture.py --workload customer-month` generates a customer/month workload with the recipe of `examples/customer_month.iresiphi`: 8,000 customers across four sales areas, 12 months taken from the targets' periods, 350,000 transactions dated in those months, and a regional target for each area and month. The 96,000 members stay under the default `limits.anchor_rows`, so the workload runs under default limits. One output anchors at the explicit population with summed sales, a transaction count, the broadcast target and an allocated target under `largest_remainder`.
 2. The generator states the expected totals: sales equal the transaction total, and the allocated total equals the target total.
-3. CI runs the workload on both architectures beside the 100,000-line workload, checks those totals, and records peak RSS the same way.
+3. CI runs the workload on both architectures beside the 100,000-line workload (`scripts/ci/customer-month-workload.sh`), checks those totals, member and partition counts and conservation, and records peak RSS the same way.
 
 ## Contract for phase 6
 

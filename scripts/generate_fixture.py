@@ -12,6 +12,12 @@ lines carry their own invoice identifier (a new invoice every 100 generated
 lines, so 50 lines per invoice). Line i has i % 4
 observed components (0 to 3), so component counts vary from line to line. Line 3 has
 an unmapped item and stays unresolved. Every line has an XLSX enrichment row.
+
+With --workload customer-month it writes the customer/month workload instead
+(docs/spec/slice-7.md): the recipe of examples/customer_month.iresiphi over
+--customers customers in four sales areas, twelve months of 2026 taken from the
+targets' periods, and --transactions transactions spread over those months.
+Example: python scripts/generate_fixture.py /tmp/iresiphi-cm --workload customer-month
 """
 import argparse
 import csv
@@ -141,13 +147,68 @@ def generate(root, count, byte_limit=None, evidence=None):
     write_json(root / "fixture-manifest.json", evidence)
     print(json.dumps(evidence, indent=2))
 
+CUSTOMER_MONTH_SEED = "iresiphi-customer-month-v1"
+AREAS = ["North", "South", "East", "West"]
+MONTHS = [f"2026-{month:02d}" for month in range(1, 13)]
+
+def customer_month_recipe():
+    """examples/customer_month.iresiphi with its periods taken from the targets."""
+    recipe = json.loads((Path(__file__).resolve().parent.parent / "examples" / "customer_month.iresiphi").read_text(encoding="utf-8"))
+    recipe["name"] = "customer month workload"
+    (population,) = recipe["populations"]
+    population["period"] = {"field": "month", "calendar": "month", "from": {"source": "targets", "field": "Period"}}
+    recipe["annotations"] = {"fixture_seed": CUSTOMER_MONTH_SEED}
+    return recipe
+
+def generate_customer_month(root, customers, transactions, byte_limit=None):
+    """Customer c sits in area c % 4 with share c % 5 + 1. Transaction i belongs to
+    customer i % customers and falls in month (i // customers + i) % 12 + 1 on
+    day i % 28 + 1, with gross (5 + i * 13 % 400) dollars and (i * 37 % 100) cents.
+    Every area has a target in every month, so every member resolves."""
+    root.mkdir(parents=True, exist_ok=True)
+    write_csv(root / "customers.csv", ["CustNo", "SalesArea", "Share"], [(f"C{c:05d}", AREAS[c % len(AREAS)], str(c % 5 + 1)) for c in range(customers)])
+    rows, cents = [], 0
+    for i in range(transactions):
+        month = (i // customers + i) % 12 + 1
+        amount = (5 + i * 13 % 400) * 100 + i * 37 % 100
+        cents += amount
+        rows.append((f"t{i + 1}", f"C{i % customers:05d}", f"2026-{month:02d}-{i % 28 + 1:02d}", f"{amount // 100}.{amount % 100:02d}"))
+    write_csv(root / "transactions.csv", ["receipt_id", "buyer_ref", "booked_at", "gross"], rows)
+    targets, goal_cents = [], 0
+    for a, area in enumerate(AREAS):
+        for m, month in enumerate(MONTHS):
+            goal = 100_000 + 1_000 * a + 10 * m
+            goal_cents += goal * 100
+            targets.append((area, month, f"{goal}.00"))
+    write_csv(root / "targets.csv", ["Territory", "Period", "Goal"], targets)
+    write_json(root / "recipe.iresiphi", customer_month_recipe())
+    bindings = {id: {"path": str(root / f"{id}.csv"), "adapter": "csv", "settings": {}} for id in ["customers", "transactions", "targets"]}
+    write_json(root / "bindings.json", bindings)
+    write_json(root / "policy.json", {"allowed_read_roots": [str(root)], "allowed_output_roots": [str(root)], "limits": {} if byte_limit is None else {"output_bytes": byte_limit, "retained_bytes": byte_limit}, "diagnostic_values": False})
+    names = ["customers.csv", "transactions.csv", "targets.csv", "recipe.iresiphi"]
+    inputs = {name: {"sha256": hashlib.sha256((root / name).read_bytes()).hexdigest(), "bytes": (root / name).stat().st_size} for name in names}
+    fixture_sha256 = hashlib.sha256(json.dumps({name: entry["sha256"] for name, entry in inputs.items()}, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    money = lambda c: f"{c // 100}.{c % 100:02d}"
+    members = customers * len(MONTHS)
+    evidence = {"seed": CUSTOMER_MONTH_SEED, "fixture_sha256": fixture_sha256, "workload": "customer-month", "customer_count": customers, "transaction_count": transactions, "target_count": len(targets), "expected": {"members": members, "partitions": len(targets), "sales": money(cents), "transactions": str(transactions), "allocated_target": money(goal_cents)}, "inputs": inputs}
+    write_json(root / "fixture-manifest.json", evidence)
+    print(json.dumps(evidence, indent=2))
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     parser.add_argument("--lines", type=int, default=3)
     parser.add_argument("--byte-limit", type=int, default=None, help="set the policy's output_bytes and retained_bytes limits (the 100,000-line workload uses 1073741824)")
     parser.add_argument("--evidence", choices=["problems", "full"], default=None, help="set the policy's evidence level (the default records only lines that did not resolve; full at 100,000 lines needs --byte-limit 1073741824)")
+    parser.add_argument("--workload", choices=["invoice", "customer-month"], default="invoice", help="which workload to write (default: the two-supplier invoice review)")
+    parser.add_argument("--customers", type=int, default=8000, help="customer-month only: customers; 8,000 customers make 96,000 members, under the default limits.anchor_rows")
+    parser.add_argument("--transactions", type=int, default=350000, help="customer-month only: transactions")
     args = parser.parse_args()
-    if args.lines < 3:
-        parser.error("--lines must be at least 3")
-    generate(args.directory.resolve(), args.lines, args.byte_limit, args.evidence)
+    if args.workload == "customer-month":
+        if args.customers < 1 or args.transactions < 0:
+            parser.error("--customers must be at least 1 and --transactions at least 0")
+        generate_customer_month(args.directory.resolve(), args.customers, args.transactions, args.byte_limit)
+    else:
+        if args.lines < 3:
+            parser.error("--lines must be at least 3")
+        generate(args.directory.resolve(), args.lines, args.byte_limit, args.evidence)
