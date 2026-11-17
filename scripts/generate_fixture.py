@@ -164,7 +164,9 @@ def generate_customer_month(root, customers, transactions, byte_limit=None):
     """Customer c sits in area c % 4 with share c % 5 + 1. Transaction i belongs to
     customer i % customers and falls in month (i // customers + i) % 12 + 1 on
     day i % 28 + 1, with gross (5 + i * 13 % 400) dollars and (i * 37 % 100) cents.
-    Every area has a target in every month, so every member resolves."""
+    Every area has a target in every month, so every member resolves. Each customer
+    buys in four of the twelve months, so at the default size 64,000 of the 96,000
+    members have no activity and take the declared-complete sum 0 and count 0."""
     root.mkdir(parents=True, exist_ok=True)
     write_csv(root / "customers.csv", ["CustNo", "SalesArea", "Share"], [(f"C{c:05d}", AREAS[c % len(AREAS)], str(c % 5 + 1)) for c in range(customers)])
     rows, cents = [], 0

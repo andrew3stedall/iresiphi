@@ -180,7 +180,9 @@ the run's own store to reach that check.
 Phases 6 and 7 are specified, not built. The developer decided on 2026-11-18
 that explicit populations and allocations should be bounded too. A
 customer/month workload (8,000 customers, 12 months, 350,000 transactions)
-lands first and records a baseline with everything held. Phase 6
+lands first and records a baseline with everything held. On hosted x86 its
+peak was 1.18 GB at `12dc5a6`, from 11.5 MB of input (see the
+[baseline run](measurements/ci-x86.md#customermonth-workload-baseline-verified-on-both-architectures)). Phase 6
 runs allocation and activity coverage in member batches, so the sources those
 outputs reach can spill, and keeps only the distinct periods of a period source.
 Phase 7 derives members from their recipient and period instead of storing
