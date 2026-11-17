@@ -172,6 +172,11 @@ at `ef87766` (see the
 [verified run](measurements/ci-x86.md#slice-7-phase-5-verified-on-both-architectures)).
 The saving is small because a component keeps four of its five fields as keys.
 
+A spilled record read again that no longer decodes, sits at another position,
+or is missing from the SQLite snapshot fails the run with `SOURCE_CHANGED`. A
+source changed on disk is never seen, so unit tests in `src/adapters.rs` damage
+the run's own store to reach that check.
+
 ## Remaining scope
 
 The broad product specification

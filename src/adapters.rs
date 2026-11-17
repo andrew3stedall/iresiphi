@@ -3297,3 +3297,169 @@ fn inspect_schema(
     }
     Ok(())
 }
+
+/// A spilled record read again must be the record the first read stored
+/// (docs/spec/slice-7.md, phase 4 clause 5). A source changed on disk is never
+/// seen, so these tests damage the run's own store to reach the guard.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::FileExt;
+
+    const ORDERS: &str = "order_no,cust\nO1,C1\nO2,C2\nO3,C3\n";
+    const CUSTOMERS: &str = "CustNo,SalesArea\nC1,North\nC2,South\nC3,East\n";
+
+    /// Orders reach customers through a to-one relationship; customers spill.
+    fn spilled_customers(
+        adapter: &str,
+        placement: Placement,
+    ) -> (tempfile::TempDir, Vec<Row>, Streams) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("orders.csv"), ORDERS).unwrap();
+        let customers = if adapter == "sqlite" {
+            let path = root.join("crm.db");
+            rusqlite::Connection::open(&path)
+                .unwrap()
+                .execute_batch(
+                    "CREATE TABLE customers (CustNo TEXT, SalesArea TEXT);
+                     INSERT INTO customers VALUES ('C1','North'),('C2','South'),('C3','East');",
+                )
+                .unwrap();
+            path
+        } else {
+            let path = root.join("customers.csv");
+            std::fs::write(&path, CUSTOMERS).unwrap();
+            path
+        };
+        let column = |p: &str| serde_json::json!({"path":p,"data_type":{"kind":"string"}});
+        let recipe: Recipe = serde_json::from_value(serde_json::json!({
+            "format_version":"0.1", "name":"orders",
+            "sources":[
+                {"id":"orders","identity":["order_no"],"grain":["order_no"],"projection":{"fields":{
+                    "order_no":column("order_no"),"cust":column("cust")}}},
+                {"id":"customers","identity":["CustNo"],"grain":["CustNo"],"projection":{"fields":{
+                    "CustNo":column("CustNo"),"SalesArea":column("SalesArea")}}}],
+            "relationships":[{"id":"customer","from":"orders","to":"customers",
+                "from_keys":["cust"],"to_keys":["CustNo"],"cardinality":"many_to_one"}],
+            "outputs":[{"id":"orders_out","anchor":"orders","columns":[
+                {"name":"area","expr":{"op":"field","source":"customers","field":"SalesArea","path":["customer"]}}
+            ]}]
+        }))
+        .unwrap();
+        let mut bindings = Bindings::new();
+        bindings.insert(
+            "orders".into(),
+            Binding {
+                path: root.join("orders.csv"),
+                adapter: "csv".into(),
+                settings: BTreeMap::new(),
+            },
+        );
+        bindings.insert(
+            "customers".into(),
+            Binding {
+                path: customers,
+                adapter: adapter.into(),
+                settings: if adapter == "sqlite" {
+                    BTreeMap::from([("table".into(), serde_json::json!("customers"))])
+                } else {
+                    BTreeMap::new()
+                },
+            },
+        );
+        let mut policy = Policy {
+            allowed_read_roots: vec![root.clone()],
+            allowed_output_roots: vec![root],
+            limits: Limits::default(),
+            diagnostic_values: false,
+            placement,
+            transfers: Transfers::None,
+            evidence: Evidence::Full,
+        };
+        policy.limits.target_bytes = 0;
+        let (mut rows, _, streams) = read_for_run(
+            &recipe,
+            &bindings,
+            &policy,
+            &AtomicBool::new(false),
+            &BTreeSet::new(),
+            &BTreeSet::from(["customers".to_string()]),
+        )
+        .unwrap();
+        assert!(streams.spilled("customers"));
+        let keys = rows.remove("customers").unwrap();
+        assert_eq!(keys.len(), 3);
+        (dir, keys, streams)
+    }
+
+    fn file_store(streams: &mut Streams) -> (&File, &mut Vec<u64>) {
+        match &mut streams.targets.get_mut("customers").unwrap().store {
+            Store::File { file, offsets } => (file, offsets),
+            Store::Snapshot => panic!("customers was not spilled to a file"),
+        }
+    }
+
+    fn assert_changed(result: Result<Vec<Row>>) {
+        match result {
+            Err(error) => {
+                assert_eq!(error.code, "SOURCE_CHANGED", "{}", error.message);
+                assert_eq!(error.subject.as_deref(), Some("source:customers"));
+            }
+            Ok(rows) => panic!("a changed record was read again: {rows:?}"),
+        }
+    }
+
+    #[test]
+    fn an_undamaged_spilled_record_reads_again() {
+        let (_dir, keys, streams) = spilled_customers("csv", Placement::Local);
+        let rows = streams
+            .fetch("customers", &keys, &[0, 2], &AtomicBool::new(false))
+            .unwrap();
+        let locations: Vec<_> = rows.iter().map(|r| r.reference.location.clone()).collect();
+        assert_eq!(
+            locations,
+            [&keys[0], &keys[2]].map(|k| k.reference.location.clone())
+        );
+    }
+
+    #[test]
+    fn a_spilled_record_that_no_longer_decodes_is_a_changed_source() {
+        let (_dir, keys, mut streams) = spilled_customers("csv", Placement::Local);
+        let (file, offsets) = file_store(&mut streams);
+        let start = offsets[1];
+        file.write_all_at(b"\xff\xff\xff", start).unwrap();
+        assert_changed(streams.fetch("customers", &keys, &[1], &AtomicBool::new(false)));
+    }
+
+    #[test]
+    fn a_spilled_record_at_another_position_is_a_changed_source() {
+        let (_dir, keys, mut streams) = spilled_customers("csv", Placement::Local);
+        let (_, offsets) = file_store(&mut streams);
+        // Record 0's span now holds record 1, which decodes but is elsewhere.
+        offsets.remove(0);
+        assert_changed(streams.fetch("customers", &keys, &[0], &AtomicBool::new(false)));
+    }
+
+    #[test]
+    fn a_snapshot_record_no_longer_found_is_a_changed_source() {
+        let (dir, keys, mut streams) = spilled_customers("sqlite", Placement::PreferSource);
+        assert!(matches!(
+            streams.targets["customers"].store,
+            Store::Snapshot
+        ));
+        let smaller = dir.path().join("smaller.db");
+        rusqlite::Connection::open(&smaller)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE customers (CustNo TEXT, SalesArea TEXT);
+                 INSERT INTO customers VALUES ('C1','North');",
+            )
+            .unwrap();
+        let bytes = std::fs::read(&smaller).unwrap();
+        for snapshot in streams.snapshots.values_mut() {
+            snapshot.conn = sqlite::open(&bytes).unwrap();
+        }
+        assert_changed(streams.fetch("customers", &keys, &[1, 2], &AtomicBool::new(false)));
+    }
+}
