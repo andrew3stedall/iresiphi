@@ -191,8 +191,11 @@ partition, so the workload's 350,000 transactions can spill. Allocation keeps on
 member, each allocation's summary gives the entry count and bytes, and the
 entries count toward `limits.retained_bytes`. A source read only for a
 population's periods keeps only its distinct periods. Recipients, members and
-allocation quantities are still held. Cases are in `tests/spill.rs`; the
-workload's hosted measurement is pending.
+allocation quantities are still held. Cases are in `tests/spill.rs`. On hosted
+x86 the workload's transactions spilled, its results matched the baseline, and
+its peak fell from 1.18 GB to 0.93 GB at `f409d2d`, while `run_bundle` rose
+from 4.7 s to 6.5 s (see the
+[verified run](measurements/ci-x86.md#slice-7-phase-6-verified-on-both-architectures)).
 
 Phase 7 derives members from their recipient and period instead of storing
 them, and spills a recipient source over the budget. An allocation's quantity
