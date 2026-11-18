@@ -262,10 +262,13 @@ fn materialize_sources(
     mut reads: Option<&mut BTreeMap<String, SourceRead>>,
     streamed: &BTreeSet<String>,
     spillable: &BTreeSet<String>,
+    periods_only: &BTreeSet<String>,
 ) -> Result<(BTreeMap<String, Vec<Row>>, Streams)> {
     let mut result = BTreeMap::new();
     let mut deferred = BTreeMap::new();
     let mut targets = BTreeMap::new();
+    let mut periods = BTreeMap::new();
+    let mut period_records = 0usize;
     let mut total = 0;
     let mut expanded = 0;
     let mut retained = 0usize;
@@ -453,9 +456,14 @@ fn materialize_sources(
         // A SQLite target is queried again at its snapshot when placement
         // allows work at the source.
         let spilling = !streaming && spillable.contains(&source.id);
+        // A source read only for a population's periods keeps only its
+        // distinct periods (phase 6). Its first read checks every record and
+        // keeps key records until those periods are taken.
+        let period_only = !streaming && !spilling && periods_only.contains(&source.id);
         let at_source = binding.adapter == "sqlite" && policy.placement != Placement::Local;
         let mut held = RowCollector::new(&admission);
-        let mut keyed = streaming.then(|| KeyCollector::new(recipe, source, &admission));
+        let mut keyed =
+            (streaming || period_only).then(|| KeyCollector::new(recipe, source, &admission));
         let mut target =
             spilling.then(|| TargetCollector::new(recipe, source, &admission, at_source));
         let sink: &mut dyn RowSink = match (keyed.as_mut(), target.as_mut()) {
@@ -554,11 +562,13 @@ fn materialize_sources(
                 batch_bytes <= policy.limits.batch_bytes,
                 "decoded batch bytes",
             )?;
-            retained = retained.saturating_add(size);
-            limit(
-                retained <= policy.limits.retained_bytes,
-                "retained source materialization bytes",
-            )?;
+            if !period_only {
+                retained = retained.saturating_add(size);
+                limit(
+                    retained <= policy.limits.retained_bytes,
+                    "retained source materialization bytes",
+                )?;
+            }
         }
         let duplicates: Vec<usize> = identities
             .into_values()
@@ -593,6 +603,11 @@ fn materialize_sources(
             .with_check("data.identity")
             .with_affected(affected.len(), affected.iter().map(|&i| &rows[i].reference))
             .with_values(policy.diagnostic_values, values));
+        }
+        for field in period_fields(recipe, &source.id) {
+            periods
+                .entry((source.id.clone(), field.clone()))
+                .or_insert_with(|| Periods::from_rows(&rows, field));
         }
         if let Some(reads) = reads.as_deref_mut() {
             reads.insert(
@@ -638,6 +653,17 @@ fn materialize_sources(
                     spilled: spill
                         .as_ref()
                         .map(|store| store.describe(recipe, source, rows.len(), policy)),
+                    periods: period_only.then(|| {
+                        serde_json::json!({
+                            "distinct": period_fields(recipe, &source.id)
+                                .map(|field| {
+                                    let found = &periods[&(source.id.clone(), field.clone())];
+                                    (field.clone(), serde_json::json!(found.distinct.len()))
+                                })
+                                .collect::<serde_json::Map<_, _>>(),
+                            "statement": "The source is read only for a population's periods. Every record was checked as a held source's would be; only the distinct periods are kept.",
+                        })
+                    }),
                 },
             );
         }
@@ -668,6 +694,10 @@ fn materialize_sources(
                 },
             );
         }
+        if period_only {
+            period_records += rows.len();
+            rows = Vec::new();
+        }
         result.insert(source.id.clone(), rows);
     }
     // A streamed SQLite anchor, and a target queried at its source, read the
@@ -689,6 +719,8 @@ fn materialize_sources(
             sources: deferred,
             targets,
             snapshots,
+            periods,
+            period_records,
         },
     ))
 }
@@ -734,6 +766,11 @@ pub struct SourceRead {
     /// (docs/spec/slice-7.md, phase 4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spilled: Option<serde_json::Value>,
+    /// Present when the source was read only for a population's periods: the
+    /// number of distinct periods each field gave (docs/spec/slice-7.md,
+    /// phase 6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub periods: Option<serde_json::Value>,
 }
 
 /// Concrete capabilities of the built-in source readers. Describing a reader
@@ -916,9 +953,11 @@ impl RowSink for RowCollector<'_> {
     }
 }
 
-/// Fields a streamed anchor keeps of each record: its identity and the fields
-/// its relationships key on (docs/spec/slice-7.md, phase 3). Lookups, transfers,
-/// identity checks and detail parents read nothing else of an anchor record.
+/// Fields a streamed anchor keeps of each record: its identity, the fields
+/// its relationships key on (docs/spec/slice-7.md, phase 3) and the fields a
+/// population takes its periods from (phase 6). Lookups, transfers, identity
+/// checks, detail parents and period sets read nothing else of an anchor
+/// record.
 pub(crate) fn key_fields(recipe: &Recipe, source: &Source) -> crate::record::FieldNames {
     let mut names: BTreeSet<&String> = source.identity.iter().collect();
     for rel in recipe.relationships.iter().filter(|r| r.from == source.id) {
@@ -926,6 +965,7 @@ pub(crate) fn key_fields(recipe: &Recipe, source: &Source) -> crate::record::Fie
         names.extend(rel.validity.as_ref().map(|v| &v.date));
         names.extend(rel.period.as_ref().map(|p| &p.key));
     }
+    names.extend(period_fields(recipe, &source.id));
     std::sync::Arc::new(
         names
             .into_iter()
@@ -948,6 +988,47 @@ fn key_record(row: &Row, keep: &crate::record::FieldNames) -> Row {
         }
     }
     kept
+}
+
+/// Fields of source `id` that populations take their periods from.
+fn period_fields<'r>(recipe: &'r Recipe, id: &str) -> impl Iterator<Item = &'r String> {
+    recipe
+        .populations
+        .iter()
+        .filter_map(|p| p.period.from.as_ref())
+        .filter(move |from| from.source == id)
+        .map(|from| &from.field)
+}
+
+/// The period set one field of a source gives a population
+/// (docs/spec/slice-7.md, phase 6): its distinct calendar months, and the
+/// records whose value is not one, counted with capped samples.
+#[derive(Debug, Default)]
+pub(crate) struct Periods {
+    pub(crate) distinct: BTreeSet<String>,
+    pub(crate) invalid: usize,
+    pub(crate) samples: Vec<SourceReference>,
+}
+impl Periods {
+    fn from_rows(rows: &[Row], field: &str) -> Self {
+        let mut periods = Self::default();
+        for row in rows {
+            match row.fields.get(field) {
+                Some(Value::String { value }) if crate::validation::calendar_month(value) => {
+                    if !periods.distinct.contains(value) {
+                        periods.distinct.insert(value.clone());
+                    }
+                }
+                _ => {
+                    periods.invalid += 1;
+                    if periods.samples.len() < Error::SAMPLE_CAP {
+                        periods.samples.push(row.reference.clone());
+                    }
+                }
+            }
+        }
+        periods
+    }
 }
 
 /// Fields a relationship target over `limits.target_bytes` keeps of each
@@ -1328,18 +1409,32 @@ struct Deferred {
     rows: usize,
 }
 
-/// Streamed anchors of one run (docs/spec/slice-7.md, phase 3). The executor
-/// holds their key records only; each output anchored at one reads its records
-/// again from here, in batches. Every read decodes the same bytes, so every
-/// read sees the records the first read checked.
+/// What a run's first read leaves for later reads (docs/spec/slice-7.md):
+/// streamed anchors (phase 3), whose key records the executor holds and whose
+/// records each output reads again from here in batches; spilled relationship
+/// targets (phases 4 and 5); and the period sets of population period sources
+/// (phase 6). Every read decodes the same bytes, so every read sees the
+/// records the first read checked.
 #[derive(Default)]
 pub(crate) struct Streams {
     sources: BTreeMap<String, Deferred>,
     /// Relationship targets over `limits.target_bytes` (phases 4 and 5).
     targets: BTreeMap<String, Target>,
     snapshots: BTreeMap<Vec<u8>, SqliteSnapshot>,
+    /// Period sets taken by the first read, by source and field (phase 6).
+    periods: BTreeMap<(String, String), Periods>,
+    /// Records of sources read only for periods, which are not kept.
+    period_records: usize,
 }
 impl Streams {
+    /// The period set field `field` of source `source` gave its first read.
+    pub(crate) fn periods(&self, source: &str, field: &str) -> Option<&Periods> {
+        self.periods.get(&(source.to_owned(), field.to_owned()))
+    }
+    /// Records read only for periods; the executor holds none of them.
+    pub(crate) fn period_records(&self) -> usize {
+        self.period_records
+    }
     pub(crate) fn contains(&self, id: &str) -> bool {
         self.sources.contains_key(id)
     }
@@ -2980,6 +3075,7 @@ pub fn read_batches<'a>(
         None,
         &BTreeSet::new(),
         &BTreeSet::new(),
+        &BTreeSet::new(),
     )?;
     into_batches(recipe, policy, cancel, rows)
 }
@@ -3040,6 +3136,7 @@ pub fn read_sources_observed(
         cancel,
         &BTreeSet::new(),
         &BTreeSet::new(),
+        &BTreeSet::new(),
     )
     .map(|(rows, reads, _)| (rows, reads))
 }
@@ -3056,6 +3153,7 @@ pub(crate) fn read_for_run(
     cancel: &AtomicBool,
     streamed: &BTreeSet<String>,
     spillable: &BTreeSet<String>,
+    periods_only: &BTreeSet<String>,
 ) -> Result<(
     BTreeMap<String, Vec<Row>>,
     BTreeMap<String, SourceRead>,
@@ -3070,10 +3168,12 @@ pub(crate) fn read_for_run(
         Some(&mut reads),
         streamed,
         spillable,
+        periods_only,
     )?;
     // Key records already crossed the typed-batch boundary as whole records.
     let keyed: Vec<String> = streamed
         .iter()
+        .chain(periods_only)
         .chain(streams.targets.keys())
         .cloned()
         .collect();
@@ -3385,6 +3485,7 @@ mod tests {
             &AtomicBool::new(false),
             &BTreeSet::new(),
             &BTreeSet::from(["customers".to_string()]),
+            &BTreeSet::new(),
         )
         .unwrap();
         assert!(streams.spilled("customers"));

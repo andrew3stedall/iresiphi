@@ -371,3 +371,43 @@ transactions and targets are all held. `run_bundle` took 4.7 s on x86 and
 
 GitHub reports an expiry of 2027-02-15 for these artifacts. Evidence for this
 commit does not certify later heads; their own PR checks remain authoritative.
+
+## Slice 7 phase 6: verified on both architectures
+
+[PR #46](https://github.com/andrew3stedall/iresiphi/pull/46), commit
+`f409d2de5e84d27f5a4a9dd019ad329d2252c6d6`, passed all eight jobs in
+[run 44288464632](https://github.com/andrew3stedall/iresiphi/actions/runs/44288464632)
+on 2026-11-18, including the new population and allocation cases in
+`tests/spill.rs`. This was the first build of phase 6; nothing was compiled
+locally.
+
+On the customer/month workload (the same fixture, `e723f04e…2cd2e0`), the
+350,000 transactions spilled under the default `limits.target_bytes`: they kept
+`booked_at`, `buyer_ref` and `receipt_id` and wrote 181,141,690 bytes to a
+temporary file. Results match the baseline: serialized results are unchanged at
+45,840,368 bytes, with no diagnostics, every member resolved, all 350,000
+transactions matched, sales of 71,748,250.00 and an allocated target that
+conserved 4,874,640.00 across 48 partitions. The allocation kept 96,000 entries
+of 11,884,000 bytes, counted toward `limits.retained_bytes`. The bundle wrote
+5,264,682 bytes on x86 and 5,264,683 on ARM, about 580 more than the baseline;
+`manifest.json` gains the `spilled` read record and the entry figures.
+
+Process peak RSS fell from 1,184,505,856 to 930,844,672 bytes on x86 (21%) and
+from 1,176,399,872 to 923,430,912 bytes on ARM. Members, customers and targets
+are still held; phase 7 derives members instead of storing them. `run_bundle`
+took 6.5 s on x86 and 8.6 s on ARM, against 4.7 s and 4.6 s at the baseline,
+because each batch of members reads its transactions back from the temporary
+file. Execution took 4.1 s of the x86 run, against 2.8 s.
+
+The 100,000-line workload, which has no population, is unchanged: its results
+are 52,133,436 bytes and its peak was 414,785,536 bytes on x86 and 407,048,192
+bytes on ARM.
+
+| Artifact | ID | SHA-256 digest |
+| --- | --- | --- |
+| x86-distributions | 14421616216 | `c14a4292ddc5eacfed355d0942f9b21f2811653bf3bf528496f80ded18281b99` |
+| x86-workload (including customer/month) | 14420831130 | `059ef343f9807e6438d1ef6101f1107d5ed6531186566d82044529dd46ec94c5` |
+| arm-workload (including customer/month and installed ARM wheels) | 14421195885 | `c9c5cf08e6e381f1439c4edb3d68b736bd715238960be2b1831790a42cf8f70e` |
+
+GitHub reports an expiry of 2027-02-16 for these artifacts. Evidence for this
+commit does not certify later heads; their own PR checks remain authoritative.

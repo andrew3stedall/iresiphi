@@ -177,14 +177,26 @@ or is missing from the SQLite snapshot fails the run with `SOURCE_CHANGED`. A
 source changed on disk is never seen, so unit tests in `src/adapters.rs` damage
 the run's own store to reach that check.
 
-Phases 6 and 7 are specified, not built. The developer decided on 2026-11-18
-that explicit populations and allocations should be bounded too. A
-customer/month workload (8,000 customers, 12 months, 350,000 transactions)
-lands first and records a baseline with everything held. On hosted x86 its
-peak was 1.18 GB at `12dc5a6`, from 11.5 MB of input (see the
-[baseline run](measurements/ci-x86.md#customermonth-workload-baseline-verified-on-both-architectures)). Phase 6
-runs allocation and activity coverage in member batches, so the sources those
-outputs reach can spill, and keeps only the distinct periods of a period source.
+The developer decided on 2026-11-18 that explicit populations and allocations
+should be bounded too, in phases 6 and 7. A customer/month workload (8,000
+customers, 12 months, 350,000 transactions) landed first and recorded a
+baseline with everything held. On hosted x86 its peak was 1.18 GB at
+`12dc5a6`, from 11.5 MB of input (see the
+[baseline run](measurements/ci-x86.md#customermonth-workload-baseline-verified-on-both-architectures)).
+
+Phase 6 bounds population activity. Outputs anchored at an explicit
+population read spilled sources in batches of members like any anchor, and
+allocation reads its members in the same batches before it assigns any
+partition, so the workload's 350,000 transactions can spill. Allocation keeps one entry per
+member, each allocation's summary gives the entry count and bytes, and the
+entries count toward `limits.retained_bytes`. A source read only for a
+population's periods keeps only its distinct periods. Recipients, members and
+allocation quantities are still held. Cases are in `tests/spill.rs`. On hosted
+x86 the workload's transactions spilled, its results matched the baseline, and
+its peak fell from 1.18 GB to 0.93 GB at `f409d2d`, while `run_bundle` rose
+from 4.7 s to 6.5 s (see the
+[verified run](measurements/ci-x86.md#slice-7-phase-6-verified-on-both-architectures)).
+
 Phase 7 derives members from their recipient and period instead of storing
 them, and spills a recipient source over the budget. An allocation's quantity
 source stays held, and allocation keeps one entry per member.

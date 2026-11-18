@@ -90,9 +90,9 @@ JSON validation scans borrowed document spans to locate headers and the declared
 array without decoding its records; it still reads the encoded document.
 
 The executor streams a source read only as the anchor of outputs: no
-relationship reads it as a target, and no detail output, population or
-allocation takes records from it. It keeps each record's identity and
-relationship key fields and its reference, and each output decodes the
+relationship reads it as a target, no detail output or allocation anchors at
+it, and no population or allocation takes recipients or a quantity from it. It
+keeps each record's identity and relationship key fields and its reference, and each output decodes the
 source's bytes again in batches of `limits.batch_rows`. The read record says so
 under `streamed`. See [slice 7, phase 3](spec/slice-7.md#contract-for-phase-3).
 
@@ -104,11 +104,15 @@ file that has no name in any directory, and each batch of anchor lines reads
 back the records it reaches. An output anchored at such a source, a detail
 output included, reads its own records back in the same batches. Under placement
 `prefer_source` or `require_source`, a SQLite source is queried again at its
-snapshot by rowid instead. The read record says so under `spilled`. Populations,
-allocation quantities and the sources an allocating or population output reaches
-are still held whole. See slice 7,
-[phase 4](spec/slice-7.md#contract-for-phase-4) and
-[phase 5](spec/slice-7.md#contract-for-phase-5).
+snapshot by rowid instead. The read record says so under `spilled`. Outputs
+anchored at an explicit population read spilled sources the same way, and
+allocation reads its members in the same batches. A source read only for a
+population's periods keeps only its distinct periods, and its read record
+counts them under `periods`. Population recipients and allocation quantities are
+still held whole, and so are population members. See slice 7,
+[phase 4](spec/slice-7.md#contract-for-phase-4),
+[phase 5](spec/slice-7.md#contract-for-phase-5) and
+[phase 6](spec/slice-7.md#contract-for-phase-6).
 
 ## Resource profile
 

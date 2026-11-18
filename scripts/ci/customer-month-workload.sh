@@ -39,5 +39,11 @@ assert allocated['conserved'] is True, allocated
 assert Decimal(allocated['assigned_total']) == Decimal(allocated['source_total']) == Decimal(expected['allocated_target']), allocated
 check = manifest['allocations']['customer_targets']['allocated_target']['check']
 assert check['status'] == 'passed' and check['partitions'] == expected['partitions'], check
+# Phase 6: the population's activity spills over limits.target_bytes, and
+# allocation keeps one entry per member.
+spilled = manifest['sources']['transactions'].get('spilled')
+assert spilled and spilled['records'] == int(expected['transactions']), manifest['sources']['transactions']
+summary = manifest['allocations']['customer_targets']['allocated_target']
+assert summary['entries'] == expected['members'] and summary['entry_bytes'] > 0, summary
 print(json.dumps({'peak_rss_after_delivery_bytes': report['peak_rss_after_delivery_bytes'], 'run_bundle_wall_us': report['run_bundle_wall_us']}))
 PY

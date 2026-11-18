@@ -1,6 +1,7 @@
-//! Slice 7 phases 4 and 5: relationship targets over `limits.target_bytes`,
+//! Slice 7 phases 4 to 6: relationship targets over `limits.target_bytes`,
 //! lookup targets and one-to-many details alike, hold their key records and
-//! read the records a batch of anchor lines reaches (docs/spec/slice-7.md).
+//! read the records a batch of anchor lines or population members reaches
+//! (docs/spec/slice-7.md).
 #[path = "support/customer_month.rs"]
 mod customer_month;
 #[path = "support/invoice.rs"]
@@ -734,29 +735,256 @@ fn an_anchored_lookup_target_spills_and_matches() {
     }
 }
 
-/// Sources a population or an allocation reads stay held whatever the budget:
-/// members are built and allocated outside anchor batches.
-#[test]
-fn population_and_allocation_sources_stay_held() {
+/// Everything a population run reports beyond `same_results`: allocation
+/// evidence, population reports and allocation summaries.
+fn same_population_results(report: &RunReport, expected: &RunReport) {
+    same_results(report, expected);
+    assert_eq!(report.allocation_evidence, expected.allocation_evidence);
+    for key in ["populations", "allocations"] {
+        assert_eq!(report.manifest[key], expected.manifest[key], "{key}");
+    }
+}
+
+/// The customer/month fixture with transactions that match no member, so
+/// activity coverage has unmatched samples to report.
+fn customer_month_with_strays() -> customer_month::Fixture {
     let fixture = customer_month::fixture();
+    fixture.write(
+        "transactions",
+        &format!(
+            "{}t6,D,2026-01-09,10\nt7,A,2026-03-02,30\n",
+            customer_month::TRANSACTIONS
+        ),
+    );
+    fixture
+}
+
+fn run_fixture(fixture: &customer_month::Fixture, policy: &Policy) -> RunReport {
+    ExecutionContext::default().run(
+        &fixture.recipe(),
+        &fixture.bindings,
+        policy,
+        &AtomicBool::new(false),
+    )
+}
+
+/// A population's activity spills over the budget (docs/spec/slice-7.md,
+/// phase 6): members read their transactions in batches and allocation runs
+/// in batches of members. Recipients and the allocation quantity stay held.
+#[test]
+fn population_activity_spills_and_allocation_runs_in_batches() {
+    let fixture = customer_month_with_strays();
     let held = fixture.succeeded();
+    assert!(
+        held.manifest["sources"]["transactions"]
+            .get("spilled")
+            .is_none()
+    );
+    for batch_rows in [8192, 2, 1] {
+        let mut policy = fixture.policy.clone();
+        policy.limits.target_bytes = 0;
+        policy.limits.batch_rows = batch_rows;
+        let report = run_fixture(&fixture, &policy);
+        same_population_results(&report, &held);
+        let sources = &report.manifest["sources"];
+        assert_eq!(
+            sources["transactions"]["spilled"]["kept_fields"],
+            json!(["booked_at", "buyer_ref", "receipt_id"])
+        );
+        for id in ["customers", "targets"] {
+            assert!(sources[id].get("spilled").is_none(), "{id}");
+        }
+        let activity = &report.manifest["populations"]["customer_targets"]["activity"]["sales"];
+        assert_eq!(activity["unmatched_records"], 2);
+    }
+    let destination = fixture.dir.path().join("held");
+    let held_bundle = ExecutionContext::default().run_bundle(
+        &fixture.recipe(),
+        &fixture.bindings,
+        &fixture.policy,
+        &destination,
+        &AtomicBool::new(false),
+    );
+    assert_eq!(
+        held_bundle.status, held.status,
+        "{:?}",
+        held_bundle.diagnostics
+    );
     let mut policy = fixture.policy.clone();
     policy.limits.target_bytes = 0;
     policy.limits.batch_rows = 1;
-    let report = ExecutionContext::default().run(
+    let spilled = fixture.dir.path().join("spilled");
+    let report = ExecutionContext::default().run_bundle(
         &fixture.recipe(),
         &fixture.bindings,
         &policy,
+        &spilled,
         &AtomicBool::new(false),
     );
-    same_results(&report, &held);
-    assert_eq!(report.allocation_evidence, held.allocation_evidence);
-    for id in ["customers", "transactions", "targets"] {
-        assert!(
-            report.manifest["sources"][id].get("spilled").is_none(),
-            "{id}"
+    assert_eq!(report.status, held.status, "{:?}", report.diagnostics);
+    assert_eq!(bundle_files(&spilled), bundle_files(&destination));
+}
+
+/// The customer/month fixture whose allocation weights and recipient filter
+/// read a lookup from the population: C has no weight record.
+fn weighted_customer_month() -> customer_month::Fixture {
+    let mut fixture = customer_month::fixture();
+    let path = fixture.dir.path().join("weights.csv");
+    std::fs::write(&path, "Cust,Weight,Tier\nA,2,gold\nB,5,none\n").unwrap();
+    fixture.bindings.insert(
+        "weights".into(),
+        Binding {
+            path,
+            adapter: "csv".into(),
+            settings: BTreeMap::new(),
+        },
+    );
+    fixture.doc["sources"].as_array_mut().unwrap().push(json!({
+        "id": "weights", "identity": ["Cust"], "grain": ["Cust"],
+        "projection": {"fields": {
+            "Cust": {"path": "Cust", "data_type": {"kind": "string"}},
+            "Weight": {"path": "Weight", "data_type": {"kind": "int64"}},
+            "Tier": {"path": "Tier", "data_type": {"kind": "string"}}}}}));
+    fixture.doc["relationships"].as_array_mut().unwrap().push(
+        json!({"id": "weight", "from": "customer_month", "to": "weights",
+            "from_keys": ["CustNo"], "to_keys": ["Cust"], "cardinality": "many_to_one"}),
+    );
+    let allocation = fixture.allocation();
+    allocation["weight"] = customer_month::via("weights", "Weight", &["weight"]);
+    allocation["null_weight"] = json!("zero");
+    allocation["unallocated"] = json!("report");
+    // B is excluded; C, with no weight record, is a recipient of weight zero.
+    allocation["recipient_filter"] = customer_month::or(
+        not(equal(
+            customer_month::via("weights", "Tier", &["weight"]),
+            string_literal("none"),
+        )),
+        equal(field("customer_month", "CustNo"), string_literal("C")),
+    );
+    fixture
+}
+
+/// Allocation weights and recipient filters read spilled lookups through the
+/// batch of members that reaches them (phase 6, clause 2).
+#[test]
+fn allocation_weights_read_spilled_lookups() {
+    let fixture = weighted_customer_month();
+    let held = fixture.succeeded();
+    assert!(held.manifest["sources"]["weights"].get("spilled").is_none());
+    for batch_rows in [8192, 2, 1] {
+        let mut policy = fixture.policy.clone();
+        policy.limits.target_bytes = 0;
+        policy.limits.batch_rows = batch_rows;
+        let report = run_fixture(&fixture, &policy);
+        same_population_results(&report, &held);
+        assert_eq!(
+            report.manifest["sources"]["weights"]["spilled"]["kept_fields"],
+            json!(["Cust"])
         );
     }
+}
+
+/// Each allocation's summary gives its entries and their bytes, and those
+/// entries count toward `limits.retained_bytes` (phase 6, clauses 3 and 7).
+#[test]
+fn allocation_entries_count_toward_retained_bytes() {
+    let mut fixture = customer_month::fixture();
+    let summary =
+        fixture.succeeded().manifest["allocations"]["customer_targets"]["allocated_target"].clone();
+    assert_eq!(summary["entries"], 6);
+    let entry_bytes = summary["entry_bytes"].as_u64().unwrap() as usize;
+    assert!(entry_bytes > 0);
+
+    let allocation_subject = "output:customer_targets/allocation:allocated_target";
+    let mut bundles = 0;
+    let mut run = |fixture: &customer_month::Fixture| {
+        bundles += 1;
+        ExecutionContext::default().run_bundle(
+            &fixture.recipe(),
+            &fixture.bindings,
+            &fixture.policy,
+            &fixture.dir.path().join(format!("bundle-{bundles}")),
+            &AtomicBool::new(false),
+        )
+    };
+    // The smallest budget that holds every source record and member.
+    let mut limited_before_allocation = |fixture: &customer_month::Fixture| {
+        let report = run(fixture);
+        report.status == "failed"
+            && report.diagnostics[0].subject.as_deref() != Some(allocation_subject)
+    };
+    let (mut low, mut high) = (1usize, 1 << 20);
+    while high - low > 1 {
+        let middle = low + (high - low) / 2;
+        fixture.policy.limits.retained_bytes = middle;
+        if limited_before_allocation(&fixture) {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    fixture.policy.limits.retained_bytes = high;
+    let report = run(&fixture);
+    assert_eq!(report.status, "failed");
+    let error = &report.diagnostics[0];
+    assert_eq!(error.code, "RESOURCE_LIMIT");
+    assert_eq!(error.subject.as_deref(), Some(allocation_subject));
+    assert!(
+        error.message.contains("limits.retained_bytes"),
+        "{}",
+        error.message
+    );
+    fixture.policy.limits.retained_bytes = high + entry_bytes;
+    let report = run(&fixture);
+    assert_eq!(report.status, "succeeded", "{:?}", report.diagnostics);
+}
+
+/// A source read only for a population's periods keeps only its distinct
+/// periods, and its read record says how many it gave (phase 6, clause 5).
+#[test]
+fn a_source_read_only_for_periods_keeps_its_periods() {
+    let mut fixture = customer_month::sales_fixture();
+    fixture.doc["populations"][0]["period"] = json!({"field": "month", "calendar": "month", "from": {"source": "targets", "field": "Period"}});
+    let report = fixture.succeeded();
+    let read = &report.manifest["sources"]["targets"];
+    assert_eq!(read["periods"]["distinct"], json!({"Period": 2}), "{read}");
+    assert_eq!(read["rows"], 4);
+    for key in ["streamed", "spilled"] {
+        assert!(read.get(key).is_none(), "{key}");
+    }
+    assert_eq!(
+        report.manifest["populations"]["customer_sales"]["periods"],
+        json!(["2026-01", "2026-02"])
+    );
+
+    // A period source that an output also anchors at is streamed and keeps
+    // its period field.
+    fixture.doc["outputs"].as_array_mut().unwrap().push(json!({
+        "id": "target_list", "anchor": "targets",
+        "columns": [named("Territory", field("targets", "Territory"))]}));
+    let report = fixture.succeeded();
+    let read = &report.manifest["sources"]["targets"];
+    assert!(read.get("periods").is_none(), "{read}");
+    assert_eq!(
+        read["streamed"]["kept_fields"],
+        json!(["Period", "Territory"])
+    );
+    assert_eq!(
+        report.manifest["populations"]["customer_sales"]["periods"],
+        json!(["2026-01", "2026-02"])
+    );
+
+    // A value that is not a calendar month still fails the run.
+    fixture.write(
+        "targets",
+        &format!("{}East,2026-1,5\n", customer_month::TARGETS),
+    );
+    let report = fixture.run();
+    assert_eq!(report.status, "failed");
+    let error = &report.diagnostics[0];
+    assert_eq!(error.code, "INVALID_PERIOD");
+    assert_eq!(error.affected_count, Some(1));
+    assert_eq!(error.samples.len(), 1);
 }
 
 /// Row limits apply to a spilled detail as to a held one: seven components
