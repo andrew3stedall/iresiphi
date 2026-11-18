@@ -269,9 +269,7 @@ fn streamed_anchors(recipe: &Recipe) -> std::collections::BTreeSet<String> {
                     .filter(|o| o.anchor == *id)
                     .all(|o| !o.detail && o.allocations.is_empty())
                 && !recipe.relationships.iter().any(|r| r.to == *id)
-                && !recipe.populations.iter().any(|p| {
-                    p.recipients == *id || p.period.from.as_ref().is_some_and(|f| f.source == *id)
-                })
+                && !recipe.populations.iter().any(|p| p.recipients == *id)
                 && !recipe
                     .outputs
                     .iter()
@@ -283,46 +281,51 @@ fn streamed_anchors(recipe: &Recipe) -> std::collections::BTreeSet<String> {
 }
 
 /// Relationship targets that may be spilled when they exceed
-/// `limits.target_bytes` (docs/spec/slice-7.md, phases 4 and 5): to-one lookup
+/// `limits.target_bytes` (docs/spec/slice-7.md, phases 4 to 6): to-one lookup
 /// targets and one-to-many details. Every output reads such a source only
-/// within a batch of its anchor lines, including an output anchored at it. A
-/// population's recipients or periods and an allocation quantity are held, and
-/// so is a source that an output allocating or anchored at a population
-/// anchors at or reaches, since those read records outside an anchor batch.
+/// within a batch of its anchor lines, including an output anchored at it,
+/// and an allocation only within a batch of population members. A
+/// population's recipients and an allocation quantity are held.
 fn spillable_targets(recipe: &Recipe) -> std::collections::BTreeSet<String> {
-    let reachable = |anchor: &str| {
-        let mut seen = std::collections::BTreeSet::from([anchor.to_owned()]);
-        let mut next = vec![anchor.to_owned()];
-        while let Some(source) = next.pop() {
-            for rel in recipe.relationships.iter().filter(|r| r.from == source) {
-                if seen.insert(rel.to.clone()) {
-                    next.push(rel.to.clone());
-                }
-            }
-        }
-        seen
-    };
-    let unbatched: std::collections::BTreeSet<String> = recipe
-        .outputs
-        .iter()
-        .filter(|o| !o.allocations.is_empty() || crate::validation::population_output(recipe, o))
-        .flat_map(|o| reachable(&o.anchor))
-        .collect();
     recipe
         .sources
         .iter()
         .map(|s| s.id.as_str())
         .filter(|id| {
             recipe.relationships.iter().any(|r| r.to == *id)
-                && !recipe.populations.iter().any(|p| {
-                    p.recipients == *id || p.period.from.as_ref().is_some_and(|f| f.source == *id)
-                })
+                && !recipe.populations.iter().any(|p| p.recipients == *id)
                 && !recipe
                     .outputs
                     .iter()
                     .flat_map(|o| &o.allocations)
                     .any(|a| a.quantity.source == *id)
-                && !unbatched.contains(*id)
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Sources read only for a population's periods (docs/spec/slice-7.md,
+/// phase 6): no output anchors at them, no relationship starts or ends at
+/// them, and no population or allocation takes recipients or a quantity from
+/// them. Their first read takes the distinct periods and keeps nothing else.
+fn period_sources(recipe: &Recipe) -> std::collections::BTreeSet<String> {
+    recipe
+        .populations
+        .iter()
+        .filter_map(|p| p.period.from.as_ref())
+        .map(|from| from.source.as_str())
+        .filter(|id| {
+            !recipe.outputs.iter().any(|o| o.anchor == *id)
+                && !recipe
+                    .relationships
+                    .iter()
+                    .any(|r| r.from == *id || r.to == *id)
+                && !recipe.populations.iter().any(|p| p.recipients == *id)
+                && !recipe
+                    .outputs
+                    .iter()
+                    .flat_map(|o| &o.allocations)
+                    .any(|a| a.quantity.source == *id)
         })
         .map(str::to_owned)
         .collect()
@@ -331,7 +334,6 @@ fn spillable_targets(recipe: &Recipe) -> std::collections::BTreeSet<String> {
 /// Records of spilled sources that one batch of anchor lines reads, by source
 /// and position.
 type Fetched = BTreeMap<String, BTreeMap<usize, Row>>;
-static NOTHING_FETCHED: Fetched = BTreeMap::new();
 
 /// Read the records of spilled sources that anchor lines `lines` of `anchor`
 /// read (docs/spec/slice-7.md, phases 4 and 5): the lines' own records when
@@ -402,13 +404,6 @@ struct View<'a> {
     fetched: &'a Fetched,
 }
 impl<'a> View<'a> {
-    fn held(held: &'a BTreeMap<String, Vec<Row>>) -> Self {
-        Self {
-            held,
-            batch: None,
-            fetched: &NOTHING_FETCHED,
-        }
-    }
     fn row(&self, source: &str, index: usize) -> &'a Row {
         let held = self.held;
         match self.batch {
@@ -666,6 +661,7 @@ fn execute(
         cancel,
         &streamed_anchors(declared),
         &spillable,
+        &period_sources(declared),
     )?;
     for read in reads.values() {
         for (phase, us) in [
@@ -678,7 +674,7 @@ fn execute(
     }
     progress.reads = reads;
     let validating = Instant::now();
-    let rows_read: usize = sources.values().map(Vec::len).sum();
+    let rows_read: usize = sources.values().map(Vec::len).sum::<usize>() + streams.period_records();
     // Checks over anchor records cover what was scanned; say so when a source
     // evaluated an eligibility predicate and kept the other records.
     let pushed_sources = progress
@@ -751,7 +747,9 @@ fn execute(
     );
     progress.time("data_validation", validating);
     progress.timings.insert("read", phase.elapsed().as_millis());
-    let population_info = materialize_populations(recipe, &mut sources, policy, cancel, progress)?;
+    // Source and member bytes retained so far; allocation entries count on top.
+    let (population_info, population_retained) =
+        materialize_populations(recipe, &mut sources, &streams, policy, cancel, progress)?;
     let phase = Instant::now();
     let validating = Instant::now();
     let mut validated = 0;
@@ -1182,10 +1180,22 @@ fn execute(
         // Allocation runs over every member before any row is selected, so the
         // output filter never changes a denominator.
         let mut allocations = vec![];
+        // Every allocation of this output keeps its entries until its lines
+        // are produced; they count toward limits.retained_bytes (phase 6).
+        let mut retained = population_retained;
         for a in &output.allocations {
             check(cancel)?;
-            let (members, weight_reasons) =
-                allocation_members(recipe, &sources, &matches, &outcomes, output, a, cancel)?;
+            let (members, weight_reasons, entry_bytes) = allocation_members(
+                recipe,
+                &sources,
+                &matches,
+                &outcomes,
+                &streams,
+                (output, a),
+                policy,
+                &mut retained,
+                cancel,
+            )?;
             let mut outcome = crate::allocation::allocate(
                 output,
                 a,
@@ -1194,6 +1204,8 @@ fn execute(
                 policy,
                 cancel,
             )?;
+            outcome.summary["entries"] = members.len().into();
+            outcome.summary["entry_bytes"] = entry_bytes.into();
             diagnostics.append(&mut outcome.warnings);
             for partition in std::mem::take(&mut outcome.partitions) {
                 results.record(Record::Allocation, partition)?;
@@ -2786,10 +2798,11 @@ fn check_partitions(recipe: &Recipe, sources: &BTreeMap<String, Vec<Row>>) -> Re
 fn materialize_populations(
     recipe: &Recipe,
     sources: &mut BTreeMap<String, Vec<Row>>,
+    streams: &crate::adapters::Streams,
     policy: &Policy,
     cancel: &RunControl<'_>,
     progress: &mut Progress,
-) -> Result<BTreeMap<String, serde_json::Value>> {
+) -> Result<(BTreeMap<String, serde_json::Value>, usize)> {
     let mut info = BTreeMap::new();
     let mut total = 0usize;
     // Members are retained like source records, so they continue the sources'
@@ -2841,25 +2854,21 @@ fn materialize_populations(
         let (periods, period_source) = match (&p.period.values, &p.period.from) {
             (Some(values), _) => (values.clone(), "listed".to_string()),
             (_, Some(from)) => {
-                let mut distinct = std::collections::BTreeSet::new();
-                let mut invalid = vec![];
-                for row in &sources[&from.source] {
-                    match row.fields.get(&from.field) {
-                        Some(Value::String { value })
-                            if crate::validation::calendar_month(value) =>
-                        {
-                            distinct.insert(value.clone());
-                        }
-                        _ => invalid.push(&row.reference),
-                    }
-                }
-                if !invalid.is_empty() {
+                // The source's first read took its periods (phase 6).
+                let found = streams.periods(&from.source, &from.field).ok_or_else(|| {
+                    Error::new(
+                        "INVALID_POPULATION",
+                        "execution",
+                        format!("source {} was not read for periods", from.source),
+                    )
+                })?;
+                if found.invalid > 0 {
                     return Err(Error::new(
                         "INVALID_PERIOD",
                         "data",
                         format!(
                             "{} {} records hold a {} that is not a calendar month YYYY-MM; the period set of population {} is never guessed",
-                            invalid.len(),
+                            found.invalid,
                             from.source,
                             from.field,
                             p.id
@@ -2867,10 +2876,10 @@ fn materialize_populations(
                     )
                     .with_subject(format!("source:{}", from.source))
                     .with_check("population.periods")
-                    .with_affected(invalid.len(), invalid));
+                    .with_affected(found.invalid, &found.samples));
                 }
                 (
-                    distinct.into_iter().collect::<Vec<_>>(),
+                    found.distinct.iter().cloned().collect::<Vec<_>>(),
                     format!("source:{}/field:{}", from.source, from.field),
                 )
             }
@@ -2986,7 +2995,7 @@ fn materialize_populations(
             ),
         );
     }
-    Ok(info)
+    Ok((info, retained))
 }
 
 /// Value of `source.field` reached from anchor record `row` along the named
@@ -3033,18 +3042,23 @@ fn resolve_path(
 /// Every member of `output`'s population as allocation `a` sees it: recipient
 /// filter result, weight, partition and currency. Also returns, per member, the
 /// lookups its weight read that did not resolve; they become part of a
-/// recipient's row status.
+/// recipient's row status. Members are read in batches of `limits.batch_rows`,
+/// each first reading the spilled records it reaches (docs/spec/slice-7.md,
+/// phase 6). Each entry's serialized bytes are added to `retained` and
+/// returned in total.
+#[allow(clippy::too_many_arguments)]
 fn allocation_members<'a>(
     recipe: &Recipe,
     sources: &'a BTreeMap<String, Vec<Row>>,
     matches: &Matches,
     outcomes: &Outcomes,
-    output: &Output,
-    a: &Allocation,
+    streams: &crate::adapters::Streams,
+    (output, a): (&Output, &Allocation),
+    policy: &Policy,
+    retained: &mut usize,
     cancel: &AtomicBool,
-) -> Result<(Vec<crate::allocation::Member<'a>>, Vec<Vec<Outcome>>)> {
+) -> Result<(Vec<crate::allocation::Member<'a>>, Vec<Vec<Outcome>>, usize)> {
     let rows = &sources[&output.anchor];
-    let view = View::held(sources);
     let identity = recipe
         .sources
         .iter()
@@ -3058,67 +3072,147 @@ fn allocation_members<'a>(
         .is_some_and(|s| s.projection.fields.contains_key("currency"));
     let mut members = Vec::with_capacity(rows.len());
     let mut weight_reasons = Vec::with_capacity(rows.len());
-    for (index, row) in rows.iter().enumerate() {
-        if index % 1024 == 0 {
-            check(cancel)?;
-        }
-        let evaluate = |expr: &Expr, reasons: &mut Vec<Outcome>| -> Result<Value> {
-            let prepared = prepare(
-                expr,
+    let mut entry_bytes = 0usize;
+    let size = policy.limits.batch_rows.max(1);
+    let mut first = 0;
+    while first < rows.len() {
+        let end = rows.len().min(first + size);
+        let fetched = fetch_spilled(
+            recipe,
+            sources,
+            matches,
+            streams,
+            &output.anchor,
+            first..end,
+            cancel,
+        )?;
+        let view = View {
+            held: sources,
+            batch: None,
+            fetched: &fetched,
+        };
+        for (index, row) in rows.iter().enumerate().take(end).skip(first) {
+            if index % 1024 == 0 {
+                check(cancel)?;
+            }
+            let (member, reasons) = allocation_member(
                 recipe,
                 &view,
                 matches,
-                &output.anchor,
-                index,
-                &output.complete,
+                outcomes,
+                (output, a),
+                (index, row),
+                (identity.as_slice(), currency),
             )?;
-            crate::eval::eval(&prepared, recipe, &mut |s: &str, f: &str, p: &[String]| {
-                resolve_path(
-                    recipe,
-                    &view,
-                    matches,
-                    outcomes,
-                    (&output.anchor, index),
-                    reasons,
-                    (s, f, p),
+            let bytes = entry_size(&member, &reasons)?;
+            entry_bytes = entry_bytes.saturating_add(bytes);
+            *retained = retained.saturating_add(bytes);
+            if *retained > policy.limits.retained_bytes {
+                return Err(Error::new(
+                    "RESOURCE_LIMIT",
+                    "execution",
+                    format!(
+                        "entries of allocation {} bring retained source, member and allocation bytes to {}, more than limits.retained_bytes ({}); {} entries were created",
+                        a.name,
+                        *retained,
+                        policy.limits.retained_bytes,
+                        members.len()
+                    ),
                 )
-            })
-        };
-        // Recipient filter: before normalization; false and unknown exclude.
-        let recipient = match &a.recipient_filter {
-            None => true,
-            Some(filter) => evaluate(filter, &mut vec![])? == (Value::Boolean { value: true }),
-        };
-        let mut reasons = vec![];
-        let weight = if recipient {
-            evaluate(&a.weight, &mut reasons)?
-        } else {
-            Value::Null
-        };
-        reasons.retain(|o| o.status != "matched");
-        let outcome = &outcomes[&a.via][index];
-        let partition = (outcome.status == "matched" && matches[&a.via][index].len() == 1)
-            .then(|| matches[&a.via][index][0]);
-        members.push(crate::allocation::Member {
-            reference: &row.reference,
-            identity: identity
-                .iter()
-                .map(|k| row.fields.get(k).cloned().unwrap_or(Value::Null))
-                .collect(),
-            recipient,
-            weight,
-            partition,
-            via: partition.is_none().then(|| {
-                outcome
-                    .reason
-                    .clone()
-                    .unwrap_or_else(|| format!("{} {}", a.via, outcome.status))
-            }),
-            currency: currency.then(|| row.fields.get("currency").cloned().unwrap_or(Value::Null)),
-        });
-        weight_reasons.push(if recipient { reasons } else { vec![] });
+                .with_subject(format!("output:{}/allocation:{}", output.id, a.name))
+                .with_check("budget"));
+            }
+            members.push(member);
+            weight_reasons.push(reasons);
+        }
+        first = end;
     }
-    Ok((members, weight_reasons))
+    Ok((members, weight_reasons, entry_bytes))
+}
+
+/// The serialized bytes of one allocation entry: what allocation keeps of a
+/// member until every partition is assigned (docs/spec/slice-7.md, phase 6).
+fn entry_size(member: &crate::allocation::Member<'_>, reasons: &[Outcome]) -> Result<usize> {
+    let reasons: Vec<(&str, &Option<String>)> =
+        reasons.iter().map(|o| (o.status, &o.reason)).collect();
+    crate::admission::serialized_size(&(
+        &member.identity,
+        member.recipient,
+        &member.weight,
+        member.partition,
+        &member.via,
+        &member.currency,
+        reasons,
+    ))
+    .map_err(engine_error)
+}
+
+/// One member as allocation `a` sees it, and the lookups its weight read that
+/// did not resolve.
+fn allocation_member<'a>(
+    recipe: &Recipe,
+    view: &View<'_>,
+    matches: &Matches,
+    outcomes: &Outcomes,
+    (output, a): (&Output, &Allocation),
+    (index, row): (usize, &'a Row),
+    (identity, currency): (&[String], bool),
+) -> Result<(crate::allocation::Member<'a>, Vec<Outcome>)> {
+    let evaluate = |expr: &Expr, reasons: &mut Vec<Outcome>| -> Result<Value> {
+        let prepared = prepare(
+            expr,
+            recipe,
+            view,
+            matches,
+            &output.anchor,
+            index,
+            &output.complete,
+        )?;
+        crate::eval::eval(&prepared, recipe, &mut |s: &str, f: &str, p: &[String]| {
+            resolve_path(
+                recipe,
+                view,
+                matches,
+                outcomes,
+                (&output.anchor, index),
+                reasons,
+                (s, f, p),
+            )
+        })
+    };
+    // Recipient filter: before normalization; false and unknown exclude.
+    let recipient = match &a.recipient_filter {
+        None => true,
+        Some(filter) => evaluate(filter, &mut vec![])? == (Value::Boolean { value: true }),
+    };
+    let mut reasons = vec![];
+    let weight = if recipient {
+        evaluate(&a.weight, &mut reasons)?
+    } else {
+        Value::Null
+    };
+    reasons.retain(|o| o.status != "matched");
+    let outcome = &outcomes[&a.via][index];
+    let partition = (outcome.status == "matched" && matches[&a.via][index].len() == 1)
+        .then(|| matches[&a.via][index][0]);
+    let member = crate::allocation::Member {
+        reference: &row.reference,
+        identity: identity
+            .iter()
+            .map(|k| row.fields.get(k).cloned().unwrap_or(Value::Null))
+            .collect(),
+        recipient,
+        weight,
+        partition,
+        via: partition.is_none().then(|| {
+            outcome
+                .reason
+                .clone()
+                .unwrap_or_else(|| format!("{} {}", a.via, outcome.status))
+        }),
+        currency: currency.then(|| row.fields.get("currency").cloned().unwrap_or(Value::Null)),
+    };
+    Ok((member, if recipient { reasons } else { vec![] }))
 }
 
 /// Coverage of each activity relationship of a population output: matched and

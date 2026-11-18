@@ -95,6 +95,8 @@
             "status": "passed"
           },
           "conserved": true,
+          "entries": 6,
+          "entry_bytes": 708,
           "missing_quantity_recipients": 0,
           "null_weight": "error",
           "partition": [
@@ -818,6 +820,8 @@
               "status": "passed"
             },
             "conserved": true,
+            "entries": 6,
+            "entry_bytes": 764,
             "missing_quantity_recipients": 1,
             "null_weight": "error",
             "partition": [
@@ -1549,6 +1553,8 @@
               "status": "passed"
             },
             "conserved": true,
+            "entries": 6,
+            "entry_bytes": 684,
             "missing_quantity_recipients": 0,
             "null_weight": "error",
             "partition": [
@@ -2280,6 +2286,8 @@
               "status": "passed"
             },
             "conserved": true,
+            "entries": 6,
+            "entry_bytes": 708,
             "missing_quantity_recipients": 0,
             "null_weight": "error",
             "partition": [
