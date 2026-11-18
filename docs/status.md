@@ -184,10 +184,10 @@ baseline with everything held. On hosted x86 its peak was 1.18 GB at
 `12dc5a6`, from 11.5 MB of input (see the
 [baseline run](measurements/ci-x86.md#customermonth-workload-baseline-verified-on-both-architectures)).
 
-Phase 6 bounds population activity. Outputs anchored at a population read
-spilled sources in batches of members like any anchor, and allocation reads
-its members in the same batches before it assigns any partition, so the
-workload's 350,000 transactions can spill. Allocation keeps one entry per
+Phase 6 bounds population activity. Outputs anchored at an explicit
+population read spilled sources in batches of members like any anchor, and
+allocation reads its members in the same batches before it assigns any
+partition, so the workload's 350,000 transactions can spill. Allocation keeps one entry per
 member, each allocation's summary gives the entry count and bytes, and the
 entries count toward `limits.retained_bytes`. A source read only for a
 population's periods keeps only its distinct periods. Recipients, members and

@@ -2855,13 +2855,9 @@ fn materialize_populations(
             (Some(values), _) => (values.clone(), "listed".to_string()),
             (_, Some(from)) => {
                 // The source's first read took its periods (phase 6).
-                let found = streams.periods(&from.source, &from.field).ok_or_else(|| {
-                    Error::new(
-                        "INVALID_POPULATION",
-                        "execution",
-                        format!("source {} was not read for periods", from.source),
-                    )
-                })?;
+                let found = streams
+                    .periods(&from.source, &from.field)
+                    .expect("every period source's first read took its periods");
                 if found.invalid > 0 {
                     return Err(Error::new(
                         "INVALID_PERIOD",
@@ -3046,7 +3042,6 @@ fn resolve_path(
 /// each first reading the spilled records it reaches (docs/spec/slice-7.md,
 /// phase 6). Each entry's serialized bytes are added to `retained` and
 /// returned in total.
-#[allow(clippy::too_many_arguments)]
 fn allocation_members<'a>(
     recipe: &Recipe,
     sources: &'a BTreeMap<String, Vec<Row>>,

@@ -607,7 +607,7 @@ fn materialize_sources(
         for field in period_fields(recipe, &source.id) {
             periods
                 .entry((source.id.clone(), field.clone()))
-                .or_insert_with(|| Periods::take(&rows, field));
+                .or_insert_with(|| Periods::from_rows(&rows, field));
         }
         if let Some(reads) = reads.as_deref_mut() {
             reads.insert(
@@ -1010,7 +1010,7 @@ pub(crate) struct Periods {
     pub(crate) samples: Vec<SourceReference>,
 }
 impl Periods {
-    fn take(rows: &[Row], field: &str) -> Self {
+    fn from_rows(rows: &[Row], field: &str) -> Self {
         let mut periods = Self::default();
         for row in rows {
             match row.fields.get(field) {
@@ -1409,10 +1409,12 @@ struct Deferred {
     rows: usize,
 }
 
-/// Streamed anchors of one run (docs/spec/slice-7.md, phase 3). The executor
-/// holds their key records only; each output anchored at one reads its records
-/// again from here, in batches. Every read decodes the same bytes, so every
-/// read sees the records the first read checked.
+/// What a run's first read leaves for later reads (docs/spec/slice-7.md):
+/// streamed anchors (phase 3), whose key records the executor holds and whose
+/// records each output reads again from here in batches; spilled relationship
+/// targets (phases 4 and 5); and the period sets of population period sources
+/// (phase 6). Every read decodes the same bytes, so every read sees the
+/// records the first read checked.
 #[derive(Default)]
 pub(crate) struct Streams {
     sources: BTreeMap<String, Deferred>,

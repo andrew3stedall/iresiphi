@@ -91,8 +91,8 @@ array without decoding its records; it still reads the encoded document.
 
 The executor streams a source read only as the anchor of outputs: no
 relationship reads it as a target, no detail output or allocation anchors at
-it, and no population or allocation takes recipients or a quantity from it. It keeps each record's identity and
-relationship key fields and its reference, and each output decodes the
+it, and no population or allocation takes recipients or a quantity from it. It
+keeps each record's identity and relationship key fields and its reference, and each output decodes the
 source's bytes again in batches of `limits.batch_rows`. The read record says so
 under `streamed`. See [slice 7, phase 3](spec/slice-7.md#contract-for-phase-3).
 
